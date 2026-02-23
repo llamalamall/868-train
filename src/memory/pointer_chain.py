@@ -1,0 +1,1 @@
+"""Pointer-chain resolution placeholders."""

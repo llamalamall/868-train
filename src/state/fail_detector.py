@@ -1,0 +1,1 @@
+"""Fail-state detection placeholders."""
