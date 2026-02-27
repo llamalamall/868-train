@@ -1,1 +1,1 @@
-"""Package module."""
+"""Configuration package."""
