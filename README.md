@@ -25,6 +25,15 @@ mypy src
 pytest -q
 ```
 
+## Control Smoke Test
+
+Task 04 adds a deterministic action API in `src/controller/action_api.py` and low-level key
+input retries in `src/controller/input_driver.py`.
+
+- Action methods: `move_up`, `move_down`, `move_left`, `move_right`, `confirm`, `cancel`, `wait`
+- Fixed smoke sequence helper: `run_smoke_test_sequence(action_api)`
+- Tunables: `ActionConfig` + `ActionTimings` (key map, press duration, inter-action delay, retries)
+
 ## Binary Fingerprinting
 
 The app validates the game binary hash at startup using `src/config/binary_fingerprint.json`.
