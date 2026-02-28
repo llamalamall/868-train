@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import logging
 import os
 import time
@@ -43,10 +44,37 @@ class KEYBDINPUT(ctypes.Structure):
     ]
 
 
+class MOUSEINPUT(ctypes.Structure):
+    """ctypes mapping for MOUSEINPUT."""
+
+    _fields_ = [
+        ("dx", ctypes.c_long),
+        ("dy", ctypes.c_long),
+        ("mouseData", ctypes.c_ulong),
+        ("dwFlags", ctypes.c_ulong),
+        ("time", ctypes.c_ulong),
+        ("dwExtraInfo", ULONG_PTR),
+    ]
+
+
+class HARDWAREINPUT(ctypes.Structure):
+    """ctypes mapping for HARDWAREINPUT."""
+
+    _fields_ = [
+        ("uMsg", ctypes.c_ulong),
+        ("wParamL", ctypes.c_ushort),
+        ("wParamH", ctypes.c_ushort),
+    ]
+
+
 class INPUT_UNION(ctypes.Union):
     """ctypes mapping for INPUT union."""
 
-    _fields_ = [("ki", KEYBDINPUT)]
+    _fields_ = [
+        ("mi", MOUSEINPUT),
+        ("ki", KEYBDINPUT),
+        ("hi", HARDWAREINPUT),
+    ]
 
 
 class INPUT(ctypes.Structure):
@@ -62,6 +90,8 @@ class WindowsKeyboardBackend:
         if os.name != "nt":
             raise InputDriverError("WindowsKeyboardBackend is only supported on Windows.")
         self._user32 = ctypes.windll.user32
+        self._user32.SendInput.argtypes = (ctypes.c_uint, ctypes.POINTER(INPUT), ctypes.c_int)
+        self._user32.SendInput.restype = ctypes.c_uint
 
     def _send_input(self, key_code: int, key_up: bool) -> bool:
         event_flags = KEYEVENTF_KEYUP if key_up else 0
@@ -73,7 +103,16 @@ class WindowsKeyboardBackend:
             dwExtraInfo=0,
         )
         input_event = INPUT(type=1, union=INPUT_UNION(ki=key_input))
+        ctypes.set_last_error(0)
         sent = self._user32.SendInput(1, ctypes.byref(input_event), ctypes.sizeof(INPUT))
+        if sent != 1:
+            assert LOGGER is not None
+            LOGGER.warning(
+                "SendInput failed key_code=%s key_up=%s error=%s",
+                key_code,
+                key_up,
+                ctypes.GetLastError(),
+            )
         return bool(sent == 1)
 
     def tap_virtual_key(self, key_code: int, press_duration_seconds: float) -> bool:
