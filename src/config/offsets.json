@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "name": "fail_state",
+      "data_type": "bool",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x00000000", "0x00000010", "0x00000040"],
+      "read_offset": "0x0",
+      "confidence": "low",
+      "notes": "Placeholder chain. Replace with verified fail-state location from Ghidra."
+    },
+    {
+      "name": "player_health",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x00000000", "0x00000010", "0x00000048"],
+      "read_offset": "0x0",
+      "confidence": "low",
+      "notes": "Placeholder chain. Track damage/heal deltas while validating."
+    },
+    {
+      "name": "player_energy",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x00000000", "0x00000010", "0x0000004c"],
+      "read_offset": "0x0",
+      "confidence": "low",
+      "notes": "Placeholder chain. Confirm value changes after each action."
+    },
+    {
+      "name": "player_currency",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x00000000", "0x00000010", "0x00000058"],
+      "read_offset": "0x0",
+      "confidence": "low",
+      "notes": "Placeholder chain. Verify against known in-game currency events."
+    },
+    {
+      "name": "collected_progs",
+      "data_type": "array<int32>",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x00000000", "0x00000018", "0x00000020"],
+      "read_offset": "0x0",
+      "confidence": "low",
+      "notes": "Placeholder chain. Replace with validated inventory/program container offsets."
+    }
+  ]
+}
