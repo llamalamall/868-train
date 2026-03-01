@@ -7,6 +7,7 @@ Requires-Python: >=3.10
 Description-Content-Type: text/markdown
 Requires-Dist: pydantic>=2.0
 Requires-Dist: typing-extensions>=4.0
+Requires-Dist: textual>=0.78
 Provides-Extra: dev
 Requires-Dist: pytest>=8.0; extra == "dev"
 Requires-Dist: ruff>=0.6; extra == "dev"
@@ -39,6 +40,15 @@ mypy src
 pytest -q
 ```
 
+## Control Smoke Test
+
+Task 04 adds a deterministic action API in `src/controller/action_api.py` and low-level key
+input retries in `src/controller/input_driver.py`.
+
+- Action methods: `move_up`, `move_down`, `move_left`, `move_right`, `confirm`, `cancel`, `wait`
+- Fixed smoke sequence helper: `run_smoke_test_sequence(action_api)`
+- Tunables: `ActionConfig` + `ActionTimings` (key map, press duration, inter-action delay, retries)
+
 ## Binary Fingerprinting
 
 The app validates the game binary hash at startup using `src/config/binary_fingerprint.json`.
@@ -55,6 +65,45 @@ python -m src.config.fingerprint --print-sha256 "C:\path\to\868-hack.exe"
 
 The app exits on hash mismatch with an actionable error. To intentionally bypass the check,
 set `enabled` to `false` explicitly.
+
+## Offsets Registry
+
+Offsets discovered from Ghidra are tracked in `src/config/offsets.json`.
+Startup validates schema and fails fast when required fields are missing or malformed.
+
+Each entry requires:
+- `name`
+- `data_type`
+- `base` (`kind` + `value`)
+- `pointer_chain`
+- `confidence` (`low`, `medium`, `high`)
+- `notes`
+
+Use `notes/ghidra_findings.md` as the worksheet before updating offsets.
+
+## Memory Monitor (Interactive TUI)
+
+Use the interactive monitor to watch all configured offset fields live:
+
+```powershell
+python -m src.memory.state_monitor_tui
+```
+
+Common options:
+
+```powershell
+# Monitor selected fields only
+python -m src.memory.state_monitor_tui --fields player_energy,player_credits
+
+# Faster polling + re-resolve pointer chains every tick
+python -m src.memory.state_monitor_tui --interval 0.25 --resolve-each-poll
+```
+
+TUI controls:
+- `q`: quit
+- `space`: pause/resume polling
+- `r`: refresh immediately
+- `p`: toggle pointer mode (`cached-addresses` vs `resolve-each-poll`)
 
 ## Project Structure
 
