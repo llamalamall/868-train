@@ -48,6 +48,17 @@ class ActionConfig:
             "RIGHT": 0x27,
             "ENTER": 0x0D,
             "ESCAPE": 0x1B,
+            "SPACE": 0x20,
+            "0": 0x30,
+            "1": 0x31,
+            "2": 0x32,
+            "3": 0x33,
+            "4": 0x34,
+            "5": 0x35,
+            "6": 0x36,
+            "7": 0x37,
+            "8": 0x38,
+            "9": 0x39,
         }
     )
     timings: ActionTimings = field(default_factory=ActionTimings)
@@ -89,18 +100,107 @@ class ActionAPI:
         if key_name is None:
             raise ActionExecutionError(f"Unknown action '{action_name}'.")
 
+        key_code = self._resolve_key_code(key_name=key_name, source=action_name)
+        self._tap_key(action_label=action_name, key_code=key_code, verification_hook=verification_hook)
+
+    def send_key_name(
+        self,
+        key_name: str,
+        *,
+        verification_hook: ActionVerificationHook | None = None,
+    ) -> None:
+        """Tap a configured key name directly (without requiring an action binding)."""
+        normalized_name = key_name.strip().upper()
+        if not normalized_name:
+            raise ActionExecutionError("Key name cannot be empty.")
+
+        key_code = self._resolve_key_code(key_name=normalized_name, source=f"key:{normalized_name}")
+        self._tap_key(
+            action_label=f"key:{normalized_name}",
+            key_code=key_code,
+            verification_hook=verification_hook,
+        )
+
+    def send_key_name_to_window(
+        self,
+        key_name: str,
+        *,
+        hwnd: int,
+        verification_hook: ActionVerificationHook | None = None,
+    ) -> None:
+        """Tap a configured key name directly into a specific window."""
+        normalized_name = key_name.strip().upper()
+        if not normalized_name:
+            raise ActionExecutionError("Key name cannot be empty.")
+        if hwnd <= 0:
+            raise ActionExecutionError("Window handle must be > 0.")
+
+        key_code = self._resolve_key_code(key_name=normalized_name, source=f"window_key:{normalized_name}")
+        self._tap_key_to_window(
+            action_label=f"window_key:{normalized_name}",
+            key_code=key_code,
+            hwnd=hwnd,
+            verification_hook=verification_hook,
+        )
+
+    def _resolve_key_code(self, *, key_name: str, source: str) -> int:
         key_code = self.config.key_codes.get(key_name)
         if key_code is None:
             raise ActionExecutionError(
-                f"No virtual-key code configured for key '{key_name}' used by action '{action_name}'."
+                f"No virtual-key code configured for key '{key_name}' used by '{source}'."
             )
+        return key_code
+
+    def _tap_key(
+        self,
+        *,
+        action_label: str,
+        key_code: int,
+        verification_hook: ActionVerificationHook | None,
+    ) -> None:
+        assert self.logger is not None
+        timestamp = datetime.now(UTC).isoformat()
+        self.logger.info("Action key tap start action=%s key_code=%s timestamp=%s", action_label, key_code, timestamp)
 
         def wrapped_verification(tapped_key_code: int, attempt: int) -> bool:
             if verification_hook is None:
                 return True
-            return verification_hook(action_name, tapped_key_code, attempt)
+            return verification_hook(action_label, tapped_key_code, attempt)
 
         self.input_driver.tap_key(
+            key_code=key_code,
+            retries=self.config.timings.max_retries,
+            retry_delay_seconds=self.config.timings.retry_delay_seconds,
+            press_duration_seconds=self.config.timings.press_duration_seconds,
+            verification_hook=wrapped_verification if verification_hook else None,
+        )
+        self.input_driver.sleep_wait(self.config.timings.inter_action_delay_seconds)
+
+    def _tap_key_to_window(
+        self,
+        *,
+        action_label: str,
+        key_code: int,
+        hwnd: int,
+        verification_hook: ActionVerificationHook | None,
+    ) -> None:
+        assert self.logger is not None
+        timestamp = datetime.now(UTC).isoformat()
+        self.logger.info(
+            "Action window key tap start action=%s hwnd=%s key_code=%s timestamp=%s",
+            action_label,
+            hwnd,
+            key_code,
+            timestamp,
+        )
+
+        def wrapped_verification(tapped_key_code: int, attempt: int) -> bool:
+            if verification_hook is None:
+                return True
+            return verification_hook(action_label, tapped_key_code, attempt)
+
+        self.input_driver.tap_key_to_window(
+            hwnd=hwnd,
             key_code=key_code,
             retries=self.config.timings.max_retries,
             retry_delay_seconds=self.config.timings.retry_delay_seconds,

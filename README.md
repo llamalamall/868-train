@@ -66,6 +66,31 @@ Each entry requires:
 
 Use `notes/ghidra_findings.md` as the worksheet before updating offsets.
 
+## Memory Monitor (Interactive TUI)
+
+Use the interactive monitor to watch all configured offset fields live:
+
+```powershell
+python -m src.memory.state_monitor_tui
+```
+
+Common options:
+
+```powershell
+# Monitor selected fields only
+python -m src.memory.state_monitor_tui --fields player_energy,player_credits
+
+# Faster polling + re-resolve pointer chains every tick
+python -m src.memory.state_monitor_tui --interval 0.25 --resolve-each-poll
+```
+
+TUI controls:
+- `q`: quit
+- `z`: pause/resume polling
+- `r`: refresh immediately
+- `p`: toggle pointer mode (`cached-addresses` vs `resolve-each-poll`)
+- `up/down/left/right`, `1` through `0`, `escape`, `space`: pass controls to the game window
+
 ## Project Structure
 
 - `src/controller`: input/window control layer

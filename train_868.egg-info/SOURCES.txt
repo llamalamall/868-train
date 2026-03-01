@@ -8,6 +8,7 @@ pyproject.toml
 ./src/agent/dqn_agent.py
 ./src/config/__init__.py
 ./src/config/fingerprint.py
+./src/config/offsets.py
 ./src/config/settings.py
 ./src/controller/__init__.py
 ./src/controller/action_api.py
@@ -17,9 +18,11 @@ pyproject.toml
 ./src/env/game_env.py
 ./src/env/reset_manager.py
 ./src/memory/__init__.py
+./src/memory/offset_smoke_test.py
 ./src/memory/pointer_chain.py
 ./src/memory/process_attach.py
 ./src/memory/reader.py
+./src/memory/state_monitor_tui.py
 ./src/memory/validators.py
 ./src/state/__init__.py
 ./src/state/extractor.py
@@ -64,7 +67,15 @@ src/training/__init__.py
 src/training/evaluate.py
 src/training/rewards.py
 src/training/train.py
+tests/test_action_api.py
 tests/test_fingerprint.py
+tests/test_input_driver.py
+tests/test_memory_reader.py
+tests/test_memory_validators.py
+tests/test_offsets.py
+tests/test_pointer_chain.py
+tests/test_process_attach.py
+tests/test_window_attach.py
 train_868.egg-info/PKG-INFO
 train_868.egg-info/SOURCES.txt
 train_868.egg-info/dependency_links.txt

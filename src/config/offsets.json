@@ -38,6 +38,30 @@
       "notes": "Verified from main game-state pointer at [868-HACK.exe+0x115808], energy at +0x1B60."
     },
     {
+      "name": "player_x",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x19C8",
+      "confidence": "high",
+      "notes": "From analyzed game-state layout: player_x at +0x19C8 off main runtime state pointer [868-HACK.exe+0x115808]."
+    },
+    {
+      "name": "player_y",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x19CC",
+      "confidence": "high",
+      "notes": "From analyzed game-state layout: player_y at +0x19CC off main runtime state pointer [868-HACK.exe+0x115808]."
+    },
+    {
       "name": "player_credits",
       "data_type": "int32",
       "base": {

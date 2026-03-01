@@ -13,6 +13,24 @@ from typing import Callable, Protocol
 
 LOGGER = logging.getLogger(__name__)
 KEYEVENTF_KEYUP = 0x0002
+WM_KEYDOWN = 0x0100
+WM_KEYUP = 0x0101
+EXTENDED_VK_CODES = {
+    0x21,  # PAGE UP
+    0x22,  # PAGE DOWN
+    0x23,  # END
+    0x24,  # HOME
+    0x25,  # LEFT
+    0x26,  # UP
+    0x27,  # RIGHT
+    0x28,  # DOWN
+    0x2D,  # INSERT
+    0x2E,  # DELETE
+    0x6F,  # DIVIDE
+    0x90,  # NUM LOCK
+    0xA3,  # RCTRL
+    0xA5,  # RALT
+}
 
 
 class InputDriverError(RuntimeError):
@@ -24,6 +42,14 @@ class KeyboardBackend(Protocol):
 
     def tap_virtual_key(self, key_code: int, press_duration_seconds: float) -> bool:
         """Send key down/up and return whether both events were accepted."""
+
+    def tap_virtual_key_to_window(
+        self,
+        hwnd: int,
+        key_code: int,
+        press_duration_seconds: float,
+    ) -> bool:
+        """Send key down/up to a specific window handle."""
 
 
 if hasattr(ctypes, "windll"):
@@ -92,6 +118,15 @@ class WindowsKeyboardBackend:
         self._user32 = ctypes.windll.user32
         self._user32.SendInput.argtypes = (ctypes.c_uint, ctypes.POINTER(INPUT), ctypes.c_int)
         self._user32.SendInput.restype = ctypes.c_uint
+        self._user32.PostMessageW.argtypes = (
+            ctypes.wintypes.HWND,
+            ctypes.wintypes.UINT,
+            ctypes.wintypes.WPARAM,
+            ctypes.wintypes.LPARAM,
+        )
+        self._user32.PostMessageW.restype = ctypes.wintypes.BOOL
+        self._user32.MapVirtualKeyW.argtypes = (ctypes.wintypes.UINT, ctypes.wintypes.UINT)
+        self._user32.MapVirtualKeyW.restype = ctypes.wintypes.UINT
 
     def _send_input(self, key_code: int, key_up: bool) -> bool:
         event_flags = KEYEVENTF_KEYUP if key_up else 0
@@ -123,11 +158,53 @@ class WindowsKeyboardBackend:
             return False
         return True
 
+    def _post_window_key_message(self, hwnd: int, message: int, key_code: int, key_up: bool) -> bool:
+        scan_code = int(self._user32.MapVirtualKeyW(key_code, 0))
+        lparam = build_postmessage_lparam(key_code=key_code, scan_code=scan_code, key_up=key_up)
+
+        ctypes.set_last_error(0)
+        posted = self._user32.PostMessageW(hwnd, message, key_code, lparam)
+        if not posted:
+            assert LOGGER is not None
+            LOGGER.warning(
+                "PostMessageW failed hwnd=%s key_code=%s message=%s key_up=%s error=%s",
+                hwnd,
+                key_code,
+                message,
+                key_up,
+                ctypes.GetLastError(),
+            )
+        return bool(posted)
+
+    def tap_virtual_key_to_window(
+        self,
+        hwnd: int,
+        key_code: int,
+        press_duration_seconds: float,
+    ) -> bool:
+        if not self._post_window_key_message(hwnd, WM_KEYDOWN, key_code, key_up=False):
+            return False
+        time.sleep(press_duration_seconds)
+        if not self._post_window_key_message(hwnd, WM_KEYUP, key_code, key_up=True):
+            return False
+        return True
+
 
 def _default_backend() -> KeyboardBackend:
     if os.name != "nt":
         raise InputDriverError("Input driver is currently implemented for Windows only.")
     return WindowsKeyboardBackend()
+
+
+def build_postmessage_lparam(*, key_code: int, scan_code: int, key_up: bool) -> int:
+    """Build LPARAM bits for WM_KEYDOWN/WM_KEYUP delivery."""
+    lparam = 1 | (scan_code << 16)
+    if key_code in EXTENDED_VK_CODES:
+        lparam |= 1 << 24
+    if key_up:
+        lparam |= 1 << 30
+        lparam |= 1 << 31
+    return lparam
 
 
 VerificationHook = Callable[[int, int], bool]
@@ -188,6 +265,55 @@ class InputDriver:
 
         if last_error is None:
             raise InputDriverError("Unknown key tap failure.")
+        raise last_error
+
+    def tap_key_to_window(
+        self,
+        hwnd: int,
+        key_code: int,
+        *,
+        retries: int = 3,
+        retry_delay_seconds: float = 0.05,
+        press_duration_seconds: float = 0.05,
+        verification_hook: VerificationHook | None = None,
+    ) -> None:
+        """Tap a key targeted at a specific window handle with retries."""
+        if retries < 1:
+            raise ValueError("retries must be >= 1")
+
+        last_error: InputDriverError | None = None
+        for attempt in range(1, retries + 1):
+            timestamp = datetime.now(UTC).isoformat()
+            assert self.logger is not None
+            assert self.backend is not None
+            self.logger.info(
+                "Input window tap attempt=%s/%s hwnd=%s key_code=%s timestamp=%s",
+                attempt,
+                retries,
+                hwnd,
+                key_code,
+                timestamp,
+            )
+            dispatched = self.backend.tap_virtual_key_to_window(
+                hwnd=hwnd,
+                key_code=key_code,
+                press_duration_seconds=press_duration_seconds,
+            )
+            verified = True if verification_hook is None else verification_hook(key_code, attempt)
+            if dispatched and verified:
+                return
+
+            reason = "dispatch failed" if not dispatched else "verification failed"
+            last_error = InputDriverError(
+                f"Window key tap considered dropped ({reason}) hwnd={hwnd} "
+                f"key_code={key_code} attempt={attempt}/{retries}."
+            )
+            self.logger.warning("%s", last_error)
+            if attempt < retries:
+                time.sleep(retry_delay_seconds)
+
+        if last_error is None:
+            raise InputDriverError("Unknown window key tap failure.")
         raise last_error
 
     def sleep_wait(self, duration_seconds: float) -> None:
