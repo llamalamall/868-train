@@ -433,6 +433,10 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             Binding("z", "toggle_pause", "Pause/Resume"),
             Binding("r", "refresh_now", "Refresh"),
             Binding("p", "toggle_resolve_mode", "Resolve/Cache"),
+            Binding("up", "passthrough_up", show=False, priority=True),
+            Binding("down", "passthrough_down", show=False, priority=True),
+            Binding("left", "passthrough_left", show=False, priority=True),
+            Binding("right", "passthrough_right", show=False, priority=True),
         ]
 
         paused = False
@@ -534,7 +538,21 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             self._engine.resolve_each_poll = not self._engine.resolve_each_poll
             self._refresh_once()
 
+        def action_passthrough_up(self) -> None:
+            self._send_passthrough_key("UP")
+
+        def action_passthrough_down(self) -> None:
+            self._send_passthrough_key("DOWN")
+
+        def action_passthrough_left(self) -> None:
+            self._send_passthrough_key("LEFT")
+
+        def action_passthrough_right(self) -> None:
+            self._send_passthrough_key("RIGHT")
+
         def on_key(self, event: events.Key) -> None:
+            if event.key in {"up", "down", "left", "right"}:
+                return
             passthrough_key = map_tui_key_to_passthrough_key(event.key)
             if passthrough_key is None:
                 return

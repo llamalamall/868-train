@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from src.controller.input_driver import InputDriver, InputDriverError
+from src.controller.input_driver import InputDriver, InputDriverError, build_postmessage_lparam
 
 
 @dataclass
@@ -96,3 +96,17 @@ def test_tap_key_to_window_raises_after_exhausting_retries() -> None:
             retry_delay_seconds=0.0,
             press_duration_seconds=0.01,
         )
+
+
+def test_build_postmessage_lparam_marks_extended_arrow_key() -> None:
+    lparam = build_postmessage_lparam(key_code=0x26, scan_code=0x48, key_up=False)
+    assert lparam & (1 << 24) != 0
+    assert lparam & (1 << 30) == 0
+    assert lparam & (1 << 31) == 0
+
+
+def test_build_postmessage_lparam_marks_keyup_state_bits() -> None:
+    lparam = build_postmessage_lparam(key_code=0x31, scan_code=0x02, key_up=True)
+    assert lparam & (1 << 24) == 0
+    assert lparam & (1 << 30) != 0
+    assert lparam & (1 << 31) != 0

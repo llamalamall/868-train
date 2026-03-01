@@ -15,6 +15,22 @@ LOGGER = logging.getLogger(__name__)
 KEYEVENTF_KEYUP = 0x0002
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
+EXTENDED_VK_CODES = {
+    0x21,  # PAGE UP
+    0x22,  # PAGE DOWN
+    0x23,  # END
+    0x24,  # HOME
+    0x25,  # LEFT
+    0x26,  # UP
+    0x27,  # RIGHT
+    0x28,  # DOWN
+    0x2D,  # INSERT
+    0x2E,  # DELETE
+    0x6F,  # DIVIDE
+    0x90,  # NUM LOCK
+    0xA3,  # RCTRL
+    0xA5,  # RALT
+}
 
 
 class InputDriverError(RuntimeError):
@@ -144,10 +160,7 @@ class WindowsKeyboardBackend:
 
     def _post_window_key_message(self, hwnd: int, message: int, key_code: int, key_up: bool) -> bool:
         scan_code = int(self._user32.MapVirtualKeyW(key_code, 0))
-        lparam = 1 | (scan_code << 16)
-        if key_up:
-            lparam |= 1 << 30
-            lparam |= 1 << 31
+        lparam = build_postmessage_lparam(key_code=key_code, scan_code=scan_code, key_up=key_up)
 
         ctypes.set_last_error(0)
         posted = self._user32.PostMessageW(hwnd, message, key_code, lparam)
@@ -181,6 +194,17 @@ def _default_backend() -> KeyboardBackend:
     if os.name != "nt":
         raise InputDriverError("Input driver is currently implemented for Windows only.")
     return WindowsKeyboardBackend()
+
+
+def build_postmessage_lparam(*, key_code: int, scan_code: int, key_up: bool) -> int:
+    """Build LPARAM bits for WM_KEYDOWN/WM_KEYUP delivery."""
+    lparam = 1 | (scan_code << 16)
+    if key_code in EXTENDED_VK_CODES:
+        lparam |= 1 << 24
+    if key_up:
+        lparam |= 1 << 30
+        lparam |= 1 << 31
+    return lparam
 
 
 VerificationHook = Callable[[int, int], bool]
