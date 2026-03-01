@@ -51,6 +51,21 @@ python -m src.config.fingerprint --print-sha256 "C:\path\to\868-hack.exe"
 The app exits on hash mismatch with an actionable error. To intentionally bypass the check,
 set `enabled` to `false` explicitly.
 
+## Offsets Registry
+
+Offsets discovered from Ghidra are tracked in `src/config/offsets.json`.
+Startup validates schema and fails fast when required fields are missing or malformed.
+
+Each entry requires:
+- `name`
+- `data_type`
+- `base` (`kind` + `value`)
+- `pointer_chain`
+- `confidence` (`low`, `medium`, `high`)
+- `notes`
+
+Use `notes/ghidra_findings.md` as the worksheet before updating offsets.
+
 ## Project Structure
 
 - `src/controller`: input/window control layer

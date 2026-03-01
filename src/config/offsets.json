@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "entries": [
+    {
+      "name": "fail_state",
+      "data_type": "bool",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x0",
+      "confidence": "low",
+      "notes": "Placeholder chain. Replace with verified fail-state location from Ghidra."
+    },
+    {
+      "name": "player_health",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x0",
+      "confidence": "low",
+      "notes": "Placeholder chain. Track damage/heal deltas while validating."
+    },
+    {
+      "name": "player_energy",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x1B60",
+      "confidence": "high",
+      "notes": "Verified from main game-state pointer at [868-HACK.exe+0x115808], energy at +0x1B60."
+    },
+    {
+      "name": "player_credits",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x1B5C",
+      "confidence": "high",
+      "notes": "Verified from main game-state pointer at [868-HACK.exe+0x115808], credits at +0x1B5C."
+    },
+    {
+      "name": "collected_progs",
+      "data_type": "array<int32>",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x0",
+      "confidence": "low",
+      "notes": "Placeholder chain. Replace with validated inventory/program container offsets."
+    }
+  ]
+}
