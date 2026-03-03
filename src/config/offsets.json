@@ -74,6 +74,18 @@
       "notes": "Verified from main game-state pointer at [868-HACK.exe+0x115808], credits at +0x1B5C."
     },
     {
+      "name": "score",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x19DC",
+      "confidence": "high",
+      "notes": "Verified from main game-state pointer at [868-HACK.exe+0x115808], score points at +0x19DC."
+    },
+    {
       "name": "collected_progs",
       "data_type": "array<int32>",
       "base": {
