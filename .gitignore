@@ -1,3 +1,5 @@
 artifacts/
 __pychache__/
 __pycache__/
+.venv/
+*.egg-info/
