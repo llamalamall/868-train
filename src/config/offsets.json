@@ -26,6 +26,18 @@
       "notes": "Verified from main game-state pointer at [868-HACK.exe+0x115808], energy at +0x1B60."
     },
     {
+      "name": "siphons",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x1B58",
+      "confidence": "high",
+      "notes": "Verified from main game-state pointer at [868-HACK.exe+0x115808], siphons at +0x1B58."
+    },
+    {
       "name": "player_x",
       "data_type": "int32",
       "base": {
