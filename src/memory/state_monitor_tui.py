@@ -103,23 +103,22 @@ def map_tui_key_to_passthrough_key(key: str) -> str | None:
     return PASSTHROUGH_KEY_MAP.get(key.strip().lower())
 
 
-def is_fail_state_detected(snapshot: PollSnapshot, fail_field_name: str = "fail_state") -> bool:
-    """Return true when the monitored fail-state field indicates terminal failure."""
-    target_name = fail_field_name.strip().lower()
+def is_fail_state_detected(
+    snapshot: PollSnapshot,
+    health_field_name: str = "player_health",
+    terminal_health_value: int = -1,
+) -> bool:
+    """Return true when the monitored health field matches terminal fail value."""
+    target_name = health_field_name.strip().lower()
     for field in snapshot.fields:
         if field.name.strip().lower() != target_name:
             continue
         if field.status != "ok":
             return False
 
-        normalized_value = field.value.strip().lower()
-        if normalized_value in {"true", "1"}:
-            return True
-        if normalized_value in {"false", "0", ""}:
-            return False
-
+        normalized_value = field.value.strip()
         try:
-            return float(normalized_value) != 0.0
+            return int(float(normalized_value)) == terminal_health_value
         except ValueError:
             return False
     return False
