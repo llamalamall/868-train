@@ -103,6 +103,27 @@ def map_tui_key_to_passthrough_key(key: str) -> str | None:
     return PASSTHROUGH_KEY_MAP.get(key.strip().lower())
 
 
+def is_fail_state_detected(
+    snapshot: PollSnapshot,
+    health_field_name: str = "player_health",
+    terminal_health_value: int = -1,
+) -> bool:
+    """Return true when the monitored health field matches terminal fail value."""
+    target_name = health_field_name.strip().lower()
+    for field in snapshot.fields:
+        if field.name.strip().lower() != target_name:
+            continue
+        if field.status != "ok":
+            return False
+
+        normalized_value = field.value.strip()
+        try:
+            return int(float(normalized_value)) == terminal_health_value
+        except ValueError:
+            return False
+    return False
+
+
 def _get_kernel32() -> ctypes.WinDLL:
     if os.name != "nt":
         raise StateMonitorError("State monitor TUI is only supported on Windows.")
@@ -522,9 +543,11 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             mode = "resolve-each-poll" if self._engine.resolve_each_poll else "cached-addresses"
             paused_flag = "paused" if self.paused else "running"
             command = f" | command={self._last_command}" if self._last_command else ""
+            fail_message = " | FAIL DETECTED" if is_fail_state_detected(snapshot) else ""
             self._status_widget.update(
                 f"{snapshot.timestamp} | pid={self._engine.attached.pid} | {paused_flag} | "
                 f"mode={mode} | interval={self._poll_interval:.2f}s | {self._control_state}{command}"
+                f"{fail_message}"
             )
 
         def action_toggle_pause(self) -> None:
