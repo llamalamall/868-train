@@ -2,18 +2,6 @@
   "version": 1,
   "entries": [
     {
-      "name": "fail_state",
-      "data_type": "bool",
-      "base": {
-        "kind": "module",
-        "value": "868-HACK.exe"
-      },
-      "pointer_chain": ["0x115808"],
-      "read_offset": "0x0",
-      "confidence": "low",
-      "notes": "Placeholder chain. Replace with verified fail-state location from Ghidra."
-    },
-    {
       "name": "player_health",
       "data_type": "int32",
       "base": {
