@@ -9,15 +9,15 @@
 
 ## Config
 - `HeuristicBaselineConfig.low_health_threshold` (default `3`)
-- `HeuristicBaselineConfig.avoid_enemy_distance` (default `1`)
 - `HeuristicBaselineConfig.verbose_action_logging` (default `False`)
 
 ## Decision Order
 1. Validate `action_space` is non-empty.
 2. If health is known and `health <= low_health_threshold`, choose `wait` when available.
 3. If map/player data is available:
-   - Try `_select_escape_move(...)` first.
-   - If no escape move is found, try `_select_goal_move(...)`.
+   - If an enemy is in direct line-of-sight (same row/column with no wall between), move toward that enemy.
+   - Otherwise, if siphons remain, move toward the nearest siphon.
+   - Otherwise, move toward the exit.
 4. Fallback priority:
    - `confirm` (if available)
    - `wait` (if available)
@@ -30,15 +30,18 @@
 - `move_right` means `x + 1`.
 - `move_left` means `x - 1`.
 
-## Escape Rule
-- Computes nearest-enemy Manhattan distance from player.
-- If enemy is within `avoid_enemy_distance`, picks a move that increases nearest-enemy distance the most.
-- Only considers movement actions present in the current `action_space`.
+## Enemy LOS Rule
+- Scans enemies in the same row or column as the player.
+- Requires a clear path (no wall cells between player and enemy).
+- Chooses a move that reduces distance to the closest visible enemy.
+
+## Siphon Rule
+- If `map.siphons` contains entries, targets the nearest siphon first.
+- This causes siphons to be collected before routing to the exit when possible.
 
 ## Goal Rule
-- Uses player and exit positions from `state.map`.
+- Uses player and exit positions from `state.map` once no siphon target remains.
 - Chooses a movement action that strictly reduces Manhattan distance to exit.
-- If no move improves distance, no goal move is selected.
 
 ## Failure Behavior
 - Raises `ValueError` when `action_space` is empty.

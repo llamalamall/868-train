@@ -70,12 +70,6 @@ def _build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Health threshold where heuristic prefers waiting to conserve state.",
     )
-    parser.add_argument(
-        "--avoid-enemy-distance",
-        type=int,
-        default=1,
-        help="When nearest enemy is within this Manhattan distance, move away if possible.",
-    )
     default_weights = RewardWeights()
     parser.add_argument(
         "--reward-survival",
@@ -149,7 +143,6 @@ def main() -> None:
             agent=HeuristicBaselineAgent(
                 config=HeuristicBaselineConfig(
                     low_health_threshold=int(args.low_health_threshold),
-                    avoid_enemy_distance=int(args.avoid_enemy_distance),
                     verbose_action_logging=bool(args.verbose_actions),
                 )
             ),

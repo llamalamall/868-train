@@ -7,7 +7,7 @@ import logging
 
 from src.agent.baseline_heuristic import HeuristicBaselineAgent, HeuristicBaselineConfig
 from src.agent.baseline_random import RandomBaselineAgent
-from src.state.schema import EnemyState, FieldState, GameStateSnapshot, GridPosition, MapState
+from src.state.schema import EnemyState, FieldState, GameStateSnapshot, GridPosition, MapCellState, MapState
 
 
 def _field(value: object) -> FieldState:
@@ -20,12 +20,26 @@ def _snapshot(
     player: GridPosition | None = None,
     exit_pos: GridPosition | None = None,
     enemies: tuple[EnemyState, ...] = (),
+    siphons: tuple[GridPosition, ...] = (),
+    walls: tuple[GridPosition, ...] = (),
 ) -> GameStateSnapshot:
+    cells = tuple(
+        MapCellState(
+            position=position,
+            cell_type=1,
+            tile_variant=0,
+            wall_state=0,
+            is_wall=True,
+        )
+        for position in walls
+    )
     map_state = MapState(
         status="ok" if player is not None else "missing",
         player_position=player,
         exit_position=exit_pos,
         enemies=enemies,
+        siphons=siphons,
+        cells=cells,
     )
     return GameStateSnapshot(
         timestamp_utc="2026-03-06T00:00:00+00:00",
@@ -88,13 +102,13 @@ def test_heuristic_baseline_treats_move_up_as_positive_y() -> None:
     assert action == "move_up"
 
 
-def test_heuristic_baseline_moves_away_from_adjacent_enemy() -> None:
+def test_heuristic_baseline_moves_toward_enemy_in_direct_sight() -> None:
     enemy = EnemyState(slot=0, type_id=1, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True)
     agent = HeuristicBaselineAgent()
     state = _snapshot(
         health=8,
         player=GridPosition(1, 1),
-        exit_pos=GridPosition(2, 1),
+        exit_pos=GridPosition(0, 1),
         enemies=(enemy,),
     )
 
@@ -104,7 +118,46 @@ def test_heuristic_baseline_moves_away_from_adjacent_enemy() -> None:
         rng=random.Random(2),
     )
 
-    assert action == "move_left"
+    assert action == "move_right"
+
+
+def test_heuristic_baseline_prioritizes_siphon_before_exit() -> None:
+    agent = HeuristicBaselineAgent()
+    state = _snapshot(
+        health=8,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(2, 0),
+        siphons=(GridPosition(0, 1), GridPosition(1, 1)),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_up"),
+        rng=random.Random(3),
+    )
+
+    assert action == "move_up"
+
+
+def test_heuristic_baseline_does_not_pursue_enemy_when_los_blocked() -> None:
+    enemy = EnemyState(slot=0, type_id=1, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent()
+    state = _snapshot(
+        health=8,
+        player=GridPosition(0, 1),
+        exit_pos=GridPosition(0, 2),
+        enemies=(enemy,),
+        siphons=(GridPosition(0, 2),),
+        walls=(GridPosition(1, 1),),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_up"),
+        rng=random.Random(4),
+    )
+
+    assert action == "move_up"
 
 
 def test_heuristic_baseline_verbose_logging_emits_chosen_action(
