@@ -3,10 +3,27 @@
 from __future__ import annotations
 
 import argparse
+from typing import Any
 from statistics import mean
 
 from src.controller.action_api import ActionConfig
-from src.env.game_env import GameEnv, GameEnvConfig, run_random_policy
+from src.env.game_env import GameEnv, GameEnvConfig, RewardFunction, run_random_policy
+from src.state.schema import GameStateSnapshot
+from src.training.rewards import RewardConfig, RewardWeights, compute_reward
+
+_WASD_KEY_CODES = {
+    "W": 0x57,
+    "A": 0x41,
+    "S": 0x53,
+    "D": 0x44,
+}
+
+_NUMPAD_KEY_CODES = {
+    "NUMPAD2": 0x62,
+    "NUMPAD4": 0x64,
+    "NUMPAD6": 0x66,
+    "NUMPAD8": 0x68,
+}
 
 
 def _build_action_config(movement_keys: str) -> ActionConfig:
@@ -23,6 +40,7 @@ def _build_action_config(movement_keys: str) -> ActionConfig:
                 "move_right": "D",
             }
         )
+        key_codes.update(_WASD_KEY_CODES)
     elif movement_keys == "numpad":
         bindings.update(
             {
@@ -32,6 +50,7 @@ def _build_action_config(movement_keys: str) -> ActionConfig:
                 "move_right": "NUMPAD6",
             }
         )
+        key_codes.update(_NUMPAD_KEY_CODES)
     elif movement_keys != "arrows":
         raise ValueError(
             "movement_keys must be one of: arrows, wasd, numpad."
@@ -44,8 +63,64 @@ def _build_action_config(movement_keys: str) -> ActionConfig:
     )
 
 
+def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
+    return RewardConfig(
+        weights=RewardWeights(
+            survival=float(args.reward_survival),
+            health_delta=float(args.reward_health_delta),
+            currency_delta=float(args.reward_currency_delta),
+            fail_penalty=float(args.reward_fail_penalty),
+        )
+    )
+
+
+def _build_reward_fn(
+    *,
+    reward_config: RewardConfig,
+    print_breakdown: bool = False,
+) -> RewardFunction:
+    def reward_fn(
+        previous_state: GameStateSnapshot,
+        current_state: GameStateSnapshot,
+        done: bool,
+        info: dict[str, Any],
+    ) -> float:
+        result = compute_reward(
+            previous_state=previous_state,
+            current_state=current_state,
+            done=done,
+            config=reward_config,
+        )
+        info["reward_breakdown"] = {
+            "survival": result.breakdown.survival,
+            "health_change": result.breakdown.health_change,
+            "currency_change": result.breakdown.currency_change,
+            "fail_penalty": result.breakdown.fail_penalty,
+            "total": result.total,
+        }
+        if print_breakdown:
+            print(
+                "reward step={step} action={action} total={total:.3f} "
+                "survival={survival:.3f} health={health:.3f} "
+                "currency={currency:.3f} fail_penalty={fail_penalty:.3f} done={done}".format(
+                    step=info.get("step_index"),
+                    action=info.get("action"),
+                    total=result.total,
+                    survival=result.breakdown.survival,
+                    health=result.breakdown.health_change,
+                    currency=result.breakdown.currency_change,
+                    fail_penalty=result.breakdown.fail_penalty,
+                    done=done,
+                )
+            )
+        return result.total
+
+    return reward_fn
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run random-policy episodes against live game env.")
+    default_weights = RewardWeights()
     parser.add_argument("--exe", default="868-HACK.exe", help="Target executable name.")
     parser.add_argument("--episodes", type=int, default=3, help="Number of episodes to run.")
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
@@ -98,6 +173,36 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Require reset() to observe a non-terminal state before starting steps.",
     )
+    parser.add_argument(
+        "--reward-survival",
+        type=float,
+        default=default_weights.survival,
+        help="Survival reward applied for non-terminal steps.",
+    )
+    parser.add_argument(
+        "--reward-health-delta",
+        type=float,
+        default=default_weights.health_delta,
+        help="Weight multiplied by (current_health - previous_health).",
+    )
+    parser.add_argument(
+        "--reward-currency-delta",
+        type=float,
+        default=default_weights.currency_delta,
+        help="Weight multiplied by (current_currency - previous_currency).",
+    )
+    parser.add_argument(
+        "--reward-fail-penalty",
+        type=float,
+        default=default_weights.fail_penalty,
+        help="Terminal fail penalty magnitude (applied as negative).",
+    )
+    parser.add_argument(
+        "--print-reward-breakdown",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Print per-step reward component breakdown during execution.",
+    )
     return parser
 
 
@@ -117,6 +222,11 @@ def main() -> None:
         require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
     )
     action_config = _build_action_config(args.movement_keys)
+    reward_config = _build_reward_config(args)
+    reward_fn = _build_reward_fn(
+        reward_config=reward_config,
+        print_breakdown=bool(args.print_reward_breakdown),
+    )
     env = GameEnv.from_live_process(
         executable_name=args.exe,
         config=config,
@@ -124,6 +234,7 @@ def main() -> None:
         focus_window_on_attach=bool(args.focus_window),
         window_targeted_input=bool(args.window_input),
         action_config=action_config,
+        reward_fn=reward_fn,
     )
     try:
         if args.actions:
