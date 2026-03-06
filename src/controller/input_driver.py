@@ -12,9 +12,12 @@ from datetime import UTC, datetime
 from typing import Callable, Protocol
 
 LOGGER = logging.getLogger(__name__)
+KEYEVENTF_EXTENDEDKEY = 0x0001
 KEYEVENTF_KEYUP = 0x0002
+KEYEVENTF_SCANCODE = 0x0008
 WM_KEYDOWN = 0x0100
 WM_KEYUP = 0x0101
+ERROR_INVALID_WINDOW_HANDLE = 1400
 EXTENDED_VK_CODES = {
     0x21,  # PAGE UP
     0x22,  # PAGE DOWN
@@ -37,6 +40,15 @@ class InputDriverError(RuntimeError):
     """Raised when keyboard input could not be delivered reliably."""
 
 
+class InvalidWindowHandleError(InputDriverError):
+    """Raised when attempting window-targeted input with an invalid hwnd."""
+
+    def __init__(self, *, hwnd: int, error_code: int = ERROR_INVALID_WINDOW_HANDLE) -> None:
+        super().__init__(f"Invalid window handle hwnd={hwnd} error={error_code}.")
+        self.hwnd = hwnd
+        self.error_code = error_code
+
+
 class KeyboardBackend(Protocol):
     """Backend contract for sending a virtual key tap."""
 
@@ -50,6 +62,9 @@ class KeyboardBackend(Protocol):
         press_duration_seconds: float,
     ) -> bool:
         """Send key down/up to a specific window handle."""
+
+    def is_window(self, hwnd: int) -> bool:
+        """Return True when hwnd currently maps to a valid window."""
 
 
 if hasattr(ctypes, "windll"):
@@ -127,12 +142,23 @@ class WindowsKeyboardBackend:
         self._user32.PostMessageW.restype = ctypes.wintypes.BOOL
         self._user32.MapVirtualKeyW.argtypes = (ctypes.wintypes.UINT, ctypes.wintypes.UINT)
         self._user32.MapVirtualKeyW.restype = ctypes.wintypes.UINT
+        self._user32.IsWindow.argtypes = (ctypes.wintypes.HWND,)
+        self._user32.IsWindow.restype = ctypes.wintypes.BOOL
+
+    def is_window(self, hwnd: int) -> bool:
+        return bool(self._user32.IsWindow(hwnd))
 
     def _send_input(self, key_code: int, key_up: bool) -> bool:
+        scan_code = int(self._user32.MapVirtualKeyW(key_code, 0))
         event_flags = KEYEVENTF_KEYUP if key_up else 0
+        use_scancode = scan_code != 0
+        if use_scancode:
+            event_flags |= KEYEVENTF_SCANCODE
+        if key_code in EXTENDED_VK_CODES:
+            event_flags |= KEYEVENTF_EXTENDEDKEY
         key_input = KEYBDINPUT(
-            wVk=key_code,
-            wScan=0,
+            wVk=0 if use_scancode else key_code,
+            wScan=scan_code if use_scancode else 0,
             dwFlags=event_flags,
             time=0,
             dwExtraInfo=0,
@@ -165,6 +191,7 @@ class WindowsKeyboardBackend:
         ctypes.set_last_error(0)
         posted = self._user32.PostMessageW(hwnd, message, key_code, lparam)
         if not posted:
+            error_code = ctypes.GetLastError()
             assert LOGGER is not None
             LOGGER.warning(
                 "PostMessageW failed hwnd=%s key_code=%s message=%s key_up=%s error=%s",
@@ -172,8 +199,10 @@ class WindowsKeyboardBackend:
                 key_code,
                 message,
                 key_up,
-                ctypes.GetLastError(),
+                error_code,
             )
+            if error_code == ERROR_INVALID_WINDOW_HANDLE:
+                raise InvalidWindowHandleError(hwnd=hwnd, error_code=error_code)
         return bool(posted)
 
     def tap_virtual_key_to_window(
@@ -182,6 +211,8 @@ class WindowsKeyboardBackend:
         key_code: int,
         press_duration_seconds: float,
     ) -> bool:
+        if not self.is_window(hwnd):
+            raise InvalidWindowHandleError(hwnd=hwnd)
         if not self._post_window_key_message(hwnd, WM_KEYDOWN, key_code, key_up=False):
             return False
         time.sleep(press_duration_seconds)
@@ -294,11 +325,16 @@ class InputDriver:
                 key_code,
                 timestamp,
             )
-            dispatched = self.backend.tap_virtual_key_to_window(
-                hwnd=hwnd,
-                key_code=key_code,
-                press_duration_seconds=press_duration_seconds,
-            )
+            if not self.backend.is_window(hwnd):
+                raise InvalidWindowHandleError(hwnd=hwnd)
+            try:
+                dispatched = self.backend.tap_virtual_key_to_window(
+                    hwnd=hwnd,
+                    key_code=key_code,
+                    press_duration_seconds=press_duration_seconds,
+                )
+            except InvalidWindowHandleError:
+                raise
             verified = True if verification_hook is None else verification_hook(key_code, attempt)
             if dispatched and verified:
                 return

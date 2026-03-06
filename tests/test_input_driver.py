@@ -6,7 +6,12 @@ from dataclasses import dataclass, field
 
 import pytest
 
-from src.controller.input_driver import InputDriver, InputDriverError, build_postmessage_lparam
+from src.controller.input_driver import (
+    InputDriver,
+    InputDriverError,
+    InvalidWindowHandleError,
+    build_postmessage_lparam,
+)
 
 
 @dataclass
@@ -15,6 +20,7 @@ class FakeKeyboardBackend:
 
     outcomes: list[bool]
     window_outcomes: list[bool] = field(default_factory=list)
+    valid_windows: set[int] = field(default_factory=set)
     calls: list[tuple[int, float]] = field(default_factory=list)
     window_calls: list[tuple[int, int, float]] = field(default_factory=list)
 
@@ -29,6 +35,9 @@ class FakeKeyboardBackend:
         if self.window_outcomes:
             return self.window_outcomes.pop(0)
         return False
+
+    def is_window(self, hwnd: int) -> bool:
+        return hwnd in self.valid_windows
 
 
 def test_tap_key_retries_after_dispatch_failure() -> None:
@@ -73,7 +82,7 @@ def test_tap_key_rejects_invalid_retry_value() -> None:
 
 
 def test_tap_key_to_window_retries_after_dispatch_failure() -> None:
-    backend = FakeKeyboardBackend(outcomes=[], window_outcomes=[False, True])
+    backend = FakeKeyboardBackend(outcomes=[], window_outcomes=[False, True], valid_windows={777})
     driver = InputDriver(backend=backend)
     driver.tap_key_to_window(
         hwnd=777,
@@ -86,9 +95,26 @@ def test_tap_key_to_window_retries_after_dispatch_failure() -> None:
 
 
 def test_tap_key_to_window_raises_after_exhausting_retries() -> None:
-    backend = FakeKeyboardBackend(outcomes=[], window_outcomes=[False, False, False])
+    backend = FakeKeyboardBackend(
+        outcomes=[],
+        window_outcomes=[False, False, False],
+        valid_windows={777},
+    )
     driver = InputDriver(backend=backend)
     with pytest.raises(InputDriverError, match="Window key tap considered dropped"):
+        driver.tap_key_to_window(
+            hwnd=777,
+            key_code=0x25,
+            retries=3,
+            retry_delay_seconds=0.0,
+            press_duration_seconds=0.01,
+        )
+
+
+def test_tap_key_to_window_raises_invalid_window_handle_when_hwnd_is_stale() -> None:
+    backend = FakeKeyboardBackend(outcomes=[], window_outcomes=[], valid_windows=set())
+    driver = InputDriver(backend=backend)
+    with pytest.raises(InvalidWindowHandleError, match="Invalid window handle"):
         driver.tap_key_to_window(
             hwnd=777,
             key_code=0x25,

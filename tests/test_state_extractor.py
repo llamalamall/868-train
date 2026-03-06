@@ -126,7 +126,7 @@ def test_extract_state_derives_fail_state_when_health_is_negative_one() -> None:
     assert snapshot.fail_state.source_field == "derived:player_health==-1"
 
 
-def test_extract_state_uses_explicit_fail_state_when_configured() -> None:
+def test_extract_state_ignores_explicit_fail_state_and_uses_health_rule() -> None:
     registry = OffsetRegistry(
         version=1,
         entries=(
@@ -149,11 +149,11 @@ def test_extract_state_uses_explicit_fail_state_when_configured() -> None:
     snapshot = extract_state(reader=reader, registry=registry)
 
     assert snapshot.fail_state.status == "ok"
-    assert snapshot.fail_state.value is True
-    assert snapshot.fail_state.source_field == "fail_state"
+    assert snapshot.fail_state.value is False
+    assert snapshot.fail_state.source_field == "derived:player_health==-1"
 
 
-def test_extract_state_derives_fail_state_from_run_active_when_available() -> None:
+def test_extract_state_ignores_run_active_and_uses_health_rule() -> None:
     registry = OffsetRegistry(
         version=1,
         entries=(
@@ -176,8 +176,8 @@ def test_extract_state_derives_fail_state_from_run_active_when_available() -> No
     snapshot = extract_state(reader=reader, registry=registry)
 
     assert snapshot.fail_state.status == "ok"
-    assert snapshot.fail_state.value is True
-    assert snapshot.fail_state.source_field == "derived:not_run_active"
+    assert snapshot.fail_state.value is False
+    assert snapshot.fail_state.source_field == "derived:player_health==-1"
 
 
 def test_extract_state_reports_invalid_field_read() -> None:
