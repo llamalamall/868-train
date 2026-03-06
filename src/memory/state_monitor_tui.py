@@ -31,11 +31,18 @@ from src.config.offsets import OffsetEntry, load_offset_registry
 from src.memory.pointer_chain import resolve_offset_entry_address
 from src.memory.process_attach import AttachedProcess, attach_process, close_attached_process
 from src.memory.reader import ProcessMemoryReader, ReadFailure, ReadResult
+from src.state.prog_catalog import PROG_NAME_BY_ID
 
 TH32CS_SNAPMODULE = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 BYTES_TYPE_REGEX = re.compile(r"^bytes\[(\d+)\]$", re.IGNORECASE)
+COLLECTED_PROGS_FIELD_NAME = "collected_progs"
+PROG_NAME_TABLE_MODULE_OFFSET = 0x6A5B8
+PROG_NAME_TABLE_ROW_STRIDE_POINTERS = 6
+PROG_NAME_TABLE_MAX_ENTRIES = 64
+PROG_NAME_MAX_STRING_BYTES = 96
+PROG_VECTOR_PREVIEW_MAX = 24
 PASSTHROUGH_KEY_MAP = {
     "up": "UP",
     "down": "DOWN",
@@ -124,6 +131,24 @@ def is_fail_state_detected(
     return False
 
 
+def format_collected_progs_status(snapshot: PollSnapshot, max_length: int = 240) -> str:
+    """Build a dedicated status-line value for collected progs."""
+    for field in snapshot.fields:
+        if field.name.strip().lower() != COLLECTED_PROGS_FIELD_NAME:
+            continue
+        if field.status != "ok":
+            return f"progs_status={field.status}"
+
+        value = field.value.strip()
+        if not value:
+            return "progs=[]"
+
+        if len(value) > max_length:
+            return f"progs={value[: max_length - 3]}..."
+        return f"progs={value}"
+    return ""
+
+
 def _get_kernel32() -> ctypes.WinDLL:
     if os.name != "nt":
         raise StateMonitorError("State monitor TUI is only supported on Windows.")
@@ -184,6 +209,8 @@ class MemoryStateMonitor:
         self._reader: ProcessMemoryReader | None = None
         self._module_cache: dict[str, int] = {}
         self._resolved_cache: dict[str, int] = {}
+        self._prog_name_by_id: dict[int, str] = {}
+        self._prog_name_scan_attempted = False
 
     @property
     def attached(self) -> AttachedProcess:
@@ -202,6 +229,8 @@ class MemoryStateMonitor:
         self._reader = ProcessMemoryReader(process_handle=self._attached.handle)
         self._module_cache.clear()
         self._resolved_cache.clear()
+        self._prog_name_by_id.clear()
+        self._prog_name_scan_attempted = False
 
     def stop(self) -> None:
         """Detach from process handle if attached."""
@@ -211,6 +240,8 @@ class MemoryStateMonitor:
             self._reader = None
             self._module_cache.clear()
             self._resolved_cache.clear()
+            self._prog_name_by_id.clear()
+            self._prog_name_scan_attempted = False
 
     def _select_entries(
         self,
@@ -277,7 +308,7 @@ class MemoryStateMonitor:
                 return self._from_result(result)
             return ("true" if result.value else "false", "ok", "")
         if normalized_type == "array<int32>":
-            return self._decode_array_int32(address)
+            return self._decode_array_int32(address, entry_name=entry.name)
 
         bytes_match = BYTES_TYPE_REGEX.fullmatch(entry.data_type.strip())
         if bytes_match:
@@ -290,7 +321,7 @@ class MemoryStateMonitor:
 
         return ("", "error", f"unsupported_data_type:{entry.data_type}")
 
-    def _decode_array_int32(self, address: int) -> tuple[str, str, str]:
+    def _decode_array_int32(self, address: int, *, entry_name: str) -> tuple[str, str, str]:
         if self._reader is None:
             return ("", "error", "reader_not_initialized")
 
@@ -313,7 +344,8 @@ class MemoryStateMonitor:
             return (f"begin=0x{begin:X} end=0x{end:X}", "error", "vector_unaligned_span")
 
         count = (end - begin) // 4
-        preview_count = min(count, 6)
+        is_collected_progs = entry_name.strip().lower() == COLLECTED_PROGS_FIELD_NAME
+        preview_count = min(count, PROG_VECTOR_PREVIEW_MAX if is_collected_progs else 6)
         preview: list[str] = []
         for index in range(preview_count):
             value_result = self._reader.read_int32(begin + index * 4)
@@ -323,11 +355,93 @@ class MemoryStateMonitor:
                     "error",
                     f"vector_preview_read_failed:{value_result.error.code if value_result.error else 'unknown'}",
                 )
-            preview.append(str(value_result.value))
+            value = int(value_result.value or 0)
+            if is_collected_progs:
+                preview.append(self._format_prog_entry(value))
+            else:
+                preview.append(str(value))
 
         suffix = "" if count <= preview_count else ", ..."
         preview_text = ", ".join(preview)
         return (f"count={count} [{preview_text}{suffix}]", "ok", "")
+
+    def _format_prog_entry(self, prog_id: int) -> str:
+        name = self._resolve_prog_name_by_id(prog_id)
+        if name is None:
+            return str(prog_id)
+        return f"{name}({prog_id})"
+
+    def _resolve_prog_name_by_id(self, prog_id: int) -> str | None:
+        self._ensure_prog_name_map_loaded()
+        if prog_id in self._prog_name_by_id:
+            return self._prog_name_by_id[prog_id]
+        return PROG_NAME_BY_ID.get(prog_id)
+
+    def _ensure_prog_name_map_loaded(self) -> None:
+        if self._prog_name_scan_attempted:
+            return
+        self._prog_name_scan_attempted = True
+        discovered = self._scan_prog_names_from_module()
+        if discovered:
+            self._prog_name_by_id.update(discovered)
+
+    def _scan_prog_names_from_module(self) -> dict[int, str]:
+        if self._reader is None:
+            return {}
+        module_base_result = self._module_base_resolver(self._executable_name)
+        if not module_base_result.is_ok or module_base_result.value is None:
+            return {}
+
+        table_base = module_base_result.value + PROG_NAME_TABLE_MODULE_OFFSET
+        stride_bytes = self._reader.pointer_size * PROG_NAME_TABLE_ROW_STRIDE_POINTERS
+
+        discovered: dict[int, str] = {}
+        empty_rows = 0
+        for index in range(PROG_NAME_TABLE_MAX_ENTRIES):
+            row_address = table_base + index * stride_bytes
+            name_ptr_result = self._reader.read_pointer(row_address)
+            if not name_ptr_result.is_ok or name_ptr_result.value is None:
+                break
+
+            name_ptr = int(name_ptr_result.value)
+            if name_ptr == 0:
+                empty_rows += 1
+                if empty_rows >= 4 and discovered:
+                    break
+                continue
+
+            name = self._read_ascii_c_string(name_ptr)
+            if not name:
+                empty_rows += 1
+                if empty_rows >= 4 and discovered:
+                    break
+                continue
+
+            empty_rows = 0
+            if name.startswith("."):
+                discovered[index] = name
+        return discovered
+
+    def _read_ascii_c_string(self, address: int, max_bytes: int = PROG_NAME_MAX_STRING_BYTES) -> str | None:
+        if self._reader is None:
+            return None
+
+        output = bytearray()
+        for offset in range(max_bytes):
+            byte_result = self._reader.read_bytes(address + offset, 1)
+            if not byte_result.is_ok or byte_result.value is None:
+                return None if offset == 0 else output.decode("ascii", errors="ignore")
+
+            byte_value = byte_result.value[0]
+            if byte_value == 0:
+                break
+            if byte_value < 0x20 or byte_value > 0x7E:
+                return None
+            output.append(byte_value)
+
+        if not output:
+            return None
+        return output.decode("ascii", errors="ignore")
 
     def _from_result(self, result: ReadResult[Any]) -> tuple[str, str, str]:
         if result.is_ok:
@@ -467,6 +581,7 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             self._engine = monitor_engine
             self._poll_interval = poll_interval
             self._status_widget: Static | None = None
+            self._progs_widget: Static | None = None
             self._table: DataTable | None = None
             self._last_snapshot: PollSnapshot | None = None
             self._controls = ActionAPI(input_driver=InputDriver())
@@ -478,11 +593,13 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             yield Header(show_clock=True)
             yield DataTable(id="state_table")
             yield Static("", id="status_line")
+            yield Static("", id="progs_line")
             yield Footer()
 
         def on_mount(self) -> None:
             self._table = self.query_one("#state_table", DataTable)
             self._status_widget = self.query_one("#status_line", Static)
+            self._progs_widget = self.query_one("#progs_line", Static)
 
             self._table.cursor_type = "none"
             self._table.zebra_stripes = True
@@ -517,7 +634,7 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
 
         def _refresh_once(self) -> None:
             snapshot = self._engine.poll()
-            if self._table is None or self._status_widget is None:
+            if self._table is None or self._status_widget is None or self._progs_widget is None:
                 return
 
             self._table.clear(columns=False)
@@ -536,7 +653,11 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             self._update_status_line()
 
         def _update_status_line(self) -> None:
-            if self._status_widget is None or self._last_snapshot is None:
+            if (
+                self._status_widget is None
+                or self._progs_widget is None
+                or self._last_snapshot is None
+            ):
                 return
 
             snapshot = self._last_snapshot
@@ -544,11 +665,13 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             paused_flag = "paused" if self.paused else "running"
             command = f" | command={self._last_command}" if self._last_command else ""
             fail_message = " | FAIL DETECTED" if is_fail_state_detected(snapshot) else ""
+            progs_message = format_collected_progs_status(snapshot)
             self._status_widget.update(
                 f"{snapshot.timestamp} | pid={self._engine.attached.pid} | {paused_flag} | "
                 f"mode={mode} | interval={self._poll_interval:.2f}s | {self._control_state}{command}"
                 f"{fail_message}"
             )
+            self._progs_widget.update(progs_message)
 
         def action_toggle_pause(self) -> None:
             self.paused = not self.paused

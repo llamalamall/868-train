@@ -5,6 +5,7 @@ from __future__ import annotations
 from src.memory.state_monitor_tui import (
     FieldSnapshot,
     PollSnapshot,
+    format_collected_progs_status,
     is_fail_state_detected,
     map_tui_key_to_passthrough_key,
 )
@@ -69,3 +70,40 @@ def test_is_fail_state_detected_false_when_field_missing() -> None:
         ),
     )
     assert not is_fail_state_detected(snapshot)
+
+
+def test_format_collected_progs_status_from_snapshot() -> None:
+    snapshot = PollSnapshot(
+        timestamp="2026-03-03T00:00:00+00:00",
+        fields=(
+            FieldSnapshot(
+                name="collected_progs",
+                data_type="array<int32>",
+                confidence="medium",
+                address="0x201000",
+                value="count=3 [.wait(0), .pull(4), .hack(18)]",
+                status="ok",
+                error="",
+            ),
+        ),
+    )
+    status = format_collected_progs_status(snapshot)
+    assert status == "progs=count=3 [.wait(0), .pull(4), .hack(18)]"
+
+
+def test_format_collected_progs_status_handles_error_status() -> None:
+    snapshot = PollSnapshot(
+        timestamp="2026-03-03T00:00:00+00:00",
+        fields=(
+            FieldSnapshot(
+                name="collected_progs",
+                data_type="array<int32>",
+                confidence="medium",
+                address="N/A",
+                value="",
+                status="resolve_error",
+                error="null_pointer",
+            ),
+        ),
+    )
+    assert format_collected_progs_status(snapshot) == "progs_status=resolve_error"

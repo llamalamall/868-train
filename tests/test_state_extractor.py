@@ -5,6 +5,8 @@ from __future__ import annotations
 import struct
 from dataclasses import dataclass, field
 
+import pytest
+
 from src.config.offsets import OffsetBase, OffsetEntry, OffsetRegistry
 from src.memory.reader import BackendReadResponse, ProcessMemoryReader
 from src.state.extractor import extract_state
@@ -201,3 +203,102 @@ def test_extract_state_reports_invalid_field_read() -> None:
     assert snapshot.currency.status == "invalid"
     assert snapshot.currency.value is None
     assert snapshot.currency.error_code == "read_failed"
+
+
+def test_extract_state_inventory_empty_when_collected_progs_vector_is_empty() -> None:
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x200000),
+            _entry("player_energy", "int32", 0x200004),
+            _entry("player_credits", "int32", 0x200008),
+            _entry("collected_progs", "array<int32>", 0x200100),
+        ),
+    )
+    backend = FakeMemoryBackend(
+        memory_by_address={
+            0x200000: struct.pack("<i", 10),
+            0x200004: struct.pack("<i", 3),
+            0x200008: struct.pack("<i", 21),
+            0x200100: struct.pack("<Q", 0),
+            0x200108: struct.pack("<Q", 0),
+        }
+    )
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    snapshot = extract_state(reader=reader, registry=registry)
+
+    assert snapshot.inventory.status == "ok"
+    assert snapshot.inventory.raw_prog_ids == ()
+    assert snapshot.inventory.collected_progs == ()
+    assert snapshot.inventory.unknown_prog_ids == ()
+
+
+def test_extract_state_inventory_partial_vector_reports_invalid() -> None:
+    begin = 0x300000
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x200000),
+            _entry("player_energy", "int32", 0x200004),
+            _entry("player_credits", "int32", 0x200008),
+            _entry("collected_progs", "array<int32>", 0x200100),
+        ),
+    )
+    backend = FakeMemoryBackend(
+        memory_by_address={
+            0x200000: struct.pack("<i", 10),
+            0x200004: struct.pack("<i", 3),
+            0x200008: struct.pack("<i", 21),
+            0x200100: struct.pack("<Q", begin),
+            0x200108: struct.pack("<Q", begin + 12),  # count=3
+            begin: struct.pack("<i", 2),
+            begin + 4: struct.pack("<i", 4),
+            # Missing third value at begin+8 simulates partial/truncated vector content.
+        }
+    )
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    snapshot = extract_state(reader=reader, registry=registry)
+
+    assert snapshot.inventory.status == "invalid"
+    assert snapshot.inventory.error_code == "read_failed"
+
+
+def test_extract_state_inventory_populated_preserves_unknown_ids_and_logs(caplog: pytest.LogCaptureFixture) -> None:
+    begin = 0x300100
+    prog_ids = (2, 4, 2, 99)
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x200000),
+            _entry("player_energy", "int32", 0x200004),
+            _entry("player_credits", "int32", 0x200008),
+            _entry("collected_progs", "array<int32>", 0x200100),
+        ),
+    )
+    memory = {
+        0x200000: struct.pack("<i", 10),
+        0x200004: struct.pack("<i", 3),
+        0x200008: struct.pack("<i", 21),
+        0x200100: struct.pack("<Q", begin),
+        0x200108: struct.pack("<Q", begin + len(prog_ids) * 4),
+    }
+    for index, prog_id in enumerate(prog_ids):
+        memory[begin + index * 4] = struct.pack("<i", prog_id)
+
+    backend = FakeMemoryBackend(memory_by_address=memory)
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    caplog.set_level("WARNING")
+    snapshot = extract_state(reader=reader, registry=registry)
+
+    assert snapshot.inventory.status == "ok"
+    assert snapshot.inventory.raw_prog_ids == prog_ids
+    assert snapshot.inventory.unknown_prog_ids == (99,)
+    assert tuple(item.prog_id for item in snapshot.inventory.collected_progs) == (2, 4, 99)
+    assert tuple(item.count for item in snapshot.inventory.collected_progs) == (2, 1, 1)
+    assert snapshot.inventory.collected_progs[0].name == ".show"
+    assert snapshot.inventory.collected_progs[1].name == ".pull"
+    assert snapshot.inventory.collected_progs[2].name is None
+    assert "Unknown collected prog id detected: 99" in caplog.text

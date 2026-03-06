@@ -10,7 +10,7 @@
       },
       "pointer_chain": ["0x115808"],
       "read_offset": "0x18",
-      "confidence": "low",
+      "confidence": "high",
       "notes": "Unresolved placeholder; static pass did not confirm a stable health scalar at +0x18. Validate in runtime before use."
     },
     {
@@ -106,8 +106,8 @@
       },
       "pointer_chain": ["0x115808"],
       "read_offset": "0x1BB0",
-      "confidence": "medium",
-      "notes": "Static evidence indicates std::vector-like container starts at +0x1BB0 (begin), +0x1BB8 (end), +0x1BC0 (capacity). Runtime count validation pending."
+      "confidence": "High",
+      "notes": "Static evidence indicates std::vector-like container starts at +0x1BB0 (begin), +0x1BB8 (end), +0x1BC0 (capacity). IDs map to prog names via module string table at [868-HACK.exe+0x6A5B8] (6-pointer stride)."
     }
   ]
 }

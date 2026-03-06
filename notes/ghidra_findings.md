@@ -72,6 +72,10 @@ Use one section per field you intend to add/update in `src/config/offsets.json`.
 - Why this address chain is believed correct:
   - Push-back style growth logic compares `+0x1BB8` and `+0x1BC0`, and uses helper calls with base `+0x1BB0`.
   - Serialization writes vector length via `(*(i64_t*)(+0x1BB8) - *(i64_t*)(+0x1BB0)) >> 2`.
+- ID-to-name mapping method:
+  - Prog names are in module `.rdata` table at `[868-HACK.exe+0x6A5B8]`.
+  - Table rows are `6` pointers each; first pointer is prog short name (e.g. `.wait`, `.undo`, `.show`).
+  - Collected-prog list values are IDs that index this table.
 - Cross-check method used in runtime:
   - Pending in-level runtime validation while root pointer is non-null.
 - Known edge cases / uncertainty:
