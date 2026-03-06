@@ -31,6 +31,7 @@ from src.config.offsets import OffsetEntry, load_offset_registry
 from src.memory.pointer_chain import resolve_offset_entry_address
 from src.memory.process_attach import AttachedProcess, attach_process, close_attached_process
 from src.memory.reader import ProcessMemoryReader, ReadFailure, ReadResult
+from src.state.prog_catalog import PROG_NAME_BY_ID
 
 TH32CS_SNAPMODULE = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
@@ -42,40 +43,6 @@ PROG_NAME_TABLE_ROW_STRIDE_POINTERS = 6
 PROG_NAME_TABLE_MAX_ENTRIES = 64
 PROG_NAME_MAX_STRING_BYTES = 96
 PROG_VECTOR_PREVIEW_MAX = 24
-FALLBACK_PROG_NAME_BY_ID = {
-    0: ".wait",
-    1: ".undo",
-    2: ".show",
-    3: ".poly",
-    4: ".pull",
-    5: ".push",
-    6: ".reduc",
-    7: ".delay",
-    8: ".step",
-    9: ".anti-v",
-    10: ".debug",
-    11: ".d_bom",
-    12: ".reset",
-    13: ".exch",
-    14: ".row",
-    15: ".col",
-    16: ".warp",
-    17: ".score",
-    18: ".hack",
-    19: ".crash",
-    20: ".siph+",
-    21: ".calm",
-    22: ".atk+",
-    23: ".x",
-    24: ".plan.b",
-    25: ".ice",
-    26: ".fire",
-    27: ".cull",
-    28: ".mosh",
-    29: ".save",
-    30: ".quit",
-    31: ".sort",
-}
 PASSTHROUGH_KEY_MAP = {
     "up": "UP",
     "down": "DOWN",
@@ -408,7 +375,7 @@ class MemoryStateMonitor:
         self._ensure_prog_name_map_loaded()
         if prog_id in self._prog_name_by_id:
             return self._prog_name_by_id[prog_id]
-        return FALLBACK_PROG_NAME_BY_ID.get(prog_id)
+        return PROG_NAME_BY_ID.get(prog_id)
 
     def _ensure_prog_name_map_loaded(self) -> None:
         if self._prog_name_scan_attempted:
