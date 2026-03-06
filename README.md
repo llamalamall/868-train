@@ -25,6 +25,50 @@ mypy src
 pytest -q
 ```
 
+## Master CLI
+
+Use the unified CLI to run project tools:
+
+```powershell
+python -m src.cli --help
+```
+
+Or via console script (after `pip install -e .[dev]`):
+
+```powershell
+train-868 --help
+```
+
+Available subcommands:
+- `bootstrap`: run startup checks (`src.app`)
+- `fingerprint`: binary hash helper (`src.config.fingerprint`)
+- `offset-smoke`: live offsets smoke test (`src.memory.offset_smoke_test`)
+- `state-monitor`: interactive memory monitor (`src.memory.state_monitor_tui`)
+- `run-random`: random baseline runner (`src.env.random_policy_runner`)
+- `run-heuristic`: heuristic baseline runner (`src.env.heuristic_policy_runner`)
+
+For command-specific options, forward `--help` to the underlying tool:
+
+```powershell
+python -m src.cli run-heuristic -- --help
+```
+
+Examples:
+
+```powershell
+# Startup validation checks
+python -m src.cli bootstrap
+
+# Print binary SHA256
+python -m src.cli fingerprint --print-sha256 "C:\path\to\868-hack.exe"
+
+# Run random baseline episodes
+python -m src.cli run-random --episodes 5 --max-steps 200
+
+# Run heuristic baseline episodes
+python -m src.cli run-heuristic --episodes 5 --max-steps 200 --movement-keys wasd
+```
+
 ## Control Smoke Test
 
 Task 04 adds a deterministic action API in `src/controller/action_api.py` and low-level key
@@ -121,6 +165,14 @@ logger.log_step(
 logger.log_terminal(episode_id=episode_id, reason="fail_state")
 logger.close()
 ```
+
+## Baseline Runners (Task 13)
+
+Two baseline policy runners are available:
+- Random baseline: `python -m src.cli run-random ...`
+- Heuristic baseline: `python -m src.cli run-heuristic ...`
+
+Both support reward shaping flags (`--reward-*`) and print per-episode + summary metrics for quick comparison.
 
 ## Project Structure
 

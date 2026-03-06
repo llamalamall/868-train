@@ -21,12 +21,18 @@ from src.memory.process_attach import attach_process, close_attached_process
 from src.memory.reader import ProcessMemoryReader, ReadFailure, ReadResult
 from src.state.extractor import extract_state
 from src.state.fail_detector import MemoryFailDetector
-from src.state.schema import GameStateSnapshot
+from src.state.schema import GameStateSnapshot, GridPosition
 
 LOGGER = logging.getLogger(__name__)
 TH32CS_SNAPMODULE = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
 INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
+_MOVE_ACTION_DELTAS: dict[str, tuple[int, int]] = {
+    "move_up": (0, 1),
+    "move_down": (0, -1),
+    "move_left": (-1, 0),
+    "move_right": (1, 0),
+}
 
 
 class GameEnvError(RuntimeError):
@@ -171,7 +177,7 @@ def _resolve_default_action_space(action_api: ActionPerformer) -> tuple[str, ...
     if isinstance(bindings, dict) and bindings:
         actions = tuple(bindings.keys())
     else:
-        actions = ("move_up", "move_down", "move_left", "move_right", "confirm", "cancel")
+        actions = ("move_up", "move_down", "move_left", "move_right", "confirm", "space")
     if "wait" not in actions:
         actions = (*actions, "wait")
     return actions
@@ -220,6 +226,62 @@ class GameEnv:
     def action_space(self) -> tuple[str, ...]:
         """All available discrete action names."""
         return self._action_space
+
+    def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
+        """Return current action subset filtered for map-edge and wall collisions."""
+        base_actions = tuple(
+            action for action in self._action_space if action not in {"wait", "cancel"}
+        )
+        snapshot = state if state is not None else self._current_state
+        fail_active = (
+            snapshot is not None
+            and snapshot.fail_state.status == "ok"
+            and bool(snapshot.fail_state.value)
+        )
+        if not fail_active:
+            base_actions = tuple(action for action in base_actions if action != "confirm")
+
+        siphon_count = (
+            len(snapshot.map.siphons)
+            if snapshot is not None and snapshot.map.status == "ok"
+            else 0
+        )
+        if siphon_count <= 0:
+            base_actions = tuple(action for action in base_actions if action != "space")
+
+        if snapshot is None or snapshot.map.status != "ok":
+            return base_actions
+        player_position = snapshot.map.player_position
+        if player_position is None:
+            return base_actions
+
+        wall_positions = {cell.position for cell in snapshot.map.cells if cell.is_wall}
+        if not wall_positions and snapshot.map.walls:
+            wall_positions = {wall.position for wall in snapshot.map.walls}
+
+        filtered: list[str] = []
+        for action in base_actions:
+            delta = _MOVE_ACTION_DELTAS.get(action)
+            if delta is None:
+                filtered.append(action)
+                continue
+
+            candidate = GridPosition(
+                x=player_position.x + delta[0],
+                y=player_position.y + delta[1],
+            )
+            if (
+                candidate.x < 0
+                or candidate.y < 0
+                or candidate.x >= snapshot.map.width
+                or candidate.y >= snapshot.map.height
+            ):
+                continue
+            if candidate in wall_positions:
+                continue
+            filtered.append(action)
+
+        return tuple(filtered)
 
     @property
     def current_episode_id(self) -> str | None:
@@ -591,7 +653,14 @@ def run_random_policy(
         terminal_reason: str | None = None
 
         while steps < max_steps_per_episode and not done:
-            action = rng.choice(policy_actions)
+            if actions is None:
+                step_actions = env.available_actions()
+            else:
+                step_actions = tuple(action for action in env.available_actions() if action in policy_actions)
+            if not step_actions:
+                raise GameEnvError("No available actions after map-edge/wall filtering.")
+
+            action = rng.choice(step_actions)
             _, reward, done, info = env.step(action)
             total_reward += float(reward)
             steps += 1
