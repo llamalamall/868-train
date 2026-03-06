@@ -158,6 +158,13 @@ def _state_is_terminal(snapshot: GameStateSnapshot) -> bool:
     return snapshot.fail_state.status == "ok" and bool(snapshot.fail_state.value)
 
 
+def _is_terminal_health_value(value: Any) -> bool:
+    try:
+        return int(float(value)) == -1
+    except (TypeError, ValueError):
+        return False
+
+
 def _resolve_default_action_space(action_api: ActionPerformer) -> tuple[str, ...]:
     config = getattr(action_api, "config", None)
     bindings = getattr(config, "action_key_bindings", None) if config is not None else None
@@ -481,12 +488,16 @@ class GameEnv:
                 module_base_resolver=module_base_resolver,
             )
 
-        fail_entry = next((entry for entry in registry.entries if entry.name == "fail_state"), None)
+        fail_entry = next(
+            (entry for entry in registry.entries if entry.name in {"player_health", "health"}),
+            None,
+        )
         fail_detector = (
             MemoryFailDetector(
                 reader=reader,
                 fail_entry=fail_entry,
                 module_base_resolver=module_base_resolver,
+                is_terminal_value=_is_terminal_health_value,
             )
             if fail_entry is not None
             else None

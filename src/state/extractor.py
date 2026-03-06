@@ -18,8 +18,6 @@ LOGGER = logging.getLogger(__name__)
 _HEALTH_FIELD_CANDIDATES = ("player_health", "health")
 _ENERGY_FIELD_CANDIDATES = ("player_energy", "energy")
 _CURRENCY_FIELD_CANDIDATES = ("player_credits", "player_currency", "currency")
-_FAIL_FIELD_CANDIDATES = ("fail_state",)
-_RUN_ACTIVE_FIELD_CANDIDATES = ("run_active",)
 _COLLECTED_PROGS_FIELD_CANDIDATES = ("collected_progs",)
 _MAX_VECTOR_INT32_ITEMS = 4096
 
@@ -380,34 +378,14 @@ def _extract_inventory(
 
 
 def _derive_fail_state(
-    explicit_fail_state: FieldState,
-    run_active: FieldState,
     health: FieldState,
     terminal_health_value: int,
 ) -> FieldState:
-    if explicit_fail_state.status == "ok":
-        return explicit_fail_state
-
-    if run_active.status == "ok":
-        run_active_value = run_active.value
-        if isinstance(run_active_value, bool):
-            return _ok_field(
-                not run_active_value,
-                address=run_active.address,
-                source_field=f"derived:not_{run_active.source_field}",
-            )
-        return _invalid_field(
-            "run_active_not_boolean",
-            source_field=run_active.source_field,
-            address=run_active.address,
-            error="run_active value is non-boolean; cannot derive fail_state.",
-        )
-
     if health.status != "ok":
         return _missing_field(
             "fail_state_unavailable",
             source_field=health.source_field,
-            error="Neither explicit fail_state, run_active, nor health fallback is available.",
+            error="Health is unavailable; cannot derive fail_state.",
         )
     try:
         numeric_health = int(float(health.value))
@@ -439,31 +417,17 @@ def extract_state(
     health_entry = _select_entry(entries, _HEALTH_FIELD_CANDIDATES)
     energy_entry = _select_entry(entries, _ENERGY_FIELD_CANDIDATES)
     currency_entry = _select_entry(entries, _CURRENCY_FIELD_CANDIDATES)
-    fail_entry = _select_entry(entries, _FAIL_FIELD_CANDIDATES)
-    run_active_entry = _select_entry(entries, _RUN_ACTIVE_FIELD_CANDIDATES)
     collected_progs_entry = _select_entry(entries, _COLLECTED_PROGS_FIELD_CANDIDATES)
 
     health = _extract_field(reader=reader, entry=health_entry, module_base_resolver=module_base_resolver)
     energy = _extract_field(reader=reader, entry=energy_entry, module_base_resolver=module_base_resolver)
     currency = _extract_field(reader=reader, entry=currency_entry, module_base_resolver=module_base_resolver)
-    explicit_fail_state = _extract_field(
-        reader=reader,
-        entry=fail_entry,
-        module_base_resolver=module_base_resolver,
-    )
-    run_active = _extract_field(
-        reader=reader,
-        entry=run_active_entry,
-        module_base_resolver=module_base_resolver,
-    )
     inventory = _extract_inventory(
         reader=reader,
         entry=collected_progs_entry,
         module_base_resolver=module_base_resolver,
     )
     fail_state = _derive_fail_state(
-        explicit_fail_state,
-        run_active,
         health,
         terminal_health_value,
     )
@@ -474,8 +438,6 @@ def extract_state(
             health_entry,
             energy_entry,
             currency_entry,
-            fail_entry,
-            run_active_entry,
             collected_progs_entry,
         )
         if entry is not None
@@ -499,4 +461,3 @@ def extract_state(
         inventory=inventory,
         extra_fields=extra_fields,
     )
-
