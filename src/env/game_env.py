@@ -172,8 +172,8 @@ def _resolve_default_action_space(action_api: ActionPerformer) -> tuple[str, ...
         actions = tuple(bindings.keys())
     else:
         actions = ("move_up", "move_down", "move_left", "move_right", "confirm", "cancel")
-    if "wait" not in actions:
-        actions = (*actions, "wait")
+    # if "wait" not in actions:
+        # actions = (*actions, "wait")
     return actions
 
 
