@@ -7,6 +7,7 @@ from dataclasses import dataclass, field
 import pytest
 
 from src.controller.action_api import ActionAPI, ActionConfig, ActionExecutionError, ActionTimings, run_smoke_test_sequence
+from src.controller.input_driver import InvalidWindowHandleError
 
 
 @dataclass
@@ -16,6 +17,7 @@ class FakeInputDriver:
     tap_calls: list[dict[str, object]] = field(default_factory=list)
     window_tap_calls: list[dict[str, object]] = field(default_factory=list)
     waits: list[float] = field(default_factory=list)
+    window_errors: list[Exception] = field(default_factory=list)
 
     def tap_key(
         self,
@@ -58,6 +60,8 @@ class FakeInputDriver:
                 "verification_hook": verification_hook,
             }
         )
+        if self.window_errors:
+            raise self.window_errors.pop(0)
         if verification_hook is not None:
             verification_hook(key_code, 1)
 
@@ -167,6 +171,62 @@ def test_send_key_name_to_window_rejects_invalid_hwnd() -> None:
     api = ActionAPI(input_driver=fake_driver)
     with pytest.raises(ActionExecutionError, match="Window handle must be > 0"):
         api.send_key_name_to_window("SPACE", hwnd=0)
+
+
+def test_perform_action_targets_configured_window() -> None:
+    fake_driver = FakeInputDriver()
+    api = ActionAPI(input_driver=fake_driver, target_hwnd=222)
+
+    api.perform_action("move_left")
+
+    assert fake_driver.tap_calls == []
+    assert len(fake_driver.window_tap_calls) == 1
+    assert fake_driver.window_tap_calls[0]["hwnd"] == 222
+    assert fake_driver.window_tap_calls[0]["key_code"] == 0x25
+
+
+def test_action_api_rejects_invalid_default_target_hwnd() -> None:
+    fake_driver = FakeInputDriver()
+    with pytest.raises(ActionExecutionError, match="target_hwnd must be > 0"):
+        ActionAPI(input_driver=fake_driver, target_hwnd=0)
+
+
+def test_perform_action_reacquires_window_handle_after_invalid_hwnd_error() -> None:
+    fake_driver = FakeInputDriver(
+        window_errors=[InvalidWindowHandleError(hwnd=222)],
+    )
+    reacquire_calls: list[int] = []
+
+    def reacquire() -> int:
+        reacquire_calls.append(1)
+        return 333
+
+    api = ActionAPI(
+        input_driver=fake_driver,
+        target_hwnd=222,
+        window_reacquire_hook=reacquire,
+    )
+
+    api.perform_action("move_left")
+
+    assert reacquire_calls == [1]
+    assert api.target_hwnd == 333
+    assert len(fake_driver.window_tap_calls) == 2
+    assert fake_driver.window_tap_calls[0]["hwnd"] == 222
+    assert fake_driver.window_tap_calls[1]["hwnd"] == 333
+
+
+def test_perform_action_invalid_hwnd_without_reacquire_hook_raises() -> None:
+    fake_driver = FakeInputDriver(
+        window_errors=[InvalidWindowHandleError(hwnd=222)],
+    )
+    api = ActionAPI(
+        input_driver=fake_driver,
+        target_hwnd=222,
+    )
+
+    with pytest.raises(InvalidWindowHandleError, match="Invalid window handle"):
+        api.perform_action("move_left")
 
 
 def test_smoke_sequence_runs_in_expected_order() -> None:
