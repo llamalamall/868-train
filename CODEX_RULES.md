@@ -59,3 +59,4 @@
 - Unit tests added/updated and passing locally.
 - Public interfaces are typed and documented via concise docstrings.
 - Failure modes are explicit and observable in logs or structured results.
+- If a change adds/removes/renames runnable tools, update both `src/cli.py` (master CLI commands/help) and `README.md` in the same change.

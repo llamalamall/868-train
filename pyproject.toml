@@ -17,6 +17,9 @@ dependencies = [
   "textual>=0.78"
 ]
 
+[project.scripts]
+train-868 = "src.cli:main"
+
 [project.optional-dependencies]
 dev = [
   "pytest>=8.0",
