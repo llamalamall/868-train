@@ -15,6 +15,7 @@ Controls:
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import ctypes
 import ctypes.wintypes
 import datetime as dt
@@ -31,7 +32,9 @@ from src.config.offsets import OffsetEntry, load_offset_registry
 from src.memory.pointer_chain import resolve_offset_entry_address
 from src.memory.process_attach import AttachedProcess, attach_process, close_attached_process
 from src.memory.reader import ProcessMemoryReader, ReadFailure, ReadResult
+from src.state.extractor import extract_state
 from src.state.prog_catalog import PROG_NAME_BY_ID
+from src.state.schema import MapState
 
 TH32CS_SNAPMODULE = 0x00000008
 TH32CS_SNAPMODULE32 = 0x00000010
@@ -43,6 +46,15 @@ PROG_NAME_TABLE_ROW_STRIDE_POINTERS = 6
 PROG_NAME_TABLE_MAX_ENTRIES = 64
 PROG_NAME_MAX_STRING_BYTES = 96
 PROG_VECTOR_PREVIEW_MAX = 24
+ENEMY_NAME_TABLE_MODULE_OFFSET = 0x5F670
+ENEMY_NAME_TABLE_MAX_ENTRIES = 32
+ENEMY_NAME_MAX_STRING_BYTES = 64
+ENEMY_NAME_OVERRIDES: dict[int, str] = {
+    2: "virus",
+    3: "classic",
+    4: "glitch",
+    5: "cryptog",
+}
 PASSTHROUGH_KEY_MAP = {
     "up": "UP",
     "down": "DOWN",
@@ -103,6 +115,7 @@ class PollSnapshot:
 
     timestamp: str
     fields: tuple[FieldSnapshot, ...]
+    board_stats: str = ""
 
 
 def map_tui_key_to_passthrough_key(key: str) -> str | None:
@@ -147,6 +160,112 @@ def format_collected_progs_status(snapshot: PollSnapshot, max_length: int = 240)
             return f"progs={value[: max_length - 3]}..."
         return f"progs={value}"
     return ""
+
+
+def summarize_board_state(map_state: MapState, enemy_name_by_id: dict[int, str] | None = None) -> str:
+    """Build a compact board summary from decoded map state."""
+    if map_state.status != "ok":
+        return f"board_status={map_state.status}"
+
+    prog_count = sum(1 for cell in map_state.cells if cell.prog_id is not None and cell.prog_id >= 0)
+    points_total = sum(max(0, cell.points) for cell in map_state.cells)
+    credits_total = sum(max(0, resource.credits) for resource in map_state.resource_cells)
+    energy_total = sum(max(0, resource.energy) for resource in map_state.resource_cells)
+
+    enemy_type_counts = Counter(enemy.type_id for enemy in map_state.enemies if enemy.type_id != 0)
+    if enemy_type_counts:
+        labels: list[str] = []
+        for enemy_type, count in sorted(enemy_type_counts.items()):
+            enemy_name = ENEMY_NAME_OVERRIDES.get(enemy_type)
+            if enemy_name is None and enemy_name_by_id is not None:
+                enemy_name = enemy_name_by_id.get(enemy_type)
+            label = f"{enemy_name}({enemy_type})" if enemy_name else str(enemy_type)
+            labels.append(f"{label}:{count}")
+        enemy_text = ",".join(labels)
+    else:
+        enemy_text = "none"
+
+    return (
+        f"board progs={prog_count} points={points_total} "
+        f"credits={credits_total} energy={energy_total} enemies={enemy_text}"
+    )
+
+
+def render_ascii_map(map_state: MapState) -> str:
+    """Render a compact UTF-8 mini-map with color markup for the TUI."""
+    if map_state.status != "ok":
+        return f"map unavailable ({map_state.status})"
+
+    cell_by_pos = {(cell.position.x, cell.position.y): cell for cell in map_state.cells}
+    siphon_positions = {(position.x, position.y) for position in map_state.siphons}
+    enemy_positions = {
+        (enemy.position.x, enemy.position.y) for enemy in map_state.enemies if enemy.in_bounds
+    }
+    player_position = (
+        (map_state.player_position.x, map_state.player_position.y) if map_state.player_position is not None else None
+    )
+    exit_position = (
+        (map_state.exit_position.x, map_state.exit_position.y) if map_state.exit_position is not None else None
+    )
+
+    def _styled(symbol: str, style: str) -> str:
+        return f"[{style}]{symbol}[/]"
+
+    empty_symbol = "·"
+    wall_symbol = "▓"
+    resource_symbol = "¤"
+    siphon_symbol = "◎"
+    exit_symbol = "⇩"
+    enemy_symbol = "☠"
+    player_symbol = "☺"
+
+    lines = [
+        "map  "
+        f"{_styled(empty_symbol, 'bright_black')} empty  "
+        f"{_styled(wall_symbol, 'yellow')} wall  "
+        f"{_styled(resource_symbol, 'cyan')} resource  "
+        f"{_styled(siphon_symbol, 'green')} siphon  "
+        f"{_styled(exit_symbol, 'magenta')} exit  "
+        f"{_styled(enemy_symbol, 'red')} enemy  "
+        f"{_styled(player_symbol, 'bright_white')} player"
+    ]
+    for y in range(map_state.height - 1, -1, -1):
+        row_chars: list[str] = []
+        for x in range(map_state.width):
+            symbol = empty_symbol
+            cell = cell_by_pos.get((x, y))
+            if cell is not None:
+                if cell.is_wall:
+                    symbol = wall_symbol
+                elif cell.credits > 0 or cell.energy > 0 or cell.points > 0:
+                    symbol = resource_symbol
+
+            if (x, y) in siphon_positions:
+                symbol = siphon_symbol
+            if exit_position == (x, y):
+                symbol = exit_symbol
+            if (x, y) in enemy_positions:
+                symbol = enemy_symbol
+            if player_position == (x, y):
+                symbol = player_symbol
+
+            if symbol == wall_symbol:
+                row_chars.append(_styled(symbol, "yellow"))
+            elif symbol == resource_symbol:
+                row_chars.append(_styled(symbol, "cyan"))
+            elif symbol == siphon_symbol:
+                row_chars.append(_styled(symbol, "green"))
+            elif symbol == exit_symbol:
+                row_chars.append(_styled(symbol, "magenta"))
+            elif symbol == enemy_symbol:
+                row_chars.append(_styled(symbol, "red"))
+            elif symbol == player_symbol:
+                row_chars.append(_styled(symbol, "bright_white"))
+            else:
+                row_chars.append(_styled(symbol, "bright_black"))
+        lines.append(f"{y}|{''.join(row_chars)}")
+    lines.append(f"  {''.join(str(index % 10) for index in range(map_state.width))}")
+    return "\n".join(lines)
 
 
 def _get_kernel32() -> ctypes.WinDLL:
@@ -197,6 +316,7 @@ class MemoryStateMonitor:
         resolve_each_poll: bool,
     ) -> None:
         registry = load_offset_registry(config_path=config_path)
+        self._registry = registry
         self._entries = self._select_entries(registry.entries, fields_filter)
         if not self._entries:
             raise StateMonitorError("No entries selected for monitoring.")
@@ -211,6 +331,8 @@ class MemoryStateMonitor:
         self._resolved_cache: dict[str, int] = {}
         self._prog_name_by_id: dict[int, str] = {}
         self._prog_name_scan_attempted = False
+        self._enemy_name_by_id: dict[int, str] = {}
+        self._enemy_name_scan_attempted = False
 
     @property
     def attached(self) -> AttachedProcess:
@@ -231,6 +353,8 @@ class MemoryStateMonitor:
         self._resolved_cache.clear()
         self._prog_name_by_id.clear()
         self._prog_name_scan_attempted = False
+        self._enemy_name_by_id.clear()
+        self._enemy_name_scan_attempted = False
 
     def stop(self) -> None:
         """Detach from process handle if attached."""
@@ -242,6 +366,8 @@ class MemoryStateMonitor:
             self._resolved_cache.clear()
             self._prog_name_by_id.clear()
             self._prog_name_scan_attempted = False
+            self._enemy_name_by_id.clear()
+            self._enemy_name_scan_attempted = False
 
     def _select_entries(
         self,
@@ -422,6 +548,48 @@ class MemoryStateMonitor:
                 discovered[index] = name
         return discovered
 
+    def _ensure_enemy_name_map_loaded(self) -> None:
+        if self._enemy_name_scan_attempted:
+            return
+        self._enemy_name_scan_attempted = True
+        discovered = self._scan_enemy_names_from_module()
+        if discovered:
+            self._enemy_name_by_id.update(discovered)
+
+    def _scan_enemy_names_from_module(self) -> dict[int, str]:
+        if self._reader is None:
+            return {}
+        module_base_result = self._module_base_resolver(self._executable_name)
+        if not module_base_result.is_ok or module_base_result.value is None:
+            return {}
+
+        table_base = module_base_result.value + ENEMY_NAME_TABLE_MODULE_OFFSET
+        discovered: dict[int, str] = {}
+        empty_rows = 0
+        for index in range(ENEMY_NAME_TABLE_MAX_ENTRIES):
+            row_address = table_base + index * self._reader.pointer_size
+            name_ptr_result = self._reader.read_pointer(row_address)
+            if not name_ptr_result.is_ok or name_ptr_result.value is None:
+                break
+
+            name_ptr = int(name_ptr_result.value)
+            if name_ptr == 0:
+                empty_rows += 1
+                if empty_rows >= 4 and discovered:
+                    break
+                continue
+
+            name = self._read_ascii_c_string(name_ptr, max_bytes=ENEMY_NAME_MAX_STRING_BYTES)
+            if not name:
+                empty_rows += 1
+                if empty_rows >= 4 and discovered:
+                    break
+                continue
+
+            empty_rows = 0
+            discovered[index] = name
+        return discovered
+
     def _read_ascii_c_string(self, address: int, max_bytes: int = PROG_NAME_MAX_STRING_BYTES) -> str | None:
         if self._reader is None:
             return None
@@ -450,6 +618,23 @@ class MemoryStateMonitor:
             return ("", "error", "unknown_read_failure")
         detail = f" ({result.error.detail})" if result.error.detail else ""
         return ("", "error", f"{result.error.code}{detail}")
+
+    def _build_board_stats(self) -> str:
+        if self._reader is None:
+            return "board_status=reader_not_initialized"
+
+        try:
+            snapshot = extract_state(
+                reader=self._reader,
+                registry=self._registry,
+                module_base_resolver=self._module_base_resolver,
+            )
+        except Exception as error:  # pragma: no cover - runtime diagnostics path
+            return f"board_status=error({error})"
+
+        self._ensure_enemy_name_map_loaded()
+        board_summary = summarize_board_state(snapshot.map, enemy_name_by_id=self._enemy_name_by_id)
+        return f"{board_summary}\n{render_ascii_map(snapshot.map)}"
 
     def poll(self) -> PollSnapshot:
         """Read all selected fields once."""
@@ -516,6 +701,7 @@ class MemoryStateMonitor:
         return PollSnapshot(
             timestamp=dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
             fields=tuple(rows),
+            board_stats=self._build_board_stats(),
         )
 
 
@@ -582,6 +768,7 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             self._poll_interval = poll_interval
             self._status_widget: Static | None = None
             self._progs_widget: Static | None = None
+            self._board_widget: Static | None = None
             self._table: DataTable | None = None
             self._last_snapshot: PollSnapshot | None = None
             self._controls = ActionAPI(input_driver=InputDriver())
@@ -594,12 +781,14 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             yield DataTable(id="state_table")
             yield Static("", id="status_line")
             yield Static("", id="progs_line")
+            yield Static("", id="board_line")
             yield Footer()
 
         def on_mount(self) -> None:
             self._table = self.query_one("#state_table", DataTable)
             self._status_widget = self.query_one("#status_line", Static)
             self._progs_widget = self.query_one("#progs_line", Static)
+            self._board_widget = self.query_one("#board_line", Static)
 
             self._table.cursor_type = "none"
             self._table.zebra_stripes = True
@@ -634,7 +823,12 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
 
         def _refresh_once(self) -> None:
             snapshot = self._engine.poll()
-            if self._table is None or self._status_widget is None or self._progs_widget is None:
+            if (
+                self._table is None
+                or self._status_widget is None
+                or self._progs_widget is None
+                or self._board_widget is None
+            ):
                 return
 
             self._table.clear(columns=False)
@@ -656,6 +850,7 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             if (
                 self._status_widget is None
                 or self._progs_widget is None
+                or self._board_widget is None
                 or self._last_snapshot is None
             ):
                 return
@@ -666,12 +861,14 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             command = f" | command={self._last_command}" if self._last_command else ""
             fail_message = " | FAIL DETECTED" if is_fail_state_detected(snapshot) else ""
             progs_message = format_collected_progs_status(snapshot)
+            board_message = snapshot.board_stats
             self._status_widget.update(
                 f"{snapshot.timestamp} | pid={self._engine.attached.pid} | {paused_flag} | "
                 f"mode={mode} | interval={self._poll_interval:.2f}s | {self._control_state}{command}"
                 f"{fail_message}"
             )
             self._progs_widget.update(progs_message)
+            self._board_widget.update(board_message)
 
         def action_toggle_pause(self) -> None:
             self.paused = not self.paused

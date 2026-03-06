@@ -43,6 +43,25 @@ def _entry(name: str, data_type: str, address: int) -> OffsetEntry:
     )
 
 
+def _chained_entry(
+    name: str,
+    data_type: str,
+    *,
+    base_address: int,
+    pointer_chain: tuple[int, ...],
+    read_offset: int,
+) -> OffsetEntry:
+    return OffsetEntry(
+        name=name,
+        data_type=data_type,
+        base=OffsetBase(kind="absolute", value=f"0x{base_address:X}"),
+        pointer_chain=pointer_chain,
+        confidence="high",
+        notes="test",
+        read_offset=read_offset,
+    )
+
+
 def test_extract_state_returns_normalized_snapshot_for_core_fields() -> None:
     registry = OffsetRegistry(
         version=1,
@@ -302,3 +321,133 @@ def test_extract_state_inventory_populated_preserves_unknown_ids_and_logs(caplog
     assert snapshot.inventory.collected_progs[1].name == ".pull"
     assert snapshot.inventory.collected_progs[2].name is None
     assert "Unknown collected prog id detected: 99" in caplog.text
+
+
+def test_extract_state_decodes_map_cells_siphons_walls_resources_exit_and_enemies() -> None:
+    root = 0x500000
+    pointer_base = 0x100000
+    player_x_offset = 0x19C8
+    cell_base_offset = 0x11B8
+    cell_stride = 0x38
+    entity_base_offset = 0x0C
+    entity_stride = 0x44
+
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x200000),
+            _entry("player_energy", "int32", 0x200004),
+            _entry("player_credits", "int32", 0x200008),
+            _chained_entry(
+                "player_x",
+                "int32",
+                base_address=pointer_base,
+                pointer_chain=(0,),
+                read_offset=player_x_offset,
+            ),
+        ),
+    )
+
+    memory: dict[int, bytes] = {
+        0x200000: struct.pack("<i", 10),
+        0x200004: struct.pack("<i", 6),
+        0x200008: struct.pack("<i", 21),
+        pointer_base: struct.pack("<Q", root),
+        root + player_x_offset: struct.pack("<i", 2),
+    }
+
+    # Initialize all map cells with deterministic defaults.
+    default_cell_values = {
+        0x00: 0,   # type
+        0x04: 0,   # seed/variant A
+        0x08: 0,   # variant B
+        0x0C: 0,   # credits
+        0x10: 0,   # energy
+        0x14: -1,  # prog id
+        0x18: 0,   # wall state
+        0x1C: 0,   # threat
+        0x20: 0,   # points
+        0x24: 0,   # siphon flag
+        0x28: 0,   # special state
+        0x2C: 0,   # exit overlay
+        0x30: 0,   # lock/hidden
+        0x34: 0,   # marker
+    }
+    for index in range(36):
+        base = root + cell_base_offset + index * cell_stride
+        for offset, value in default_cell_values.items():
+            memory[base + offset] = struct.pack("<i", value)
+
+    def _cell_index(x: int, y: int) -> int:
+        return x * 6 + y
+
+    def _write_cell(x: int, y: int, values: dict[int, int]) -> None:
+        base = root + cell_base_offset + _cell_index(x, y) * cell_stride
+        for offset, value in values.items():
+            memory[base + offset] = struct.pack("<i", value)
+
+    # Non-wall resource cell.
+    _write_cell(0, 1, {0x0C: 3, 0x10: 2, 0x20: 1})
+    # Prog wall with one prog and threat metadata.
+    _write_cell(1, 2, {0x00: 1, 0x14: 4, 0x18: 2, 0x1C: 5})
+    # Points wall.
+    _write_cell(2, 3, {0x00: 2, 0x20: 7, 0x18: 1})
+    # Siphon marker.
+    _write_cell(4, 1, {0x24: 1})
+    # Exit.
+    _write_cell(5, 5, {0x00: 3})
+
+    # Initialize entity table as inactive.
+    for slot in range(64):
+        memory[root + entity_base_offset + slot * entity_stride] = b"\x00"
+
+    # Entity slot 0 is the player character.
+    player0 = root + entity_base_offset
+    memory[player0] = b"\x01"
+    memory[player0 + 0x08] = struct.pack("<i", 2)
+    memory[player0 + 0x0C] = struct.pack("<i", 5)
+    memory[player0 + 0x18] = struct.pack("<i", 1)
+    memory[player0 + 0x34] = struct.pack("<i", 3)
+    memory[player0 + 0x38] = struct.pack("<i", 4)
+
+    # Active enemy 1 (out-of-bounds, still tracked).
+    enemy1 = root + entity_base_offset + entity_stride
+    memory[enemy1] = b"\x01"
+    memory[enemy1 + 0x08] = struct.pack("<i", 7)
+    memory[enemy1 + 0x0C] = struct.pack("<i", 2)
+    memory[enemy1 + 0x18] = struct.pack("<i", 0)
+    memory[enemy1 + 0x34] = struct.pack("<i", 8)
+    memory[enemy1 + 0x38] = struct.pack("<i", 1)
+
+    backend = FakeMemoryBackend(memory_by_address=memory)
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    snapshot = extract_state(reader=reader, registry=registry)
+
+    assert snapshot.map.status == "ok"
+    assert snapshot.map.address == root
+    assert len(snapshot.map.cells) == 36
+    assert tuple((pos.x, pos.y) for pos in snapshot.map.siphons) == ((4, 1),)
+    assert snapshot.map.exit_position is not None
+    assert (snapshot.map.exit_position.x, snapshot.map.exit_position.y) == (5, 5)
+
+    walls_by_pos = {(wall.position.x, wall.position.y): wall for wall in snapshot.map.walls}
+    assert walls_by_pos[(1, 2)].wall_type == "prog_wall"
+    assert walls_by_pos[(1, 2)].prog_id == 4
+    assert walls_by_pos[(2, 3)].wall_type == "point_wall"
+    assert walls_by_pos[(2, 3)].points == 7
+
+    resource_by_pos = {
+        (resource.position.x, resource.position.y): resource for resource in snapshot.map.resource_cells
+    }
+    assert resource_by_pos[(0, 1)].credits == 3
+    assert resource_by_pos[(0, 1)].energy == 2
+    assert resource_by_pos[(0, 1)].points == 1
+
+    assert snapshot.map.player_position is not None
+    assert (snapshot.map.player_position.x, snapshot.map.player_position.y) == (3, 4)
+
+    assert len(snapshot.map.enemies) == 1
+    assert snapshot.map.enemies[0].type_id == 0
+    assert (snapshot.map.enemies[0].position.x, snapshot.map.enemies[0].position.y) == (8, 1)
+    assert snapshot.map.enemies[0].in_bounds is False
