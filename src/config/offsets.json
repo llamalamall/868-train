@@ -10,8 +10,8 @@
       },
       "pointer_chain": ["0x115808"],
       "read_offset": "0x18",
-      "confidence": "high",
-      "notes": "Placeholder chain. Track damage/heal deltas while validating."
+      "confidence": "low",
+      "notes": "Unresolved placeholder; static pass did not confirm a stable health scalar at +0x18. Validate in runtime before use."
     },
     {
       "name": "player_energy",
@@ -86,6 +86,18 @@
       "notes": "Verified from main game-state pointer at [868-HACK.exe+0x115808], score points at +0x19DC."
     },
     {
+      "name": "run_active",
+      "data_type": "bool",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x1B94",
+      "confidence": "medium",
+      "notes": "Static evidence from load/save and control flow indicates +0x1B94 is a run-state flag; fail_state can be derived as logical NOT."
+    },
+    {
       "name": "collected_progs",
       "data_type": "array<int32>",
       "base": {
@@ -93,9 +105,9 @@
         "value": "868-HACK.exe"
       },
       "pointer_chain": ["0x115808"],
-      "read_offset": "0x0",
-      "confidence": "low",
-      "notes": "Placeholder chain. Replace with validated inventory/program container offsets."
+      "read_offset": "0x1BB0",
+      "confidence": "medium",
+      "notes": "Static evidence indicates std::vector-like container starts at +0x1BB0 (begin), +0x1BB8 (end), +0x1BC0 (capacity). Runtime count validation pending."
     }
   ]
 }

@@ -14,6 +14,7 @@ _HEALTH_FIELD_CANDIDATES = ("player_health", "health")
 _ENERGY_FIELD_CANDIDATES = ("player_energy", "energy")
 _CURRENCY_FIELD_CANDIDATES = ("player_credits", "player_currency", "currency")
 _FAIL_FIELD_CANDIDATES = ("fail_state",)
+_RUN_ACTIVE_FIELD_CANDIDATES = ("run_active",)
 
 
 def _now_iso_utc() -> str:
@@ -143,16 +144,33 @@ def _extract_field(
 
 def _derive_fail_state(
     explicit_fail_state: FieldState,
+    run_active: FieldState,
     health: FieldState,
     terminal_health_value: int,
 ) -> FieldState:
     if explicit_fail_state.status == "ok":
         return explicit_fail_state
+
+    if run_active.status == "ok":
+        run_active_value = run_active.value
+        if isinstance(run_active_value, bool):
+            return _ok_field(
+                not run_active_value,
+                address=run_active.address,
+                source_field=f"derived:not_{run_active.source_field}",
+            )
+        return _invalid_field(
+            "run_active_not_boolean",
+            source_field=run_active.source_field,
+            address=run_active.address,
+            error="run_active value is non-boolean; cannot derive fail_state.",
+        )
+
     if health.status != "ok":
         return _missing_field(
             "fail_state_unavailable",
             source_field=health.source_field,
-            error="Health field unavailable; cannot derive fail_state.",
+            error="Neither explicit fail_state, run_active, nor health fallback is available.",
         )
     try:
         numeric_health = int(float(health.value))
@@ -185,6 +203,7 @@ def extract_state(
     energy_entry = _select_entry(entries, _ENERGY_FIELD_CANDIDATES)
     currency_entry = _select_entry(entries, _CURRENCY_FIELD_CANDIDATES)
     fail_entry = _select_entry(entries, _FAIL_FIELD_CANDIDATES)
+    run_active_entry = _select_entry(entries, _RUN_ACTIVE_FIELD_CANDIDATES)
 
     health = _extract_field(reader=reader, entry=health_entry, module_base_resolver=module_base_resolver)
     energy = _extract_field(reader=reader, entry=energy_entry, module_base_resolver=module_base_resolver)
@@ -194,10 +213,22 @@ def extract_state(
         entry=fail_entry,
         module_base_resolver=module_base_resolver,
     )
-    fail_state = _derive_fail_state(explicit_fail_state, health, terminal_health_value)
+    run_active = _extract_field(
+        reader=reader,
+        entry=run_active_entry,
+        module_base_resolver=module_base_resolver,
+    )
+    fail_state = _derive_fail_state(
+        explicit_fail_state,
+        run_active,
+        health,
+        terminal_health_value,
+    )
 
     known_names = {
-        entry.name for entry in (health_entry, energy_entry, currency_entry, fail_entry) if entry is not None
+        entry.name
+        for entry in (health_entry, energy_entry, currency_entry, fail_entry, run_active_entry)
+        if entry is not None
     }
     extra_fields: dict[str, FieldState] = {}
     for entry in registry.entries:

@@ -151,6 +151,33 @@ def test_extract_state_uses_explicit_fail_state_when_configured() -> None:
     assert snapshot.fail_state.source_field == "fail_state"
 
 
+def test_extract_state_derives_fail_state_from_run_active_when_available() -> None:
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x200000),
+            _entry("player_energy", "int32", 0x200004),
+            _entry("player_credits", "int32", 0x200008),
+            _entry("run_active", "bool", 0x20000C),
+        ),
+    )
+    backend = FakeMemoryBackend(
+        memory_by_address={
+            0x200000: struct.pack("<i", 20),
+            0x200004: struct.pack("<i", 8),
+            0x200008: struct.pack("<i", 30),
+            0x20000C: b"\x00",
+        }
+    )
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    snapshot = extract_state(reader=reader, registry=registry)
+
+    assert snapshot.fail_state.status == "ok"
+    assert snapshot.fail_state.value is True
+    assert snapshot.fail_state.source_field == "derived:not_run_active"
+
+
 def test_extract_state_reports_invalid_field_read() -> None:
     registry = OffsetRegistry(
         version=1,
