@@ -429,6 +429,7 @@ class GameEnv:
         focus_window_on_attach: bool = True,
         window_targeted_input: bool = False,
         action_config: ActionConfig | None = None,
+        reward_fn: RewardFunction = _default_reward_fn,
     ) -> GameEnv:
         """Create a live environment bound to running game process/window."""
         registry = load_offset_registry(config_path=offsets_config_path)
@@ -542,6 +543,7 @@ class GameEnv:
             state_provider=state_provider,
             fail_detector=fail_detector,
             reset_strategy=reset_strategy,
+            reward_fn=reward_fn,
             config=config,
             telemetry_logger=telemetry_logger,
         )
