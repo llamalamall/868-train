@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+from src.state.schema import EnemyState, GridPosition, MapCellState, MapState, ResourceCellState
 from src.memory.state_monitor_tui import (
     FieldSnapshot,
     PollSnapshot,
     format_collected_progs_status,
     is_fail_state_detected,
     map_tui_key_to_passthrough_key,
+    summarize_board_state,
 )
 
 
@@ -107,3 +109,163 @@ def test_format_collected_progs_status_handles_error_status() -> None:
         ),
     )
     assert format_collected_progs_status(snapshot) == "progs_status=resolve_error"
+
+
+def test_summarize_board_state_includes_requested_aggregates() -> None:
+    map_state = MapState(
+        status="ok",
+        cells=(
+            MapCellState(
+                position=GridPosition(x=0, y=0),
+                cell_type=1,
+                tile_variant=0,
+                wall_state=0,
+                prog_id=4,
+                points=5,
+                is_wall=True,
+            ),
+            MapCellState(
+                position=GridPosition(x=0, y=1),
+                cell_type=0,
+                tile_variant=0,
+                wall_state=0,
+                prog_id=None,
+                points=2,
+            ),
+            MapCellState(
+                position=GridPosition(x=1, y=0),
+                cell_type=1,
+                tile_variant=0,
+                wall_state=0,
+                prog_id=7,
+                points=0,
+                is_wall=True,
+            ),
+        ),
+        resource_cells=(
+            ResourceCellState(position=GridPosition(x=0, y=1), credits=3, energy=2, points=2),
+            ResourceCellState(position=GridPosition(x=2, y=2), credits=1, energy=5, points=0),
+        ),
+        enemies=(
+            EnemyState(
+                slot=0,
+                type_id=2,
+                position=GridPosition(x=1, y=1),
+                hp=3,
+                state=0,
+                in_bounds=True,
+            ),
+            EnemyState(
+                slot=1,
+                type_id=2,
+                position=GridPosition(x=3, y=4),
+                hp=4,
+                state=1,
+                in_bounds=True,
+            ),
+            EnemyState(
+                slot=2,
+                type_id=7,
+                position=GridPosition(x=0, y=5),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+        ),
+    )
+
+    summary = summarize_board_state(map_state)
+    assert summary == "board progs=2 points=7 credits=4 energy=7 enemies=virus(2):2,7:1"
+
+
+def test_summarize_board_state_reports_non_ok_status() -> None:
+    assert summarize_board_state(MapState(status="missing")) == "board_status=missing"
+
+
+def test_summarize_board_state_uses_enemy_names_when_provided() -> None:
+    map_state = MapState(
+        status="ok",
+        enemies=(
+            EnemyState(
+                slot=0,
+                type_id=2,
+                position=GridPosition(x=1, y=1),
+                hp=3,
+                state=0,
+                in_bounds=True,
+            ),
+            EnemyState(
+                slot=1,
+                type_id=2,
+                position=GridPosition(x=2, y=1),
+                hp=2,
+                state=0,
+                in_bounds=True,
+            ),
+            EnemyState(
+                slot=2,
+                type_id=7,
+                position=GridPosition(x=3, y=1),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+        ),
+    )
+
+    summary = summarize_board_state(map_state, enemy_name_by_id={2: "virus", 7: "daemon"})
+    assert summary == "board progs=0 points=0 credits=0 energy=0 enemies=virus(2):2,daemon(7):1"
+
+
+def test_summarize_board_state_uses_enemy_overrides_and_ignores_type_zero() -> None:
+    map_state = MapState(
+        status="ok",
+        enemies=(
+            EnemyState(
+                slot=0,
+                type_id=0,
+                position=GridPosition(x=0, y=0),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+            EnemyState(
+                slot=1,
+                type_id=2,
+                position=GridPosition(x=1, y=0),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+            EnemyState(
+                slot=2,
+                type_id=3,
+                position=GridPosition(x=2, y=0),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+            EnemyState(
+                slot=3,
+                type_id=4,
+                position=GridPosition(x=3, y=0),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+            EnemyState(
+                slot=4,
+                type_id=5,
+                position=GridPosition(x=4, y=0),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+        ),
+    )
+
+    summary = summarize_board_state(map_state, enemy_name_by_id={2: "wrong", 3: "wrong"})
+    assert summary == (
+        "board progs=0 points=0 credits=0 energy=0 "
+        "enemies=virus(2):1,classic(3):1,glitch(4):1,cryptog(5):1"
+    )
