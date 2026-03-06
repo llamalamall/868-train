@@ -46,6 +46,87 @@ class InventoryState:
 
 
 @dataclass(frozen=True)
+class GridPosition:
+    """One logical grid coordinate in the 6x6 map."""
+
+    x: int
+    y: int
+
+
+@dataclass(frozen=True)
+class MapCellState:
+    """Decoded per-cell map state."""
+
+    position: GridPosition
+    cell_type: int
+    tile_variant: int
+    wall_state: int
+    prog_id: int | None = None
+    credits: int = 0
+    energy: int = 0
+    points: int = 0
+    threat: int = 0
+    special_state: int = 0
+    has_siphon: bool = False
+    has_exit_overlay: bool = False
+    is_wall: bool = False
+    is_exit: bool = False
+
+
+@dataclass(frozen=True)
+class WallCellState:
+    """Decoded wall metadata for one wall cell."""
+
+    position: GridPosition
+    wall_type: Literal["prog_wall", "point_wall", "unknown_wall"]
+    wall_state: int
+    prog_id: int | None = None
+    points: int = 0
+    threat: int = 0
+
+
+@dataclass(frozen=True)
+class ResourceCellState:
+    """Resources currently available in a non-wall cell."""
+
+    position: GridPosition
+    credits: int = 0
+    energy: int = 0
+    points: int = 0
+
+
+@dataclass(frozen=True)
+class EnemyState:
+    """One active hostile entity tracked by the runtime entity table."""
+
+    slot: int
+    type_id: int
+    position: GridPosition
+    hp: int
+    state: int
+    in_bounds: bool
+
+
+@dataclass(frozen=True)
+class MapState:
+    """Decoded map section extracted from memory."""
+
+    status: FieldStatus
+    width: int = 6
+    height: int = 6
+    cells: tuple[MapCellState, ...] = ()
+    siphons: tuple[GridPosition, ...] = ()
+    walls: tuple[WallCellState, ...] = ()
+    resource_cells: tuple[ResourceCellState, ...] = ()
+    exit_position: GridPosition | None = None
+    enemies: tuple[EnemyState, ...] = ()
+    error_code: str | None = None
+    error: str | None = None
+    address: int | None = None
+    source_field: str | None = None
+
+
+@dataclass(frozen=True)
 class GameStateSnapshot:
     """Normalized state snapshot consumed by control/training loops."""
 
@@ -55,4 +136,5 @@ class GameStateSnapshot:
     currency: FieldState
     fail_state: FieldState
     inventory: InventoryState = field(default_factory=lambda: InventoryState(status="missing"))
+    map: MapState = field(default_factory=lambda: MapState(status="missing"))
     extra_fields: dict[str, FieldState] = field(default_factory=dict)
