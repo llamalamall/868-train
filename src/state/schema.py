@@ -118,6 +118,7 @@ class MapState:
     siphons: tuple[GridPosition, ...] = ()
     walls: tuple[WallCellState, ...] = ()
     resource_cells: tuple[ResourceCellState, ...] = ()
+    player_position: GridPosition | None = None
     exit_position: GridPosition | None = None
     enemies: tuple[EnemyState, ...] = ()
     error_code: str | None = None

@@ -49,6 +49,7 @@ _MAP_CELL_STRIDE = 0x38
 _MAP_ENTITIES_BASE_OFFSET = 0x0C
 _MAP_ENTITY_STRIDE = 0x44
 _MAP_ENTITY_COUNT = 64
+_ENEMY_STATE_EGG = 0
 
 _LOGGED_UNKNOWN_PROG_IDS: set[int] = set()
 
@@ -444,6 +445,7 @@ def _ok_map(
     siphons: tuple[GridPosition, ...],
     walls: tuple[WallCellState, ...],
     resource_cells: tuple[ResourceCellState, ...],
+    player_position: GridPosition | None,
     exit_position: GridPosition | None,
     enemies: tuple[EnemyState, ...],
 ) -> MapState:
@@ -455,6 +457,7 @@ def _ok_map(
         siphons=siphons,
         walls=walls,
         resource_cells=resource_cells,
+        player_position=player_position,
         exit_position=exit_position,
         enemies=enemies,
     )
@@ -524,6 +527,17 @@ def _read_required_bool(reader: ProcessMemoryReader, address: int) -> ReadResult
     return ReadResult.ok(bool(result.value))
 
 
+def _mask_enemy_type_for_visibility(*, raw_type_id: int, enemy_state: int, in_bounds: bool) -> int:
+    """Hide enemy type for non-visible entities (egg mode or off-board)."""
+    if raw_type_id <= 0:
+        return 0
+    if not in_bounds:
+        return 0
+    if enemy_state == _ENEMY_STATE_EGG:
+        return 0
+    return raw_type_id
+
+
 def _extract_map_state(
     *,
     reader: ProcessMemoryReader,
@@ -552,6 +566,7 @@ def _extract_map_state(
     siphons: list[GridPosition] = []
     walls: list[WallCellState] = []
     resource_cells: list[ResourceCellState] = []
+    player_position: GridPosition | None = None
     exit_position: GridPosition | None = None
 
     for index in range(_MAP_CELL_COUNT):
@@ -700,14 +715,25 @@ def _extract_map_state(
 
         enemy_x = int(x_result.value or 0)
         enemy_y = int(y_result.value or 0)
+        enemy_position = GridPosition(x=enemy_x, y=enemy_y)
+        in_bounds = 0 <= enemy_x < _MAP_WIDTH and 0 <= enemy_y < _MAP_HEIGHT
+        enemy_state = int(state_result.value or 0)
+        if slot == 0:
+            player_position = enemy_position
+            continue
+
         enemies.append(
             EnemyState(
                 slot=slot,
-                type_id=int(type_result.value or 0),
-                position=GridPosition(x=enemy_x, y=enemy_y),
+                type_id=_mask_enemy_type_for_visibility(
+                    raw_type_id=int(type_result.value or 0),
+                    enemy_state=enemy_state,
+                    in_bounds=in_bounds,
+                ),
+                position=enemy_position,
                 hp=int(hp_result.value or 0),
-                state=int(state_result.value or 0),
-                in_bounds=(0 <= enemy_x < _MAP_WIDTH and 0 <= enemy_y < _MAP_HEIGHT),
+                state=enemy_state,
+                in_bounds=in_bounds,
             )
         )
 
@@ -718,6 +744,7 @@ def _extract_map_state(
         siphons=tuple(siphons),
         walls=tuple(walls),
         resource_cells=tuple(resource_cells),
+        player_position=player_position,
         exit_position=exit_position,
         enemies=tuple(enemies),
     )

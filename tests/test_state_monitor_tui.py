@@ -9,6 +9,7 @@ from src.memory.state_monitor_tui import (
     format_collected_progs_status,
     is_fail_state_detected,
     map_tui_key_to_passthrough_key,
+    render_ascii_map,
     summarize_board_state,
 )
 
@@ -269,3 +270,79 @@ def test_summarize_board_state_uses_enemy_overrides_and_ignores_type_zero() -> N
         "board progs=0 points=0 credits=0 energy=0 "
         "enemies=virus(2):1,classic(3):1,glitch(4):1,cryptog(5):1"
     )
+
+
+def test_render_ascii_map_shows_key_board_features() -> None:
+    map_state = MapState(
+        status="ok",
+        width=3,
+        height=2,
+        cells=(
+            MapCellState(
+                position=GridPosition(x=0, y=0),
+                cell_type=1,
+                tile_variant=0,
+                wall_state=0,
+                is_wall=True,
+            ),
+            MapCellState(
+                position=GridPosition(x=1, y=0),
+                cell_type=0,
+                tile_variant=0,
+                wall_state=0,
+                credits=2,
+            ),
+            MapCellState(
+                position=GridPosition(x=2, y=0),
+                cell_type=3,
+                tile_variant=0,
+                wall_state=0,
+                is_exit=True,
+            ),
+            MapCellState(
+                position=GridPosition(x=0, y=1),
+                cell_type=0,
+                tile_variant=0,
+                wall_state=0,
+            ),
+            MapCellState(
+                position=GridPosition(x=1, y=1),
+                cell_type=0,
+                tile_variant=0,
+                wall_state=0,
+            ),
+            MapCellState(
+                position=GridPosition(x=2, y=1),
+                cell_type=0,
+                tile_variant=0,
+                wall_state=0,
+            ),
+        ),
+        siphons=(GridPosition(x=1, y=1),),
+        player_position=GridPosition(x=1, y=1),
+        exit_position=GridPosition(x=2, y=0),
+        enemies=(
+            EnemyState(
+                slot=0,
+                type_id=0,
+                position=GridPosition(x=1, y=1),
+                hp=3,
+                state=0,
+                in_bounds=True,
+            ),
+        ),
+    )
+
+    rendered = render_ascii_map(map_state)
+    assert "map  [bright_black]\u00b7[/] empty  [yellow]\u2593[/] wall" in rendered
+    assert "[red]\u2620[/] enemy  [bright_white]\u263a[/] player" in rendered
+    assert "1|[bright_black]\u00b7[/][bright_white]\u263a[/][bright_black]\u00b7[/]" in rendered
+    assert "0|[yellow]\u2593[/][cyan]\u00a4[/][magenta]\u21e9[/]" in rendered
+    assert rendered.index("1|[bright_black]\u00b7[/][bright_white]\u263a[/][bright_black]\u00b7[/]") < rendered.index(
+        "0|[yellow]\u2593[/][cyan]\u00a4[/][magenta]\u21e9[/]"
+    )
+    assert "  012" in rendered
+
+
+def test_render_ascii_map_reports_non_ok_status() -> None:
+    assert render_ascii_map(MapState(status="missing")) == "map unavailable (missing)"

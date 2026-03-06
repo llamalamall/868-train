@@ -401,14 +401,14 @@ def test_extract_state_decodes_map_cells_siphons_walls_resources_exit_and_enemie
     for slot in range(64):
         memory[root + entity_base_offset + slot * entity_stride] = b"\x00"
 
-    # Active enemy 0 (in-bounds).
-    enemy0 = root + entity_base_offset
-    memory[enemy0] = b"\x01"
-    memory[enemy0 + 0x08] = struct.pack("<i", 2)
-    memory[enemy0 + 0x0C] = struct.pack("<i", 5)
-    memory[enemy0 + 0x18] = struct.pack("<i", 1)
-    memory[enemy0 + 0x34] = struct.pack("<i", 3)
-    memory[enemy0 + 0x38] = struct.pack("<i", 4)
+    # Entity slot 0 is the player character.
+    player0 = root + entity_base_offset
+    memory[player0] = b"\x01"
+    memory[player0 + 0x08] = struct.pack("<i", 2)
+    memory[player0 + 0x0C] = struct.pack("<i", 5)
+    memory[player0 + 0x18] = struct.pack("<i", 1)
+    memory[player0 + 0x34] = struct.pack("<i", 3)
+    memory[player0 + 0x38] = struct.pack("<i", 4)
 
     # Active enemy 1 (out-of-bounds, still tracked).
     enemy1 = root + entity_base_offset + entity_stride
@@ -444,8 +444,10 @@ def test_extract_state_decodes_map_cells_siphons_walls_resources_exit_and_enemie
     assert resource_by_pos[(0, 1)].energy == 2
     assert resource_by_pos[(0, 1)].points == 1
 
-    assert len(snapshot.map.enemies) == 2
-    assert (snapshot.map.enemies[0].position.x, snapshot.map.enemies[0].position.y) == (3, 4)
-    assert snapshot.map.enemies[0].in_bounds is True
-    assert (snapshot.map.enemies[1].position.x, snapshot.map.enemies[1].position.y) == (8, 1)
-    assert snapshot.map.enemies[1].in_bounds is False
+    assert snapshot.map.player_position is not None
+    assert (snapshot.map.player_position.x, snapshot.map.player_position.y) == (3, 4)
+
+    assert len(snapshot.map.enemies) == 1
+    assert snapshot.map.enemies[0].type_id == 0
+    assert (snapshot.map.enemies[0].position.x, snapshot.map.enemies[0].position.y) == (8, 1)
+    assert snapshot.map.enemies[0].in_bounds is False

@@ -191,6 +191,83 @@ def summarize_board_state(map_state: MapState, enemy_name_by_id: dict[int, str] 
     )
 
 
+def render_ascii_map(map_state: MapState) -> str:
+    """Render a compact UTF-8 mini-map with color markup for the TUI."""
+    if map_state.status != "ok":
+        return f"map unavailable ({map_state.status})"
+
+    cell_by_pos = {(cell.position.x, cell.position.y): cell for cell in map_state.cells}
+    siphon_positions = {(position.x, position.y) for position in map_state.siphons}
+    enemy_positions = {
+        (enemy.position.x, enemy.position.y) for enemy in map_state.enemies if enemy.in_bounds
+    }
+    player_position = (
+        (map_state.player_position.x, map_state.player_position.y) if map_state.player_position is not None else None
+    )
+    exit_position = (
+        (map_state.exit_position.x, map_state.exit_position.y) if map_state.exit_position is not None else None
+    )
+
+    def _styled(symbol: str, style: str) -> str:
+        return f"[{style}]{symbol}[/]"
+
+    empty_symbol = "·"
+    wall_symbol = "▓"
+    resource_symbol = "¤"
+    siphon_symbol = "◎"
+    exit_symbol = "⇩"
+    enemy_symbol = "☠"
+    player_symbol = "☺"
+
+    lines = [
+        "map  "
+        f"{_styled(empty_symbol, 'bright_black')} empty  "
+        f"{_styled(wall_symbol, 'yellow')} wall  "
+        f"{_styled(resource_symbol, 'cyan')} resource  "
+        f"{_styled(siphon_symbol, 'green')} siphon  "
+        f"{_styled(exit_symbol, 'magenta')} exit  "
+        f"{_styled(enemy_symbol, 'red')} enemy  "
+        f"{_styled(player_symbol, 'bright_white')} player"
+    ]
+    for y in range(map_state.height - 1, -1, -1):
+        row_chars: list[str] = []
+        for x in range(map_state.width):
+            symbol = empty_symbol
+            cell = cell_by_pos.get((x, y))
+            if cell is not None:
+                if cell.is_wall:
+                    symbol = wall_symbol
+                elif cell.credits > 0 or cell.energy > 0 or cell.points > 0:
+                    symbol = resource_symbol
+
+            if (x, y) in siphon_positions:
+                symbol = siphon_symbol
+            if exit_position == (x, y):
+                symbol = exit_symbol
+            if (x, y) in enemy_positions:
+                symbol = enemy_symbol
+            if player_position == (x, y):
+                symbol = player_symbol
+
+            if symbol == wall_symbol:
+                row_chars.append(_styled(symbol, "yellow"))
+            elif symbol == resource_symbol:
+                row_chars.append(_styled(symbol, "cyan"))
+            elif symbol == siphon_symbol:
+                row_chars.append(_styled(symbol, "green"))
+            elif symbol == exit_symbol:
+                row_chars.append(_styled(symbol, "magenta"))
+            elif symbol == enemy_symbol:
+                row_chars.append(_styled(symbol, "red"))
+            elif symbol == player_symbol:
+                row_chars.append(_styled(symbol, "bright_white"))
+            else:
+                row_chars.append(_styled(symbol, "bright_black"))
+        lines.append(f"{y}|{''.join(row_chars)}")
+    lines.append(f"  {''.join(str(index % 10) for index in range(map_state.width))}")
+    return "\n".join(lines)
+
+
 def _get_kernel32() -> ctypes.WinDLL:
     if os.name != "nt":
         raise StateMonitorError("State monitor TUI is only supported on Windows.")
@@ -556,7 +633,8 @@ class MemoryStateMonitor:
             return f"board_status=error({error})"
 
         self._ensure_enemy_name_map_loaded()
-        return summarize_board_state(snapshot.map, enemy_name_by_id=self._enemy_name_by_id)
+        board_summary = summarize_board_state(snapshot.map, enemy_name_by_id=self._enemy_name_by_id)
+        return f"{board_summary}\n{render_ascii_map(snapshot.map)}"
 
     def poll(self) -> PollSnapshot:
         """Read all selected fields once."""
