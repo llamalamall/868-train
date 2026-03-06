@@ -22,6 +22,13 @@
    - `wait` (if available)
    - random choice from available actions (tie/fallback)
 
+## Coordinate Convention
+- Uses game coordinates where `(0,0)` is bottom-left.
+- `move_up` means `y + 1`.
+- `move_down` means `y - 1`.
+- `move_right` means `x + 1`.
+- `move_left` means `x - 1`.
+
 ## Escape Rule
 - Computes nearest-enemy Manhattan distance from player.
 - If enemy is within `avoid_enemy_distance`, picks a move that increases nearest-enemy distance the most.

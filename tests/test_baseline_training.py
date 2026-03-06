@@ -59,6 +59,10 @@ class TinyLineWorldEnv:
             {"terminal_reason": terminal_reason},
         )
 
+    def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
+        del state
+        return self.action_space
+
     def close(self) -> None:
         return
 

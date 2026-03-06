@@ -34,6 +34,9 @@ class EpisodeEnv(Protocol):
     def step(self, action: str) -> tuple[GameStateSnapshot, float, bool, dict[str, Any]]:
         """Apply one action and return Gym-style step tuple."""
 
+    def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
+        """Return currently valid actions, optionally based on provided state."""
+
 
 @dataclass(frozen=True)
 class EpisodeRolloutResult:
@@ -72,10 +75,15 @@ def run_agent_policy(
         terminal_reason: str | None = None
 
         while steps < max_steps_per_episode and not done:
-            action = agent.select_action(state=state, action_space=env.action_space, rng=rng)
-            if action not in env.action_space:
+            available_actions = env.available_actions(state)
+            if not available_actions:
+                raise ValueError("No available actions for current state.")
+
+            action = agent.select_action(state=state, action_space=available_actions, rng=rng)
+            if action not in available_actions:
                 raise ValueError(
-                    f"Agent selected unknown action '{action}'. Allowed actions: {', '.join(env.action_space)}."
+                    "Agent selected action '{action}' outside available_actions. Allowed actions: "
+                    "{allowed}.".format(action=action, allowed=", ".join(available_actions))
                 )
 
             state, reward, done, info = env.step(action)

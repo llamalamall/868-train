@@ -10,8 +10,8 @@ from src.state.schema import EnemyState, GameStateSnapshot, GridPosition
 
 
 _MOVE_VECTORS: dict[str, tuple[int, int]] = {
-    "move_up": (0, -1),
-    "move_down": (0, 1),
+    "move_up": (0, 1),
+    "move_down": (0, -1),
     "move_left": (-1, 0),
     "move_right": (1, 0),
 }

@@ -74,6 +74,19 @@ def test_heuristic_baseline_moves_toward_exit_when_safe() -> None:
     assert action == "move_right"
 
 
+def test_heuristic_baseline_treats_move_up_as_positive_y() -> None:
+    agent = HeuristicBaselineAgent()
+    state = _snapshot(health=9, player=GridPosition(1, 1), exit_pos=GridPosition(1, 2))
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_down", "move_up", "wait"),
+        rng=random.Random(1),
+    )
+
+    assert action == "move_up"
+
+
 def test_heuristic_baseline_moves_away_from_adjacent_enemy() -> None:
     enemy = EnemyState(slot=0, type_id=1, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True)
     agent = HeuristicBaselineAgent()
