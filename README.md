@@ -91,6 +91,37 @@ TUI controls:
 - `p`: toggle pointer mode (`cached-addresses` vs `resolve-each-poll`)
 - `up/down/left/right`, `1` through `0`, `escape`, `space`: pass controls to the game window
 
+## Telemetry Logging (Task 10)
+
+Structured telemetry writes JSONL event streams under a namespaced run directory in `logs/`.
+
+- Core writer: `src/telemetry/logger.py` (`JsonlTelemetryLogger`)
+- Replay + summaries: `src/telemetry/metrics.py`
+
+Typical events:
+- `episode_start`
+- `step` (action, pre/post state, reward, done, episode_id, step_index, timestamp)
+- `terminal`
+
+Example usage:
+
+```python
+from src.telemetry.logger import JsonlTelemetryLogger, TelemetryLoggerConfig
+
+logger = JsonlTelemetryLogger(TelemetryLoggerConfig(run_name="train"))
+episode_id = logger.start_episode()
+logger.log_step(
+    episode_id=episode_id,
+    action="move_up",
+    pre_state={"health": 10},
+    post_state={"health": 9},
+    reward=-1.0,
+    done=False,
+)
+logger.log_terminal(episode_id=episode_id, reason="fail_state")
+logger.close()
+```
+
 ## Project Structure
 
 - `src/controller`: input/window control layer
