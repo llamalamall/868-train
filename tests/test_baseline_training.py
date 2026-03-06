@@ -83,6 +83,54 @@ class TinyLineWorldEnv:
         )
 
 
+@dataclass
+class NoAvailableActionsEnv:
+    """Env that reports no available actions to exercise random fallback path."""
+
+    action_space: tuple[str, ...] = ("move_left", "move_right")
+
+    def __post_init__(self) -> None:
+        self.current_episode_id = "episode-00001"
+        self.actions_seen: list[str] = []
+        self._step_count = 0
+
+    def reset(self) -> GameStateSnapshot:
+        self._step_count = 0
+        return GameStateSnapshot(
+            timestamp_utc="2026-03-06T00:00:00+00:00",
+            health=_field(10),
+            energy=_field(0),
+            currency=_field(0),
+            fail_state=_field(False),
+            map=MapState(status="missing"),
+        )
+
+    def step(self, action: str) -> tuple[GameStateSnapshot, float, bool, dict[str, object]]:
+        self.actions_seen.append(action)
+        self._step_count += 1
+        done = self._step_count >= 1
+        return (
+            GameStateSnapshot(
+                timestamp_utc="2026-03-06T00:00:00+00:00",
+                health=_field(10),
+                energy=_field(0),
+                currency=_field(0),
+                fail_state=_field(False),
+                map=MapState(status="missing"),
+            ),
+            0.0,
+            done,
+            {"terminal_reason": "done" if done else None},
+        )
+
+    def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
+        del state
+        return ()
+
+    def close(self) -> None:
+        return
+
+
 def test_run_agent_policy_completes_full_episodes() -> None:
     env = TinyLineWorldEnv()
     results = run_agent_policy(
@@ -118,3 +166,19 @@ def test_compare_baselines_reports_heuristic_outperforming_random() -> None:
     assert heuristic_metrics.avg_reward > random_metrics.avg_reward
     assert heuristic_metrics.avg_steps < random_metrics.avg_steps
     assert heuristic_metrics.terminal_reasons.get("goal", 0) >= random_metrics.terminal_reasons.get("goal", 0)
+
+
+def test_run_agent_policy_falls_back_to_random_action_when_none_available() -> None:
+    env = NoAvailableActionsEnv()
+
+    results = run_agent_policy(
+        env=env,
+        agent=HeuristicBaselineAgent(),
+        episodes=1,
+        max_steps_per_episode=5,
+        seed=11,
+    )
+
+    assert len(results) == 1
+    assert len(env.actions_seen) == 1
+    assert env.actions_seen[0] in env.action_space

@@ -77,14 +77,17 @@ def run_agent_policy(
         while steps < max_steps_per_episode and not done:
             available_actions = env.available_actions(state)
             if not available_actions:
-                raise ValueError("No available actions for current state.")
-
-            action = agent.select_action(state=state, action_space=available_actions, rng=rng)
-            if action not in available_actions:
-                raise ValueError(
-                    "Agent selected action '{action}' outside available_actions. Allowed actions: "
-                    "{allowed}.".format(action=action, allowed=", ".join(available_actions))
-                )
+                fallback_actions = tuple(action for action in env.action_space if action != "wait")
+                if not fallback_actions:
+                    raise ValueError("No available actions and env.action_space is empty.")
+                action = str(rng.choice(fallback_actions))
+            else:
+                action = agent.select_action(state=state, action_space=available_actions, rng=rng)
+                if action not in available_actions:
+                    raise ValueError(
+                        "Agent selected action '{action}' outside available_actions. Allowed actions: "
+                        "{allowed}.".format(action=action, allowed=", ".join(available_actions))
+                    )
 
             state, reward, done, info = env.step(action)
             total_reward += float(reward)

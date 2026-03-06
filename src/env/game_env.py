@@ -229,19 +229,20 @@ class GameEnv:
 
     def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
         """Return current action subset filtered for map-edge and wall collisions."""
+        base_actions = tuple(action for action in self._action_space if action != "wait")
         snapshot = state if state is not None else self._current_state
         if snapshot is None or snapshot.map.status != "ok":
-            return self._action_space
+            return base_actions
         player_position = snapshot.map.player_position
         if player_position is None:
-            return self._action_space
+            return base_actions
 
         wall_positions = {cell.position for cell in snapshot.map.cells if cell.is_wall}
         if not wall_positions and snapshot.map.walls:
             wall_positions = {wall.position for wall in snapshot.map.walls}
 
         filtered: list[str] = []
-        for action in self._action_space:
+        for action in base_actions:
             delta = _MOVE_ACTION_DELTAS.get(action)
             if delta is None:
                 filtered.append(action)

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import random
+import logging
 
-from src.agent.baseline_heuristic import HeuristicBaselineAgent
+from src.agent.baseline_heuristic import HeuristicBaselineAgent, HeuristicBaselineConfig
 from src.agent.baseline_random import RandomBaselineAgent
 from src.state.schema import EnemyState, FieldState, GameStateSnapshot, GridPosition, MapState
 
@@ -104,3 +105,23 @@ def test_heuristic_baseline_moves_away_from_adjacent_enemy() -> None:
     )
 
     assert action == "move_left"
+
+
+def test_heuristic_baseline_verbose_logging_emits_chosen_action(
+    caplog,
+) -> None:
+    caplog.set_level(logging.INFO)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(verbose_action_logging=True)
+    )
+    state = _snapshot(health=9, player=GridPosition(1, 1), exit_pos=GridPosition(2, 1))
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_left", "move_right", "wait"),
+        rng=random.Random(1),
+    )
+
+    assert action == "move_right"
+    assert "heuristic_action" in caplog.text
+    assert "choice=move_right" in caplog.text

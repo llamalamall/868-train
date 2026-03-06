@@ -10,6 +10,7 @@
 ## Config
 - `HeuristicBaselineConfig.low_health_threshold` (default `3`)
 - `HeuristicBaselineConfig.avoid_enemy_distance` (default `1`)
+- `HeuristicBaselineConfig.verbose_action_logging` (default `False`)
 
 ## Decision Order
 1. Validate `action_space` is non-empty.
@@ -42,3 +43,7 @@
 ## Failure Behavior
 - Raises `ValueError` when `action_space` is empty.
 - Handles missing/invalid state fields defensively by falling back to safe defaults.
+
+## Verbose Action Logs
+- When `verbose_action_logging=True`, each `select_action(...)` call logs the chosen action and decision reason.
+- Log format includes: chosen action, reason, health, player position, exit position, and available actions.

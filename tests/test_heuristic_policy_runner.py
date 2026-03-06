@@ -16,6 +16,7 @@ def test_heuristic_runner_parser_defaults() -> None:
     assert args.avoid_enemy_distance == 1
     assert args.movement_keys == "arrows"
     assert args.reset_sequence == "confirm"
+    assert args.verbose_actions is False
 
 
 def test_heuristic_runner_parser_accepts_config_overrides() -> None:
@@ -32,6 +33,7 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
             "2",
             "--avoid-enemy-distance",
             "3",
+            "--verbose-actions",
             "--reward-fail-penalty",
             "18.5",
         ]
@@ -42,4 +44,5 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
     assert args.movement_keys == "numpad"
     assert args.low_health_threshold == 2
     assert args.avoid_enemy_distance == 3
+    assert args.verbose_actions is True
     assert args.reward_fail_penalty == 18.5

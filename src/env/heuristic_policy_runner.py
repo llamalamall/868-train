@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import logging
 from statistics import mean
 
 from src.agent.baseline_heuristic import HeuristicBaselineAgent, HeuristicBaselineConfig
@@ -106,12 +107,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Print per-step reward component breakdown during execution.",
     )
+    parser.add_argument(
+        "--verbose-actions",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Enable heuristic action-choice logging.",
+    )
     return parser
 
 
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+    if args.verbose_actions:
+        logging.basicConfig(level=logging.INFO, format="%(message)s")
 
     reset_sequence = tuple(
         action.strip() for action in str(args.reset_sequence).split(",") if action.strip()
@@ -141,6 +150,7 @@ def main() -> None:
                 config=HeuristicBaselineConfig(
                     low_health_threshold=int(args.low_health_threshold),
                     avoid_enemy_distance=int(args.avoid_enemy_distance),
+                    verbose_action_logging=bool(args.verbose_actions),
                 )
             ),
             episodes=args.episodes,

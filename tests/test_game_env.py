@@ -184,9 +184,9 @@ def test_run_random_policy_uses_supplied_action_subset() -> None:
         config=GameEnvConfig(require_non_terminal_on_reset=False),
     )
 
-    run_random_policy(env=env, episodes=1, max_steps_per_episode=3, seed=9, actions=("wait",))
+    run_random_policy(env=env, episodes=1, max_steps_per_episode=3, seed=9, actions=("cancel",))
 
-    assert actions.actions == ["wait", "wait", "wait"]
+    assert actions.actions == ["cancel", "cancel", "cancel"]
 
 
 def test_game_env_available_actions_filters_edges_and_walls() -> None:
@@ -214,7 +214,7 @@ def test_game_env_available_actions_filters_edges_and_walls() -> None:
     )
     env.reset()
 
-    assert env.available_actions() == ("move_up", "wait")
+    assert env.available_actions() == ("move_up",)
 
 
 def test_run_random_policy_avoids_blocked_edge_moves() -> None:
