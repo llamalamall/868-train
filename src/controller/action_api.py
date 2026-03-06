@@ -39,6 +39,7 @@ class ActionConfig:
             "move_right": "RIGHT",
             "confirm": "ENTER",
             "cancel": "ESCAPE",
+            "space": "SPACE",
         }
     )
     key_codes: dict[str, int] = field(

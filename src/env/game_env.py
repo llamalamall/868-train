@@ -177,7 +177,7 @@ def _resolve_default_action_space(action_api: ActionPerformer) -> tuple[str, ...
     if isinstance(bindings, dict) and bindings:
         actions = tuple(bindings.keys())
     else:
-        actions = ("move_up", "move_down", "move_left", "move_right", "confirm", "cancel")
+        actions = ("move_up", "move_down", "move_left", "move_right", "confirm", "space")
     if "wait" not in actions:
         actions = (*actions, "wait")
     return actions
@@ -229,8 +229,26 @@ class GameEnv:
 
     def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
         """Return current action subset filtered for map-edge and wall collisions."""
-        base_actions = tuple(action for action in self._action_space if action != "wait")
+        base_actions = tuple(
+            action for action in self._action_space if action not in {"wait", "cancel"}
+        )
         snapshot = state if state is not None else self._current_state
+        fail_active = (
+            snapshot is not None
+            and snapshot.fail_state.status == "ok"
+            and bool(snapshot.fail_state.value)
+        )
+        if not fail_active:
+            base_actions = tuple(action for action in base_actions if action != "confirm")
+
+        siphon_count = (
+            len(snapshot.map.siphons)
+            if snapshot is not None and snapshot.map.status == "ok"
+            else 0
+        )
+        if siphon_count <= 0:
+            base_actions = tuple(action for action in base_actions if action != "space")
+
         if snapshot is None or snapshot.map.status != "ok":
             return base_actions
         player_position = snapshot.map.player_position

@@ -180,13 +180,13 @@ def test_run_random_policy_uses_supplied_action_subset() -> None:
         action_api=actions,
         state_provider=QueueStateProvider([_snapshot(failed=False)]),
         reset_strategy=NoopResetManager(),
-        action_space=("wait", "cancel"),
+        action_space=("move_up", "cancel"),
         config=GameEnvConfig(require_non_terminal_on_reset=False),
     )
 
-    run_random_policy(env=env, episodes=1, max_steps_per_episode=3, seed=9, actions=("cancel",))
+    run_random_policy(env=env, episodes=1, max_steps_per_episode=3, seed=9, actions=("move_up",))
 
-    assert actions.actions == ["cancel", "cancel", "cancel"]
+    assert actions.actions == ["move_up", "move_up", "move_up"]
 
 
 def test_game_env_available_actions_filters_edges_and_walls() -> None:
@@ -236,3 +236,59 @@ def test_run_random_policy_avoids_blocked_edge_moves() -> None:
     run_random_policy(env=env, episodes=1, max_steps_per_episode=4, seed=3)
 
     assert actions.actions == ["move_right", "move_right", "move_right", "move_right"]
+
+
+def test_available_actions_hides_confirm_when_not_failed_and_shows_on_fail() -> None:
+    non_fail_state = _snapshot(
+        failed=False,
+        map_state=MapState(status="ok", width=2, height=2, player_position=GridPosition(0, 0)),
+    )
+    fail_state = _snapshot(
+        failed=True,
+        map_state=MapState(status="ok", width=2, height=2, player_position=GridPosition(0, 0)),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([non_fail_state, fail_state]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "confirm"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+    assert env.available_actions() == ("move_up",)
+
+    env.step("move_up")
+    assert env.available_actions() == ("move_up", "confirm")
+
+
+def test_available_actions_adds_space_only_when_siphons_present() -> None:
+    no_siphon = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=2,
+            player_position=GridPosition(0, 0),
+            siphons=(),
+        )
+    )
+    with_siphon = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=2,
+            player_position=GridPosition(0, 0),
+            siphons=(GridPosition(1, 1),),
+        )
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([no_siphon, with_siphon]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+    assert env.available_actions() == ("move_up",)
+
+    env.step("move_up")
+    assert env.available_actions() == ("move_up", "space")
