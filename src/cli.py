@@ -14,6 +14,7 @@ from src.env.heuristic_policy_runner import main as heuristic_runner_main
 from src.env.random_policy_runner import main as random_runner_main
 from src.memory.offset_smoke_test import main as offset_smoke_main
 from src.memory.state_monitor_tui import main as state_monitor_main
+from src.training.evaluate import main as evaluate_main
 
 CommandHandler = Callable[[], None]
 
@@ -42,7 +43,7 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="868-train",
         description=(
             "Master CLI for 868-train. Use one of the subcommands below to run runtime checks, "
-            "monitoring tools, or baseline policy runners."
+            "monitoring tools, policy runners, or evaluation harnesses."
         ),
         epilog=(
             "To show a sub-tool's native options/help, forward args after '--'. "
@@ -93,6 +94,15 @@ def _build_parser() -> argparse.ArgumentParser:
         summary="Run DQN train/eval episodes.",
         details="Runs src.env.dqn_policy_runner against the live game environment.",
     )
+    _add_passthrough_parser(
+        subparsers,
+        name="evaluate",
+        summary="DQN checkpoint KPI evaluation.",
+        details=(
+            "Runs src.training.evaluate for fixed-seed KPI reports and "
+            "checkpoint-vs-checkpoint comparisons."
+        ),
+    )
     return parser
 
 
@@ -111,6 +121,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "run-random": random_runner_main,
         "run-heuristic": heuristic_runner_main,
         "run-dqn": dqn_runner_main,
+        "evaluate": evaluate_main,
     }
 
     selected = handlers.get(args.command)

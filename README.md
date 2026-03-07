@@ -47,6 +47,7 @@ Available subcommands:
 - `run-random`: random baseline runner (`src.env.random_policy_runner`)
 - `run-heuristic`: heuristic baseline runner (`src.env.heuristic_policy_runner`)
 - `run-dqn`: DQN train/eval runner with checkpoint save/load (`src.env.dqn_policy_runner`)
+- `evaluate`: fixed-seed DQN KPI harness and checkpoint comparison (`src.training.evaluate`)
 
 For command-specific options, forward `--help` to the underlying tool:
 
@@ -80,7 +81,15 @@ python -m src.cli run-dqn --episodes 20 --max-steps 200
 
 # Evaluate from a saved DQN checkpoint
 python -m src.cli run-dqn --mode eval --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 5
+
+# Task-15 KPI evaluation for one checkpoint
+python -m src.cli evaluate run --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 10 --seed 42
+
+# Task-15 checkpoint-vs-checkpoint KPI comparison
+python -m src.cli evaluate compare --checkpoint-a artifacts/checkpoints/dqn-a.json --checkpoint-b artifacts/checkpoints/dqn-b.json --episodes 10 --seed 42
 ```
+
+`evaluate compare` launches the monitor TUI by default and defaults to `--window-input --no-focus-window` so compare runs can continue while keeping terminal focus.
 
 When `--tui` or `--step-through` is enabled, runners automatically use window-targeted input so actions still dispatch to the game while the TUI has focus.
 
