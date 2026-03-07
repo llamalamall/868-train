@@ -55,3 +55,36 @@ def test_master_cli_dispatches_run_dqn_with_passthrough(monkeypatch) -> None:
             ["--mode", "eval", "--checkpoint", "artifacts\\checkpoints\\dqn.json"],
         )
     ]
+
+
+def test_master_cli_dispatches_evaluate_with_passthrough(monkeypatch) -> None:
+    captured: list[tuple[str, list[str]]] = []
+    _install_stub(monkeypatch, "src.cli.evaluate_main", captured)
+
+    cli.main(
+        [
+            "evaluate",
+            "compare",
+            "--checkpoint-a",
+            "artifacts\\checkpoints\\a.json",
+            "--checkpoint-b",
+            "artifacts\\checkpoints\\b.json",
+            "--episodes",
+            "4",
+        ]
+    )
+
+    assert captured == [
+        (
+            "evaluate_main",
+            [
+                "compare",
+                "--checkpoint-a",
+                "artifacts\\checkpoints\\a.json",
+                "--checkpoint-b",
+                "artifacts\\checkpoints\\b.json",
+                "--episodes",
+                "4",
+            ],
+        )
+    ]
