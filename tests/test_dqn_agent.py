@@ -202,3 +202,25 @@ def test_dqn_training_step_callback_reports_action_and_reason() -> None:
     first = events[0]
     assert isinstance(first["action"], str)
     assert first["action_reason"] in {"epsilon_explore", "greedy_q", "dqn_select_action"}
+
+
+def test_dqn_training_before_step_callback_reports_pending_action() -> None:
+    env = TinyLineWorldEnv()
+    agent = DQNAgent(action_space=env.action_space, config=_test_config(), seed=19)
+    events: list[dict[str, object]] = []
+
+    _ = run_dqn_training(
+        env=env,
+        agent=agent,
+        episodes=1,
+        max_steps_per_episode=4,
+        explore=True,
+        learn=True,
+        before_step_callback=lambda event: events.append(event),
+    )
+
+    assert events
+    first = events[0]
+    assert isinstance(first["action"], str)
+    assert first["action_reason"] in {"epsilon_explore", "greedy_q", "dqn_select_action"}
+    assert isinstance(first["epsilon"], float)

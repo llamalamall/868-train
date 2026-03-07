@@ -196,6 +196,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Polling interval for the live TUI (seconds).",
     )
     parser.add_argument(
+        "--step-through",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Pause before each action and wait for Enter in the TUI to advance.",
+    )
+    parser.add_argument(
         "--step-timeout",
         type=float,
         default=3.0,
@@ -249,6 +255,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+    if bool(args.step_through) and not bool(args.tui):
+        parser.error("--step-through requires --tui.")
 
     reset_sequence = tuple(
         action.strip()
@@ -275,6 +283,7 @@ def main() -> None:
         executable_name=str(args.exe),
         enabled=bool(args.tui),
         interval_seconds=float(args.tui_interval),
+        step_through=bool(args.step_through),
     )
     try:
         env = GameEnv.from_live_process(
@@ -307,6 +316,21 @@ def main() -> None:
                 ),
             )
 
+        def _on_before_step(event: dict[str, Any]) -> None:
+            tui.wait_for_step_advance(
+                training_line=(
+                    "episode={episode} step={step} total={total:.3f} waiting=enter".format(
+                        episode=event.get("episode_id"),
+                        step=int(event.get("step_index", 0)) + 1,
+                        total=float(event.get("total_reward", 0.0)),
+                    )
+                ),
+                action_line="action={action} reason={reason}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "random_policy_sample",
+                ),
+            )
+
         if args.actions:
             policy_actions = tuple(
                 action.strip()
@@ -326,6 +350,7 @@ def main() -> None:
             max_steps_per_episode=args.max_steps,
             seed=args.seed,
             actions=policy_actions,
+            before_step_callback=_on_before_step if bool(args.step_through) else None,
             step_callback=_on_step if bool(args.tui) else None,
         )
     finally:

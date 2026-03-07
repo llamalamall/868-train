@@ -7,7 +7,9 @@ from src.memory.state_monitor_tui import (
     FieldSnapshot,
     PollSnapshot,
     format_collected_progs_status,
+    increment_external_advance_counter,
     is_fail_state_detected,
+    load_external_advance_counter,
     load_external_status_snapshot,
     map_tui_key_to_passthrough_key,
     render_ascii_map,
@@ -365,3 +367,16 @@ def test_load_external_status_snapshot_reads_training_and_action_lines(tmp_path)
     status = load_external_status_snapshot(status_file)
     assert status.training_line == "episode=1 step=4 total_reward=2.100"
     assert status.action_line == "action=move_up reason=collect_siphon"
+
+
+def test_load_external_advance_counter_returns_zero_for_missing_file(tmp_path) -> None:
+    control_file = tmp_path / "control.json"
+    assert load_external_advance_counter(control_file) == 0
+
+
+def test_increment_external_advance_counter_updates_counter_file(tmp_path) -> None:
+    control_file = tmp_path / "control.json"
+
+    assert increment_external_advance_counter(control_file) == 1
+    assert increment_external_advance_counter(control_file) == 2
+    assert load_external_advance_counter(control_file) == 2

@@ -90,6 +90,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Polling interval for the live TUI (seconds).",
     )
     parser.add_argument(
+        "--step-through",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Pause before each action and wait for Enter in the TUI to advance.",
+    )
+    parser.add_argument(
         "--step-timeout",
         type=float,
         default=3.0,
@@ -278,6 +284,8 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
     _validate_args(parser, args)
+    if bool(args.step_through) and not bool(args.tui):
+        parser.error("--step-through requires --tui.")
 
     reset_sequence = tuple(
         action.strip() for action in str(args.reset_sequence).split(",") if action.strip()
@@ -292,6 +300,7 @@ def main() -> None:
         executable_name=str(args.exe),
         enabled=bool(args.tui),
         interval_seconds=float(args.tui_interval),
+        step_through=bool(args.step_through),
     )
 
     checkpoint_path = _resolve_checkpoint_path(args)
@@ -340,6 +349,24 @@ def main() -> None:
                 ),
             )
 
+        def _on_before_step(event: dict[str, Any]) -> None:
+            tui.wait_for_step_advance(
+                training_line=(
+                    "episode={episode} step={step} total={total:.3f} "
+                    "epsilon={epsilon:.4f} updates={updates} waiting=enter".format(
+                        episode=event.get("episode_id"),
+                        step=int(event.get("step_index", 0)) + 1,
+                        total=float(event.get("total_reward", 0.0)),
+                        epsilon=float(event.get("epsilon", 0.0)),
+                        updates=int(event.get("updates_applied", 0)),
+                    )
+                ),
+                action_line="action={action} reason={reason}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "dqn_select_action",
+                ),
+            )
+
         assert env is not None
         if checkpoint_path.exists():
             agent = DQNAgent.load_checkpoint(checkpoint_path)
@@ -373,6 +400,7 @@ def main() -> None:
                     max_steps_per_episode=int(args.max_steps),
                     explore=True,
                     learn=True,
+                    before_step_callback=_on_before_step if bool(args.step_through) else None,
                     step_callback=_on_step if bool(args.tui) else None,
                 )[0]
                 results.append(episode_result)
@@ -409,6 +437,7 @@ def main() -> None:
                     max_steps_per_episode=int(args.max_steps),
                     explore=False,
                     learn=False,
+                    before_step_callback=_on_before_step if bool(args.step_through) else None,
                     step_callback=_on_step if bool(args.tui) else None,
                 )
             )

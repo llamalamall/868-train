@@ -13,8 +13,10 @@ def test_heuristic_runner_parser_defaults() -> None:
     assert args.episodes == 3
     assert args.max_steps == 200
     assert args.low_health_threshold == 3
+    assert args.enemy_prediction_horizon_steps == 2
     assert args.movement_keys == "arrows"
     assert args.prog_actions is True
+    assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
     assert args.reset_sequence == "confirm"
@@ -32,10 +34,13 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
             "--movement-keys",
             "numpad",
             "--no-prog-actions",
+            "--step-through",
             "--no-require-non-terminal-reset",
             "--no-tui",
             "--low-health-threshold",
             "2",
+            "--enemy-prediction-horizon-steps",
+            "5",
             "--verbose-actions",
             "--reward-fail-penalty",
             "18.5",
@@ -46,8 +51,10 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
     assert args.max_steps == 321
     assert args.movement_keys == "numpad"
     assert args.prog_actions is False
+    assert args.step_through is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False
     assert args.low_health_threshold == 2
+    assert args.enemy_prediction_horizon_steps == 5
     assert args.verbose_actions is True
     assert args.reward_fail_penalty == 18.5

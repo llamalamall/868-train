@@ -69,6 +69,12 @@ python -m src.cli run-random --episodes 5 --max-steps 200
 # Run heuristic baseline episodes
 python -m src.cli run-heuristic --episodes 5 --max-steps 200 --movement-keys wasd
 
+# Run heuristic with deeper enemy lookahead
+python -m src.cli run-heuristic --episodes 5 --enemy-prediction-horizon-steps 4
+
+# Step through actions manually (press Enter in TUI before each move)
+python -m src.cli run-dqn --episodes 1 --step-through
+
 # Train DQN and auto-save checkpoint (path auto-generated under artifacts/checkpoints)
 python -m src.cli run-dqn --episodes 20 --max-steps 200
 
@@ -140,6 +146,7 @@ TUI controls:
 - `z`: pause/resume polling
 - `r`: refresh immediately
 - `p`: toggle pointer mode (`cached-addresses` vs `resolve-each-poll`)
+- `enter`: advance one pending runner step when `--step-through` is enabled
 - `up/down/left/right`, `1` through `0`, `escape`, `space`: pass controls to the game window
 
 ## Telemetry Logging (Task 10)

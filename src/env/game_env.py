@@ -695,6 +695,7 @@ def run_random_policy(
     max_steps_per_episode: int = 200,
     seed: int | None = None,
     actions: tuple[str, ...] | None = None,
+    before_step_callback: Callable[[dict[str, Any]], None] | None = None,
     step_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[RandomPolicyEpisodeResult, ...]:
     """Run random actions for N episodes to validate env contract."""
@@ -738,6 +739,16 @@ def run_random_policy(
                 raise GameEnvError("No available actions after map-edge/wall filtering.")
 
             action = rng.choice(step_actions)
+            if before_step_callback is not None:
+                before_step_callback(
+                    {
+                        "episode_id": env.current_episode_id,
+                        "step_index": step_index,
+                        "action": action,
+                        "action_reason": "random_policy_sample",
+                        "total_reward": total_reward,
+                    }
+                )
             _, reward, done, info = env.step(action)
             total_reward += float(reward)
             steps += 1

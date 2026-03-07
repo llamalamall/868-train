@@ -71,6 +71,7 @@ def run_agent_policy(
     episodes: int,
     max_steps_per_episode: int = 200,
     seed: int | None = None,
+    before_step_callback: Callable[[dict[str, Any]], None] | None = None,
     step_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[EpisodeRolloutResult, ...]:
     """Run an action-selecting agent through full episodes."""
@@ -111,6 +112,17 @@ def run_agent_policy(
                     selected_reason
                     if isinstance(selected_reason, str) and selected_reason.strip()
                     else "agent_select_action"
+                )
+
+            if before_step_callback is not None:
+                before_step_callback(
+                    {
+                        "episode_id": episode_id,
+                        "step_index": step_index,
+                        "action": action,
+                        "action_reason": action_reason,
+                        "total_reward": total_reward,
+                    }
                 )
 
             state, reward, done, info = env.step(action)
@@ -155,6 +167,7 @@ def run_dqn_training(
     max_steps_per_episode: int = 200,
     explore: bool = True,
     learn: bool = True,
+    before_step_callback: Callable[[dict[str, Any]], None] | None = None,
     step_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[LearningEpisodeRolloutResult, ...]:
     """Train (or evaluate) the DQN agent through full episodes."""
@@ -203,6 +216,20 @@ def run_dqn_training(
                 if isinstance(selected_reason, str) and selected_reason.strip()
                 else "dqn_select_action"
             )
+
+            if before_step_callback is not None:
+                before_step_callback(
+                    {
+                        "episode_id": episode_id,
+                        "step_index": step_index,
+                        "action": action,
+                        "action_reason": action_reason,
+                        "total_reward": total_reward,
+                        "updates_applied": updates_applied,
+                        "last_loss": last_loss,
+                        "epsilon": agent.epsilon,
+                    }
+                )
 
             next_state, reward, done, info = env.step(action)
             if learn:

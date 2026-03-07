@@ -8,7 +8,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Literal, Sequence
 
-from src.state.schema import GameStateSnapshot, GridPosition, MapCellState
+from src.state.schema import EnemyState, GameStateSnapshot, GridPosition, MapCellState
 
 LOGGER = logging.getLogger(__name__)
 
@@ -24,6 +24,13 @@ _PROG_ID_DELAY = 7
 _PROG_ID_STEP = 8
 _PROG_ID_ANTI_V = 9
 _PROG_ID_DEBUG = 10
+_PROG_ID_SCORE = 17
+_PROG_ID_HACK = 18
+_ENEMY_TYPE_VIRUS = 2
+_ENEMY_TYPE_CLASSIC = 3
+_ENEMY_TYPE_GLITCH = 4
+_ENEMY_TYPE_CRYPTOG = 5
+_ENEMY_TYPE_DAEMON = 7
 
 
 @dataclass(frozen=True)
@@ -39,6 +46,7 @@ class HeuristicBaselineConfig:
     prog_energy_floor: int = 4
     prog_retry_backoff_steps: int = 4
     show_recast_gap_steps: int = 6
+    enemy_prediction_horizon_steps: int = 2
 
 
 @dataclass(frozen=True)
@@ -104,70 +112,98 @@ class HeuristicBaselineAgent:
                 action_space=actions,
             )
 
-        planned_action, planned_reason = self._execute_harvest_plan(state=state, action_space=actions)
+        movement_actions = _navigable_movement_actions(state=state, action_space=actions)
+        safe_movement_actions = self._safe_movement_actions(state=state, action_space=actions)
+        if movement_actions and not safe_movement_actions:
+            escape_prog_action, escape_prog_reason = self._select_prog_escape_action(
+                state=state,
+                action_space=actions,
+            )
+            if escape_prog_action is not None and escape_prog_reason is not None:
+                self._record_prog_action_attempt(action_name=escape_prog_action, state=state)
+                return self._log_choice(
+                    state=state,
+                    action=escape_prog_action,
+                    reason=escape_prog_reason,
+                    action_space=actions,
+                )
+            return self._log_choice(
+                state=state,
+                action=str(rng.choice(movement_actions)),
+                reason="fallback_random_when_all_moves_dangerous",
+                action_space=actions,
+            )
+
+        safe_actions = _with_movement_actions_filtered(
+            action_space=actions,
+            allowed_movement_actions=safe_movement_actions if safe_movement_actions else movement_actions,
+        )
+
+        planned_action, planned_reason = self._execute_harvest_plan(state=state, action_space=safe_actions)
         if planned_action is not None and planned_reason is not None:
             return self._log_choice(
                 state=state,
                 action=planned_action,
                 reason=planned_reason,
-                action_space=actions,
+                action_space=safe_actions,
             )
 
         health_value = self._coerce_int(state.health.value) if state.health.status == "ok" else None
         if (
             health_value is not None
             and health_value <= self.config.low_health_threshold
-            and "wait" in actions
+            and "wait" in safe_actions
+            and self._is_wait_safe(state=state)
         ):
             return self._log_choice(
                 state=state,
                 action="wait",
                 reason="low_health_wait",
-                action_space=actions,
+                action_space=safe_actions,
             )
 
         if state.map.status == "ok" and state.map.player_position is not None:
-            enemy_action = self._select_enemy_sight_move(state=state, action_space=actions)
+            enemy_action = self._select_enemy_sight_move(state=state, action_space=safe_actions)
             if enemy_action is not None:
                 return self._log_choice(
                     state=state,
                     action=enemy_action,
-                    reason="pursue_enemy_in_sight",
-                    action_space=actions,
+                    reason="pursue_enemy_in_sight_or_glitch_wall_shot",
+                    action_space=safe_actions,
                 )
 
-            siphon_action = self._select_siphon_move(state=state, action_space=actions)
+            siphon_action = self._select_siphon_move(state=state, action_space=safe_actions)
             if siphon_action is not None:
                 return self._log_choice(
                     state=state,
                     action=siphon_action,
                     reason="collect_siphon",
-                    action_space=actions,
+                    action_space=safe_actions,
                 )
 
             if not state.map.siphons:
-                exit_action = self._select_exit_move(state=state, action_space=actions)
+                exit_action = self._select_exit_move(state=state, action_space=safe_actions)
                 if exit_action is not None:
                     return self._log_choice(
                         state=state,
                         action=exit_action,
                         reason="move_toward_exit",
-                        action_space=actions,
+                        action_space=safe_actions,
                     )
 
-        if "confirm" in actions:
+        if "confirm" in safe_actions:
             return self._log_choice(
                 state=state,
                 action="confirm",
                 reason="fallback_confirm",
-                action_space=actions,
+                action_space=safe_actions,
             )
 
         return self._log_choice(
             state=state,
-            action=str(rng.choice(actions)),
+            action=str(rng.choice(safe_actions)),
             reason="fallback_random",
-            action_space=actions,
+            action_space=safe_actions,
         )
 
     def _update_harvest_plan_on_siphon_change(
@@ -354,6 +390,153 @@ class HeuristicBaselineAgent:
                 return (step_action, "use_prog_step_unblock")
 
         return (None, None)
+
+    def _select_prog_escape_action(
+        self,
+        *,
+        state: GameStateSnapshot,
+        action_space: tuple[str, ...],
+    ) -> tuple[str | None, str | None]:
+        if not self.config.enable_prog_usage:
+            return (None, None)
+        if state.map.status != "ok":
+            return (None, None)
+        energy = self._coerce_int(state.energy.value) if state.energy.status == "ok" else None
+        if energy is None or energy < self.config.prog_energy_floor:
+            return (None, None)
+
+        slot_prog_actions = self._slot_prog_actions(state=state, action_space=action_space)
+        if not slot_prog_actions:
+            return (None, None)
+
+        for prog_id, reason in (
+            (_PROG_ID_DELAY, "use_prog_delay_when_all_moves_dangerous"),
+            (_PROG_ID_ANTI_V, "use_prog_anti_v_when_all_moves_dangerous"),
+            (_PROG_ID_STEP, "use_prog_step_when_all_moves_dangerous"),
+            (_PROG_ID_SHOW, "use_prog_show_when_all_moves_dangerous"),
+            (_PROG_ID_DEBUG, "use_prog_debug_when_all_moves_dangerous"),
+        ):
+            action = self._find_prog_action_by_id(slot_prog_actions=slot_prog_actions, prog_id=prog_id)
+            if action is not None:
+                return (action, reason)
+
+        for prog_id, actions in slot_prog_actions.items():
+            if prog_id in {_PROG_ID_HACK, _PROG_ID_SCORE}:
+                continue
+            if actions:
+                return (actions[0], "use_prog_generic_when_all_moves_dangerous")
+        return (None, None)
+
+    def _safe_movement_actions(
+        self,
+        *,
+        state: GameStateSnapshot,
+        action_space: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        movement_actions = _movement_actions(action_space)
+        if not movement_actions:
+            return ()
+        movement_actions = _navigable_movement_actions(state=state, action_space=action_space)
+        if not movement_actions:
+            return ()
+
+        safe_actions: list[str] = []
+        player = state.map.player_position
+        if player is None:
+            return ()
+        for action in movement_actions:
+            delta = _MOVE_VECTORS[action]
+            candidate = GridPosition(x=player.x + delta[0], y=player.y + delta[1])
+            if not self._position_is_safe_for_horizon(state=state, position=candidate):
+                continue
+            safe_actions.append(action)
+        return tuple(safe_actions)
+
+    def _is_wait_safe(self, *, state: GameStateSnapshot) -> bool:
+        if state.map.status != "ok" or state.map.player_position is None:
+            return True
+        return self._position_is_safe_for_horizon(state=state, position=state.map.player_position)
+
+    def _position_is_safe_for_horizon(
+        self,
+        *,
+        state: GameStateSnapshot,
+        position: GridPosition,
+    ) -> bool:
+        if state.map.status != "ok":
+            return True
+        horizon = max(int(self.config.enemy_prediction_horizon_steps), 0)
+        enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds)
+        if not enemies:
+            return True
+        walls = _wall_positions(state)
+        width = state.map.width
+        height = state.map.height
+        memo: dict[
+            tuple[int, int, int, tuple[tuple[int, int, int, int], ...]],
+            bool,
+        ] = {}
+
+        def can_survive(
+            *,
+            player_position: GridPosition,
+            enemy_positions: tuple[EnemyState, ...],
+            remaining_turns: int,
+        ) -> bool:
+            enemy_key = tuple(
+                (enemy.type_id, enemy.position.x, enemy.position.y, enemy.slot)
+                for enemy in enemy_positions
+            )
+            key = (player_position.x, player_position.y, remaining_turns, enemy_key)
+            cached = memo.get(key)
+            if cached is not None:
+                return cached
+
+            if _position_takes_damage(position=player_position, enemies=enemy_positions):
+                memo[key] = False
+                return False
+
+            if remaining_turns <= 0:
+                memo[key] = True
+                return True
+
+            enemies_next = _predict_enemies_one_turn(
+                enemies=enemy_positions,
+                player_position=player_position,
+                width=width,
+                height=height,
+                walls=walls,
+            )
+            if _position_takes_damage(position=player_position, enemies=enemies_next):
+                memo[key] = False
+                return False
+
+            if remaining_turns == 1:
+                memo[key] = True
+                return True
+
+            for next_player_position in _next_player_positions(
+                position=player_position,
+                width=width,
+                height=height,
+                walls=walls,
+            ):
+                if can_survive(
+                    player_position=next_player_position,
+                    enemy_positions=enemies_next,
+                    remaining_turns=remaining_turns - 1,
+                ):
+                    memo[key] = True
+                    return True
+
+            memo[key] = False
+            return False
+
+        return can_survive(
+            player_position=position,
+            enemy_positions=enemies,
+            remaining_turns=horizon,
+        )
 
     def _slot_prog_actions(
         self,
@@ -716,8 +899,11 @@ class HeuristicBaselineAgent:
             return None
 
         wall_positions = _wall_positions(state)
+        movement_actions = _movement_actions(action_space)
+        if not movement_actions:
+            return None
 
-        target_enemy: GridPosition | None = None
+        target_enemy: tuple[int, GridPosition] | None = None
         target_distance: int | None = None
         for enemy in state.map.enemies:
             enemy_position = enemy.position
@@ -733,17 +919,28 @@ class HeuristicBaselineAgent:
             distance = _manhattan(player, enemy_position)
             if target_distance is None or distance < target_distance:
                 target_distance = distance
-                target_enemy = enemy_position
+                target_enemy = (enemy.type_id, enemy_position)
 
         if target_enemy is None:
             return None
+
+        target_type, target_position = target_enemy
+        if target_type == _ENEMY_TYPE_GLITCH and target_position in wall_positions:
+            action = _first_step_toward_axis_aligned_target(
+                start=player,
+                target=target_position,
+                allowed_actions=movement_actions,
+            )
+            if action is not None:
+                return action
+
         route = _shortest_path_first_action(
             start=player,
-            target=target_enemy,
+            target=target_position,
             width=state.map.width,
             height=state.map.height,
             walls=wall_positions,
-            allowed_first_actions=_movement_actions(action_space),
+            allowed_first_actions=movement_actions,
         )
         return route.action if route is not None else None
 
@@ -782,8 +979,193 @@ def _manhattan(a: GridPosition, b: GridPosition) -> int:
     return abs(a.x - b.x) + abs(a.y - b.y)
 
 
+def _chebyshev(a: GridPosition, b: GridPosition) -> int:
+    return max(abs(a.x - b.x), abs(a.y - b.y))
+
+
+def _with_movement_actions_filtered(
+    *,
+    action_space: tuple[str, ...],
+    allowed_movement_actions: tuple[str, ...],
+) -> tuple[str, ...]:
+    allowed = set(allowed_movement_actions)
+    return tuple(
+        action
+        for action in action_space
+        if action not in _MOVE_VECTORS or action in allowed
+    )
+
+
+def _first_step_toward_axis_aligned_target(
+    *,
+    start: GridPosition,
+    target: GridPosition,
+    allowed_actions: tuple[str, ...],
+) -> str | None:
+    if start.x == target.x:
+        action = "move_up" if target.y > start.y else "move_down"
+        return action if action in allowed_actions else None
+    if start.y == target.y:
+        action = "move_right" if target.x > start.x else "move_left"
+        return action if action in allowed_actions else None
+    return None
+
+
+def _position_takes_damage(
+    *,
+    position: GridPosition,
+    enemies: tuple[EnemyState, ...],
+) -> bool:
+    for enemy in enemies:
+        if not enemy.in_bounds:
+            continue
+        if _manhattan(position, enemy.position) <= 1:
+            return True
+        if enemy.type_id == _ENEMY_TYPE_VIRUS and _chebyshev(position, enemy.position) <= 1:
+            return True
+    return False
+
+
+def _predict_enemies_one_turn(
+    *,
+    enemies: tuple[EnemyState, ...],
+    player_position: GridPosition,
+    width: int,
+    height: int,
+    walls: set[GridPosition],
+) -> tuple[EnemyState, ...]:
+    predicted: list[EnemyState] = []
+    for enemy in enemies:
+        if not enemy.in_bounds:
+            predicted.append(enemy)
+            continue
+        steps = 2 if enemy.type_id == _ENEMY_TYPE_VIRUS else 1
+        next_position = enemy.position
+        for _ in range(steps):
+            next_position = _predict_enemy_substep(
+                enemy_type=enemy.type_id,
+                enemy_position=next_position,
+                player_position=player_position,
+                width=width,
+                height=height,
+                walls=walls,
+            )
+        predicted.append(
+            EnemyState(
+                slot=enemy.slot,
+                type_id=enemy.type_id,
+                position=next_position,
+                hp=enemy.hp,
+                state=enemy.state,
+                in_bounds=enemy.in_bounds,
+            )
+        )
+    return tuple(predicted)
+
+
+def _predict_enemy_substep(
+    *,
+    enemy_type: int,
+    enemy_position: GridPosition,
+    player_position: GridPosition,
+    width: int,
+    height: int,
+    walls: set[GridPosition],
+) -> GridPosition:
+    can_pass_walls = enemy_type == _ENEMY_TYPE_GLITCH
+    candidates: list[GridPosition] = []
+    for dx, dy in _MOVE_VECTORS.values():
+        candidate = GridPosition(x=enemy_position.x + dx, y=enemy_position.y + dy)
+        if not _is_in_bounds(candidate, width=width, height=height):
+            continue
+        if not can_pass_walls and candidate in walls:
+            continue
+        candidates.append(candidate)
+    candidates.append(enemy_position)
+
+    if not candidates:
+        return enemy_position
+
+    distances = {candidate: _manhattan(candidate, player_position) for candidate in candidates}
+    current_distance = _manhattan(enemy_position, player_position)
+    best_distance = min(distances.values())
+    best_candidates = [candidate for candidate in candidates if distances[candidate] == best_distance]
+
+    if enemy_type == _ENEMY_TYPE_GLITCH:
+        reducing_candidates = [
+            candidate
+            for candidate in candidates
+            if distances[candidate] < current_distance
+        ]
+        if reducing_candidates:
+            wall_reducing_candidates = [candidate for candidate in reducing_candidates if candidate in walls]
+            if wall_reducing_candidates:
+                return wall_reducing_candidates[0]
+            best_reducing_distance = min(distances[candidate] for candidate in reducing_candidates)
+            best_reducing_candidates = [
+                candidate
+                for candidate in reducing_candidates
+                if distances[candidate] == best_reducing_distance
+            ]
+            return best_reducing_candidates[0]
+        return best_candidates[0]
+
+    if enemy_type == _ENEMY_TYPE_CRYPTOG:
+        hidden_best_candidates = [
+            candidate
+            for candidate in best_candidates
+            if not _has_line_of_sight(player=player_position, target=candidate, walls=walls)
+        ]
+        if hidden_best_candidates:
+            return hidden_best_candidates[0]
+        return best_candidates[0]
+
+    return best_candidates[0]
+
+
+def _next_player_positions(
+    *,
+    position: GridPosition,
+    width: int,
+    height: int,
+    walls: set[GridPosition],
+) -> tuple[GridPosition, ...]:
+    candidates: list[GridPosition] = [position]
+    for dx, dy in _MOVE_VECTORS.values():
+        candidate = GridPosition(x=position.x + dx, y=position.y + dy)
+        if not _is_in_bounds(candidate, width=width, height=height):
+            continue
+        if candidate in walls:
+            continue
+        candidates.append(candidate)
+    return tuple(candidates)
+
+
 def _movement_actions(action_space: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(action for action in action_space if action in _MOVE_VECTORS)
+
+
+def _navigable_movement_actions(
+    *,
+    state: GameStateSnapshot,
+    action_space: tuple[str, ...],
+) -> tuple[str, ...]:
+    movement_actions = _movement_actions(action_space)
+    if state.map.status != "ok" or state.map.player_position is None:
+        return movement_actions
+
+    player = state.map.player_position
+    walls = _wall_positions(state)
+    navigable: list[str] = []
+    for action in movement_actions:
+        dx, dy = _MOVE_VECTORS[action]
+        candidate = GridPosition(x=player.x + dx, y=player.y + dy)
+        if not _is_in_bounds(candidate, width=state.map.width, height=state.map.height):
+            continue
+        if candidate in walls:
+            continue
+        navigable.append(action)
+    return tuple(navigable)
 
 
 def _wall_positions(state: GameStateSnapshot) -> set[GridPosition]:
@@ -1000,3 +1382,18 @@ def _is_vertical_line_clear(
         if GridPosition(x=player.x, y=y) in walls:
             return False
     return True
+
+
+def _has_line_of_sight(
+    *,
+    player: GridPosition,
+    target: GridPosition,
+    walls: set[GridPosition],
+) -> bool:
+    if player == target:
+        return True
+    if player.x == target.x:
+        return _is_vertical_line_clear(player=player, target=target, walls=walls)
+    if player.y == target.y:
+        return _is_horizontal_line_clear(player=player, target=target, walls=walls)
+    return False

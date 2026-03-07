@@ -28,6 +28,7 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.checkpoint_every == 0
     assert args.movement_keys == "arrows"
     assert args.prog_actions is True
+    assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
     assert args.gamma == 0.99
@@ -49,6 +50,7 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
             "--movement-keys",
             "numpad",
             "--no-prog-actions",
+            "--step-through",
             "--no-require-non-terminal-reset",
             "--no-tui",
             "--gamma",
@@ -66,6 +68,7 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
     assert args.checkpoint == "artifacts/checkpoints/final.json"
     assert args.movement_keys == "numpad"
     assert args.prog_actions is False
+    assert args.step_through is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False
     assert args.gamma == 0.9

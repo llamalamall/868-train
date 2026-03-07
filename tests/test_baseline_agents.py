@@ -120,8 +120,10 @@ def test_heuristic_baseline_treats_move_up_as_positive_y() -> None:
 
 
 def test_heuristic_baseline_moves_toward_enemy_in_direct_sight() -> None:
-    enemy = EnemyState(slot=0, type_id=1, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True)
-    agent = HeuristicBaselineAgent()
+    enemy = EnemyState(slot=0, type_id=1, position=GridPosition(4, 1), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=0)
+    )
     state = _snapshot(
         health=8,
         player=GridPosition(1, 1),
@@ -136,6 +138,129 @@ def test_heuristic_baseline_moves_toward_enemy_in_direct_sight() -> None:
     )
 
     assert action == "move_right"
+
+
+def test_heuristic_baseline_moves_toward_glitch_on_wall_in_sight() -> None:
+    glitch = EnemyState(slot=0, type_id=4, position=GridPosition(4, 1), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=0)
+    )
+    state = _snapshot(
+        health=8,
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(0, 1),
+        enemies=(glitch,),
+        walls=(GridPosition(4, 1),),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_left", "move_right", "wait"),
+        rng=random.Random(24),
+    )
+
+    assert action == "move_right"
+
+
+def test_heuristic_baseline_avoids_move_that_enters_enemy_adjacency() -> None:
+    enemy = EnemyState(slot=0, type_id=1, position=GridPosition(2, 2), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent()
+    state = _snapshot(
+        health=8,
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(2, 1),
+        enemies=(enemy,),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_left"),
+        rng=random.Random(25),
+    )
+
+    assert action == "move_left"
+
+
+def test_heuristic_baseline_avoids_move_within_one_space_of_virus() -> None:
+    virus = EnemyState(slot=0, type_id=2, position=GridPosition(3, 2), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=0)
+    )
+    state = _snapshot(
+        health=8,
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(2, 1),
+        enemies=(virus,),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_left"),
+        rng=random.Random(26),
+    )
+
+    assert action == "move_left"
+
+
+def test_heuristic_baseline_uses_enemy_lookahead_horizon_for_move_safety() -> None:
+    virus = EnemyState(slot=0, type_id=2, position=GridPosition(4, 1), hp=1, state=0, in_bounds=True)
+    state = _snapshot(
+        health=8,
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(2, 1),
+        enemies=(virus,),
+    )
+    immediate_agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=0)
+    )
+    lookahead_agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=2)
+    )
+
+    immediate_action = immediate_agent.select_action(
+        state=state,
+        action_space=("move_right", "move_left"),
+        rng=random.Random(27),
+    )
+    lookahead_action = lookahead_agent.select_action(
+        state=state,
+        action_space=("move_right", "move_left"),
+        rng=random.Random(27),
+    )
+
+    assert immediate_action == "move_right"
+    assert lookahead_action == "move_left"
+
+
+def test_heuristic_baseline_uses_prog_when_all_moves_are_dangerous() -> None:
+    enemies = (
+        EnemyState(slot=0, type_id=1, position=GridPosition(0, 1), hp=1, state=0, in_bounds=True),
+        EnemyState(slot=1, type_id=1, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True),
+        EnemyState(slot=2, type_id=1, position=GridPosition(1, 0), hp=1, state=0, in_bounds=True),
+        EnemyState(slot=3, type_id=1, position=GridPosition(1, 2), hp=1, state=0, in_bounds=True),
+    )
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            enable_prog_usage=True,
+            prog_energy_floor=1,
+        )
+    )
+    state = _snapshot(
+        health=8,
+        energy=10,
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(5, 5),
+        enemies=enemies,
+        inventory=_inventory(7),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_left", "move_right", "move_up", "move_down", "prog_slot_1"),
+        rng=random.Random(28),
+    )
+
+    assert action == "prog_slot_1"
 
 
 def test_heuristic_baseline_prioritizes_siphon_before_exit() -> None:

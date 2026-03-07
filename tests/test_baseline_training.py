@@ -202,3 +202,23 @@ def test_run_agent_policy_step_callback_reports_action_and_reason() -> None:
     assert isinstance(first["action"], str)
     assert isinstance(first["action_reason"], str)
     assert first["action_reason"] != ""
+
+
+def test_run_agent_policy_before_step_callback_reports_pending_action() -> None:
+    env = TinyLineWorldEnv()
+    events: list[dict[str, object]] = []
+
+    _ = run_agent_policy(
+        env=env,
+        agent=HeuristicBaselineAgent(),
+        episodes=1,
+        max_steps_per_episode=2,
+        seed=5,
+        before_step_callback=lambda event: events.append(event),
+    )
+
+    assert events
+    first = events[0]
+    assert isinstance(first["action"], str)
+    assert isinstance(first["action_reason"], str)
+    assert isinstance(first["total_reward"], float)

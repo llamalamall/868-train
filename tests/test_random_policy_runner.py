@@ -81,15 +81,19 @@ def test_random_runner_parser_prog_actions_defaults_to_enabled() -> None:
     args = parser.parse_args([])
 
     assert args.prog_actions is True
+    assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
 
 
 def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
     parser = _build_parser()
-    args = parser.parse_args(["--no-prog-actions", "--no-require-non-terminal-reset", "--no-tui"])
+    args = parser.parse_args(
+        ["--no-prog-actions", "--step-through", "--no-require-non-terminal-reset", "--no-tui"]
+    )
 
     assert args.prog_actions is False
+    assert args.step_through is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False
 

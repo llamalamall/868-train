@@ -19,6 +19,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run heuristic-policy episodes against live game env."
     )
+    heuristic_defaults = HeuristicBaselineConfig()
     parser.add_argument("--exe", default="868-HACK.exe", help="Target executable name.")
     parser.add_argument("--episodes", type=int, default=3, help="Number of episodes to run.")
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
@@ -67,6 +68,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Polling interval for the live TUI (seconds).",
     )
     parser.add_argument(
+        "--step-through",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Pause before each action and wait for Enter in the TUI to advance.",
+    )
+    parser.add_argument(
         "--step-timeout",
         type=float,
         default=3.0,
@@ -87,8 +94,14 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--low-health-threshold",
         type=int,
-        default=3,
+        default=heuristic_defaults.low_health_threshold,
         help="Health threshold where heuristic prefers waiting to conserve state.",
+    )
+    parser.add_argument(
+        "--enemy-prediction-horizon-steps",
+        type=int,
+        default=heuristic_defaults.enemy_prediction_horizon_steps,
+        help="Enemy lookahead depth used to reject dangerous moves.",
     )
     default_weights = RewardWeights()
     parser.add_argument(
@@ -133,6 +146,8 @@ def _build_parser() -> argparse.ArgumentParser:
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+    if bool(args.step_through) and not bool(args.tui):
+        parser.error("--step-through requires --tui.")
     if args.verbose_actions:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -149,6 +164,7 @@ def main() -> None:
         executable_name=str(args.exe),
         enabled=bool(args.tui),
         interval_seconds=float(args.tui_interval),
+        step_through=bool(args.step_through),
     )
     try:
         env = GameEnv.from_live_process(
@@ -188,18 +204,38 @@ def main() -> None:
                 ),
             )
 
+        def _on_before_step(event: dict[str, Any]) -> None:
+            tui.wait_for_step_advance(
+                training_line=(
+                    "episode={episode} step={step} total={total:.3f} waiting=enter".format(
+                        episode=event.get("episode_id"),
+                        step=int(event.get("step_index", 0)) + 1,
+                        total=float(event.get("total_reward", 0.0)),
+                    )
+                ),
+                action_line="action={action} reason={reason}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "heuristic_select",
+                ),
+            )
+
         assert env is not None
         results = run_agent_policy(
             env=env,
             agent=HeuristicBaselineAgent(
                 config=HeuristicBaselineConfig(
                     low_health_threshold=int(args.low_health_threshold),
+                    enemy_prediction_horizon_steps=max(
+                        int(args.enemy_prediction_horizon_steps),
+                        0,
+                    ),
                     verbose_action_logging=bool(args.verbose_actions),
                 )
             ),
             episodes=args.episodes,
             max_steps_per_episode=args.max_steps,
             seed=args.seed,
+            before_step_callback=_on_before_step if bool(args.step_through) else None,
             step_callback=_on_step if bool(args.tui) else None,
         )
     finally:

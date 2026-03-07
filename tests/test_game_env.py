@@ -288,6 +288,31 @@ def test_run_random_policy_step_callback_reports_action_and_reason() -> None:
     assert first["action_reason"] == "random_policy_sample"
 
 
+def test_run_random_policy_before_step_callback_reports_pending_action() -> None:
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([_snapshot(failed=False)]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "wait"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    events: list[dict[str, object]] = []
+
+    _ = run_random_policy(
+        env=env,
+        episodes=1,
+        max_steps_per_episode=1,
+        seed=7,
+        before_step_callback=lambda event: events.append(event),
+    )
+
+    assert events
+    first = events[0]
+    assert isinstance(first["action"], str)
+    assert first["action_reason"] == "random_policy_sample"
+    assert isinstance(first["total_reward"], float)
+
+
 def test_run_random_policy_uses_supplied_action_subset() -> None:
     actions = FakeActionAPI()
     env = GameEnv(
