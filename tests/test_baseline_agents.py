@@ -305,6 +305,50 @@ def test_heuristic_baseline_prioritizes_enemy_attack_over_prog_and_objectives() 
     assert action == "move_right"
 
 
+def test_heuristic_baseline_prefers_safe_move_over_enemy_attack_when_threatened() -> None:
+    enemy = EnemyState(slot=0, type_id=3, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=1)
+    )
+    state = _snapshot(
+        health=8,
+        energy=10,
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(1, 2),
+        enemies=(enemy,),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_up"),
+        rng=random.Random(29),
+    )
+
+    assert action == "move_up"
+
+
+def test_heuristic_baseline_attacks_adjacent_virus_before_survival_move() -> None:
+    virus = EnemyState(slot=0, type_id=2, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=1)
+    )
+    state = _snapshot(
+        health=8,
+        energy=10,
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(1, 2),
+        enemies=(virus,),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_up"),
+        rng=random.Random(30),
+    )
+
+    assert action == "move_right"
+
+
 def test_heuristic_baseline_uses_prog_when_all_moves_are_dangerous_without_los_attack() -> None:
     enemies = (
         EnemyState(slot=0, type_id=2, position=GridPosition(0, 0), hp=1, state=0, in_bounds=True),

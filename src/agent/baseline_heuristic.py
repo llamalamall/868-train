@@ -94,20 +94,77 @@ class HeuristicBaselineAgent:
 
         reset_detected = self._update_harvest_plan_on_siphon_change(state=state, rng=rng)
         self._advance_prog_usage_state(state=state, reset_detected=reset_detected)
-
+        enemy_action: str | None = None
+        adjacent_virus_attack = False
+        player_under_immediate_threat = False
+        player_horizon_safe = True
         if state.map.status == "ok" and state.map.player_position is not None:
-            enemy_action = self._select_enemy_sight_move(state=state, action_space=actions)
-            if enemy_action is not None:
-                return self._log_choice(
-                    state=state,
-                    action=enemy_action,
-                    reason="attack_enemy_in_line_of_sight",
-                    action_space=actions,
-                )
+            adjacent_virus_action = self._select_adjacent_virus_attack(
+                state=state,
+                action_space=actions,
+            )
+            if adjacent_virus_action is not None:
+                enemy_action = adjacent_virus_action
+                adjacent_virus_attack = True
+            else:
+                enemy_action = self._select_enemy_sight_move(state=state, action_space=actions)
+
+            enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds)
+            player_under_immediate_threat = _position_takes_damage(
+                position=state.map.player_position,
+                enemies=enemies,
+            )
+            player_horizon_safe = self._position_is_safe_for_horizon(
+                state=state,
+                position=state.map.player_position,
+            )
 
         actions = self._filter_exit_steps_while_siphons_remain(state=state, action_space=actions)
         if not actions:
             raise ValueError("No safe actions available after applying siphon-before-exit policy.")
+
+        movement_actions = _navigable_movement_actions(state=state, action_space=actions)
+        safe_movement_actions = self._safe_movement_actions(state=state, action_space=actions)
+        if enemy_action is not None:
+            if adjacent_virus_attack:
+                return self._log_choice(
+                    state=state,
+                    action=enemy_action,
+                    reason="attack_adjacent_virus_priority",
+                    action_space=actions,
+                )
+            if (
+                player_under_immediate_threat
+                and safe_movement_actions
+                and not player_horizon_safe
+            ):
+                survival_action = str(rng.choice(safe_movement_actions))
+                if state.map.status == "ok" and state.map.player_position is not None:
+                    siphon_survival_action = self._select_siphon_move(
+                        state=state,
+                        action_space=safe_movement_actions,
+                    )
+                    if siphon_survival_action is not None:
+                        survival_action = siphon_survival_action
+                    elif not state.map.siphons:
+                        exit_survival_action = self._select_exit_move(
+                            state=state,
+                            action_space=safe_movement_actions,
+                        )
+                        if exit_survival_action is not None:
+                            survival_action = exit_survival_action
+                return self._log_choice(
+                    state=state,
+                    action=survival_action,
+                    reason="survival_safe_move_over_attack",
+                    action_space=actions,
+                )
+            return self._log_choice(
+                state=state,
+                action=enemy_action,
+                reason="attack_enemy_in_line_of_sight",
+                action_space=actions,
+            )
 
         prog_action, prog_reason = self._select_prog_action(
             state=state,
@@ -122,8 +179,6 @@ class HeuristicBaselineAgent:
                 action_space=actions,
             )
 
-        movement_actions = _navigable_movement_actions(state=state, action_space=actions)
-        safe_movement_actions = self._safe_movement_actions(state=state, action_space=actions)
         if movement_actions and not safe_movement_actions:
             escape_prog_action, escape_prog_reason = self._select_prog_escape_action(
                 state=state,
@@ -927,6 +982,37 @@ class HeuristicBaselineAgent:
             target=target_position,
             allowed_actions=movement_actions,
         )
+
+    def _select_adjacent_virus_attack(
+        self,
+        *,
+        state: GameStateSnapshot,
+        action_space: tuple[str, ...],
+    ) -> str | None:
+        player = state.map.player_position
+        if player is None:
+            return None
+
+        movement_actions = _movement_actions(action_space)
+        if not movement_actions:
+            return None
+
+        walls = _wall_positions(state)
+        for enemy in state.map.enemies:
+            if not enemy.in_bounds or enemy.type_id != _ENEMY_TYPE_VIRUS:
+                continue
+            if _manhattan(player, enemy.position) != 1:
+                continue
+            if not _has_line_of_sight(player=player, target=enemy.position, walls=walls):
+                continue
+            action = _first_step_toward_axis_aligned_target(
+                start=player,
+                target=enemy.position,
+                allowed_actions=movement_actions,
+            )
+            if action is not None:
+                return action
+        return None
 
     @staticmethod
     def _coerce_int(value: object | None) -> int | None:
