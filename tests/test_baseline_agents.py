@@ -232,6 +232,51 @@ def test_heuristic_baseline_uses_enemy_lookahead_horizon_for_move_safety() -> No
     assert lookahead_action == "move_left"
 
 
+def test_heuristic_enemy_adjacent_before_move_is_dangerous() -> None:
+    enemy = EnemyState(slot=0, type_id=3, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=1)
+    )
+    state = _snapshot(
+        health=8,
+        player=GridPosition(0, 1),
+        exit_pos=GridPosition(5, 5),
+        enemies=(enemy,),
+    )
+
+    assert not agent._position_is_safe_for_horizon(state=state, position=GridPosition(1, 1))
+
+
+def test_heuristic_enemy_becoming_adjacent_after_move_is_safe_for_turn() -> None:
+    enemy = EnemyState(slot=0, type_id=3, position=GridPosition(3, 1), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=1)
+    )
+    state = _snapshot(
+        health=8,
+        player=GridPosition(0, 1),
+        exit_pos=GridPosition(5, 5),
+        enemies=(enemy,),
+    )
+
+    assert agent._position_is_safe_for_horizon(state=state, position=GridPosition(1, 1))
+
+
+def test_heuristic_virus_can_move_once_then_attack() -> None:
+    virus = EnemyState(slot=0, type_id=2, position=GridPosition(2, 3), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(enemy_prediction_horizon_steps=1)
+    )
+    state = _snapshot(
+        health=8,
+        player=GridPosition(0, 1),
+        exit_pos=GridPosition(5, 5),
+        enemies=(virus,),
+    )
+
+    assert not agent._position_is_safe_for_horizon(state=state, position=GridPosition(1, 1))
+
+
 def test_heuristic_baseline_prioritizes_enemy_attack_over_prog_and_objectives() -> None:
     enemy = EnemyState(slot=0, type_id=1, position=GridPosition(4, 1), hp=1, state=0, in_bounds=True)
     agent = HeuristicBaselineAgent(

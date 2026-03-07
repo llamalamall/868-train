@@ -466,7 +466,7 @@ class HeuristicBaselineAgent:
     ) -> bool:
         if state.map.status != "ok":
             return True
-        horizon = max(int(self.config.enemy_prediction_horizon_steps), 0)
+        horizon = max(int(self.config.enemy_prediction_horizon_steps), 1)
         enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds)
         if not enemies:
             return True
@@ -493,22 +493,18 @@ class HeuristicBaselineAgent:
             if cached is not None:
                 return cached
 
-            if _position_takes_damage(position=player_position, enemies=enemy_positions):
-                memo[key] = False
-                return False
-
             if remaining_turns <= 0:
                 memo[key] = True
                 return True
 
-            enemies_next = _predict_enemies_one_turn(
+            enemies_next, player_took_damage = _simulate_enemy_turn(
                 enemies=enemy_positions,
                 player_position=player_position,
                 width=width,
                 height=height,
                 walls=walls,
             )
-            if _position_takes_damage(position=player_position, enemies=enemies_next):
+            if player_took_damage:
                 memo[key] = False
                 return False
 
@@ -1007,11 +1003,98 @@ def _position_takes_damage(
     for enemy in enemies:
         if not enemy.in_bounds:
             continue
-        if _manhattan(position, enemy.position) <= 1:
-            return True
-        if enemy.type_id == _ENEMY_TYPE_VIRUS and _chebyshev(position, enemy.position) <= 1:
+        if _enemy_can_attack_position(
+            enemy_type=enemy.type_id,
+            enemy_position=enemy.position,
+            player_position=position,
+        ):
             return True
     return False
+
+
+def _enemy_can_attack_position(
+    *,
+    enemy_type: int,
+    enemy_position: GridPosition,
+    player_position: GridPosition,
+) -> bool:
+    if enemy_type == _ENEMY_TYPE_VIRUS:
+        return _chebyshev(enemy_position, player_position) <= 1
+    return _manhattan(enemy_position, player_position) <= 1
+
+
+def _simulate_enemy_turn(
+    *,
+    enemies: tuple[EnemyState, ...],
+    player_position: GridPosition,
+    width: int,
+    height: int,
+    walls: set[GridPosition],
+) -> tuple[tuple[EnemyState, ...], bool]:
+    predicted: list[EnemyState] = []
+    took_damage = False
+    for enemy in enemies:
+        if not enemy.in_bounds:
+            predicted.append(enemy)
+            continue
+
+        current_position = enemy.position
+        if _enemy_can_attack_position(
+            enemy_type=enemy.type_id,
+            enemy_position=current_position,
+            player_position=player_position,
+        ):
+            took_damage = True
+            predicted.append(enemy)
+            continue
+
+        if enemy.type_id == _ENEMY_TYPE_VIRUS:
+            first_step = _predict_enemy_substep(
+                enemy_type=enemy.type_id,
+                enemy_position=current_position,
+                player_position=player_position,
+                width=width,
+                height=height,
+                walls=walls,
+            )
+            current_position = first_step
+            if _enemy_can_attack_position(
+                enemy_type=enemy.type_id,
+                enemy_position=current_position,
+                player_position=player_position,
+            ):
+                took_damage = True
+            else:
+                current_position = _predict_enemy_substep(
+                    enemy_type=enemy.type_id,
+                    enemy_position=current_position,
+                    player_position=player_position,
+                    width=width,
+                    height=height,
+                    walls=walls,
+                )
+        else:
+            current_position = _predict_enemy_substep(
+                enemy_type=enemy.type_id,
+                enemy_position=current_position,
+                player_position=player_position,
+                width=width,
+                height=height,
+                walls=walls,
+            )
+
+        predicted.append(
+            EnemyState(
+                slot=enemy.slot,
+                type_id=enemy.type_id,
+                position=current_position,
+                hp=enemy.hp,
+                state=enemy.state,
+                in_bounds=enemy.in_bounds,
+            )
+        )
+
+    return (tuple(predicted), took_damage)
 
 
 def _predict_enemies_one_turn(
@@ -1022,33 +1105,14 @@ def _predict_enemies_one_turn(
     height: int,
     walls: set[GridPosition],
 ) -> tuple[EnemyState, ...]:
-    predicted: list[EnemyState] = []
-    for enemy in enemies:
-        if not enemy.in_bounds:
-            predicted.append(enemy)
-            continue
-        steps = 2 if enemy.type_id == _ENEMY_TYPE_VIRUS else 1
-        next_position = enemy.position
-        for _ in range(steps):
-            next_position = _predict_enemy_substep(
-                enemy_type=enemy.type_id,
-                enemy_position=next_position,
-                player_position=player_position,
-                width=width,
-                height=height,
-                walls=walls,
-            )
-        predicted.append(
-            EnemyState(
-                slot=enemy.slot,
-                type_id=enemy.type_id,
-                position=next_position,
-                hp=enemy.hp,
-                state=enemy.state,
-                in_bounds=enemy.in_bounds,
-            )
-        )
-    return tuple(predicted)
+    predicted, _took_damage = _simulate_enemy_turn(
+        enemies=enemies,
+        player_position=player_position,
+        width=width,
+        height=height,
+        walls=walls,
+    )
+    return predicted
 
 
 def _predict_enemy_substep(
