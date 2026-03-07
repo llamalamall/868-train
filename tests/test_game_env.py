@@ -25,6 +25,8 @@ def _snapshot(
     failed: bool = False,
     map_state: MapState | None = None,
     inventory_state: InventoryState | None = None,
+    can_siphon_now: bool | None = None,
+    prog_slots_available_mask: int | None = None,
 ) -> GameStateSnapshot:
     return GameStateSnapshot(
         timestamp_utc="2026-03-06T00:00:00+00:00",
@@ -34,6 +36,8 @@ def _snapshot(
         fail_state=_field(failed),
         inventory=inventory_state or InventoryState(status="missing"),
         map=map_state or MapState(status="missing"),
+        can_siphon_now=can_siphon_now,
+        prog_slots_available_mask=prog_slots_available_mask,
     )
 
 
@@ -400,7 +404,7 @@ def test_available_actions_hides_confirm_when_not_failed_and_shows_on_fail() -> 
     assert env.available_actions() == ("move_up", "confirm")
 
 
-def test_available_actions_adds_space_only_when_siphons_present() -> None:
+def test_available_actions_adds_space_only_when_player_can_siphon() -> None:
     no_siphon = _snapshot(
         map_state=MapState(
             status="ok",
@@ -415,7 +419,7 @@ def test_available_actions_adds_space_only_when_siphons_present() -> None:
             status="ok",
             width=2,
             height=2,
-            player_position=GridPosition(0, 0),
+            player_position=GridPosition(1, 1),
             siphons=(GridPosition(1, 1),),
         )
     )
@@ -430,6 +434,29 @@ def test_available_actions_adds_space_only_when_siphons_present() -> None:
     assert env.available_actions() == ("move_up",)
 
     env.step("move_up")
+    assert env.available_actions() == ("space",)
+
+
+def test_available_actions_allows_space_from_ui_flag_even_when_not_on_tile() -> None:
+    state = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=2,
+            player_position=GridPosition(0, 0),
+            siphons=(),
+        ),
+        can_siphon_now=True,
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([state]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
     assert env.available_actions() == ("move_up", "space")
 
 
@@ -456,6 +483,32 @@ def test_available_actions_includes_only_owned_prog_slots() -> None:
     env.reset()
 
     assert env.available_actions() == ("move_up", "prog_slot_1", "prog_slot_2")
+
+
+def test_available_actions_uses_prog_slots_ui_mask_when_present() -> None:
+    state = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=2,
+            player_position=GridPosition(0, 0),
+        ),
+        inventory_state=InventoryState(
+            status="ok",
+            raw_prog_ids=(2, 7, 9),
+        ),
+        prog_slots_available_mask=0b101,
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([state]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "prog_slot_1", "prog_slot_2", "prog_slot_3"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    assert env.available_actions() == ("move_up", "prog_slot_1", "prog_slot_3")
 
 
 def test_available_actions_hides_prog_slots_when_inventory_unavailable() -> None:
@@ -485,3 +538,68 @@ def test_available_actions_hides_prog_slots_when_inventory_unavailable() -> None
 
     env.step("move_up")
     assert env.available_actions() == ("move_up",)
+
+
+def test_game_env_marks_premature_exit_attempt_in_step_info() -> None:
+    before = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(GridPosition(0, 0),),
+        ),
+    )
+    after = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(1, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(GridPosition(0, 0),),
+        ),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_right",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    _state, _reward, _done, info = env.step("move_right")
+
+    assert info["premature_exit_attempt"] is True
+    assert info["action_effective"] is True
+    assert info["invalid_action_reason"] is None
+
+
+def test_game_env_prog_action_backoff_after_ineffective_attempt() -> None:
+    stale = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+        ),
+        inventory_state=InventoryState(status="ok", raw_prog_ids=(2,)),
+        energy=10,
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([stale, stale, stale]),
+        reset_strategy=NoopResetManager(),
+        action_space=("prog_slot_1", "move_right"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False, prog_slot_backoff_steps=3),
+    )
+    env.reset()
+
+    _state, _reward, _done, info = env.step("prog_slot_1")
+
+    assert info["action_effective"] is False
+    assert info["invalid_action_reason"] == "prog_no_effect"
+    assert "prog_slot_1" not in env.available_actions()

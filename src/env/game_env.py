@@ -44,7 +44,7 @@ def _prog_slot_index_for_action(action_name: str) -> int | None:
     return _PROG_SLOT_INDEX_BY_ACTION.get(action_name)
 
 
-def _available_prog_slot_actions(snapshot: GameStateSnapshot | None) -> set[str]:
+def _owned_prog_slot_actions(snapshot: GameStateSnapshot | None) -> set[str]:
     if snapshot is None or snapshot.inventory.status != "ok":
         return set()
 
@@ -52,6 +52,53 @@ def _available_prog_slot_actions(snapshot: GameStateSnapshot | None) -> set[str]
     for slot_index, _prog_id in enumerate(snapshot.inventory.raw_prog_ids[:10]):
         available.add(_PROG_SLOT_ACTION_BY_INDEX[slot_index])
     return available
+
+
+def _prog_slot_allowed_by_ui_mask(
+    *,
+    snapshot: GameStateSnapshot | None,
+    action_name: str,
+) -> bool | None:
+    if snapshot is None:
+        return None
+    mask = snapshot.prog_slots_available_mask
+    if mask is None:
+        return None
+    slot_index = _prog_slot_index_for_action(action_name)
+    if slot_index is None:
+        return None
+    return bool(mask & (1 << slot_index))
+
+
+def _state_numeric(field: Any) -> float | None:
+    status = getattr(field, "status", None)
+    value = getattr(field, "value", None)
+    if status != "ok" or value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _count_siphons(snapshot: GameStateSnapshot) -> int | None:
+    if snapshot.map.status != "ok":
+        return None
+    return len(snapshot.map.siphons)
+
+
+def _count_live_enemies(snapshot: GameStateSnapshot) -> int | None:
+    if snapshot.map.status != "ok":
+        return None
+    return sum(1 for enemy in snapshot.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+
+
+def _player_on_exit(snapshot: GameStateSnapshot) -> bool:
+    if snapshot.map.status != "ok":
+        return False
+    player = snapshot.map.player_position
+    exit_position = snapshot.map.exit_position
+    return player is not None and exit_position is not None and player == exit_position
 
 
 class GameEnvError(RuntimeError):
@@ -140,6 +187,8 @@ class GameEnvConfig:
     post_action_poll_delay_seconds: float = 0.05
     post_reset_grace_seconds: float = 0.10
     require_non_terminal_on_reset: bool = True
+    prog_slot_backoff_steps: int = 3
+    prog_slot_fallback_min_energy: int = 1
 
 
 @dataclass(frozen=True)
@@ -248,6 +297,7 @@ class GameEnv:
         self._current_episode_id: str | None = None
         self._episode_counter = 0
         self._step_index = 0
+        self._prog_action_backoff: dict[str, int] = {}
         self._cleanup_callbacks: list[Callable[[], None]] = []
 
     @property
@@ -257,34 +307,39 @@ class GameEnv:
 
     def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
         """Return current action subset filtered for map-edge and wall collisions."""
-        base_actions = tuple(
-            action for action in self._action_space if action not in {"wait", "cancel"}
-        )
+        base_actions = tuple(action for action in self._action_space if action not in {"wait", "cancel"})
         snapshot = state if state is not None else self._current_state
-        allowed_prog_actions = _available_prog_slot_actions(snapshot)
-        base_actions = tuple(
-            action
-            for action in base_actions
-            if (
-                _prog_slot_index_for_action(action) is None
-                or action in allowed_prog_actions
-            )
-        )
+        owned_prog_actions = _owned_prog_slot_actions(snapshot)
         fail_active = (
             snapshot is not None
             and snapshot.fail_state.status == "ok"
             and bool(snapshot.fail_state.value)
         )
-        if not fail_active:
-            base_actions = tuple(action for action in base_actions if action != "confirm")
 
-        siphon_count = (
-            len(snapshot.map.siphons)
-            if snapshot is not None and snapshot.map.status == "ok"
-            else 0
-        )
-        if siphon_count <= 0:
-            base_actions = tuple(action for action in base_actions if action != "space")
+        filtered_base: list[str] = []
+        for action in base_actions:
+            prog_slot_index = _prog_slot_index_for_action(action)
+            if prog_slot_index is not None:
+                if action not in owned_prog_actions:
+                    continue
+                if self._prog_action_backoff.get(action, 0) > 0:
+                    continue
+                allowed_by_ui_mask = _prog_slot_allowed_by_ui_mask(
+                    snapshot=snapshot,
+                    action_name=action,
+                )
+                if allowed_by_ui_mask is False:
+                    continue
+                if allowed_by_ui_mask is None and not self._fallback_prog_slot_allowed(snapshot):
+                    continue
+
+            if action == "confirm" and not fail_active:
+                continue
+            if action == "space" and not self._space_action_allowed(snapshot):
+                continue
+            filtered_base.append(action)
+
+        base_actions = tuple(filtered_base)
 
         if snapshot is None or snapshot.map.status != "ok":
             return base_actions
@@ -366,6 +421,7 @@ class GameEnv:
         self._current_episode_id = f"episode-{self._episode_counter:05d}"
         self._step_index = 0
         self._current_state = state
+        self._prog_action_backoff.clear()
 
         if self._telemetry_logger is not None:
             self._telemetry_logger.start_episode(
@@ -391,6 +447,7 @@ class GameEnv:
         assert self._current_episode_id is not None
         previous_state = self._current_state
         step_index = self._step_index
+        self._advance_prog_action_backoff()
 
         self._run_with_timeout(
             lambda: self._action_api.perform_action(action),
@@ -429,12 +486,39 @@ class GameEnv:
             terminal_reason = "state:start_screen"
             detector_info["start_screen_detected"] = True
 
+        action_effective, invalid_action_reason = self._analyze_action_effectiveness(
+            action=action,
+            previous_state=previous_state,
+            current_state=current_state,
+        )
+        siphons_remaining = _count_siphons(current_state)
+        enemies_remaining = _count_live_enemies(current_state)
+        premature_exit_attempt = (
+            _player_on_exit(current_state)
+            and (
+                (siphons_remaining is not None and siphons_remaining > 0)
+                or (enemies_remaining is not None and enemies_remaining > 0)
+            )
+        )
+        if (
+            invalid_action_reason is not None
+            and action.startswith("prog_slot_")
+            and self._config.prog_slot_backoff_steps > 0
+        ):
+            self._prog_action_backoff[action] = max(
+                self._prog_action_backoff.get(action, 0),
+                int(self._config.prog_slot_backoff_steps),
+            )
+
         info: dict[str, Any] = {
             "episode_id": self._current_episode_id,
             "step_index": step_index,
             "action": action,
             "reset_performed": reset_performed,
             "terminal_reason": terminal_reason,
+            "action_effective": action_effective,
+            "invalid_action_reason": invalid_action_reason,
+            "premature_exit_attempt": premature_exit_attempt,
         }
         info.update(detector_info)
 
@@ -463,6 +547,108 @@ class GameEnv:
         self._current_state = current_state
         self._step_index += 1
         return (current_state, reward_value, done, info)
+
+    def _space_action_allowed(self, snapshot: GameStateSnapshot | None) -> bool:
+        if snapshot is None:
+            return False
+        if snapshot.can_siphon_now is True:
+            return True
+        if snapshot.can_siphon_now is False:
+            return False
+        if snapshot.map.status != "ok" or snapshot.map.player_position is None:
+            return False
+        return snapshot.map.player_position in set(snapshot.map.siphons)
+
+    def _fallback_prog_slot_allowed(self, snapshot: GameStateSnapshot | None) -> bool:
+        if snapshot is None:
+            return True
+        energy_value = _state_numeric(snapshot.energy)
+        if energy_value is None:
+            return True
+        return energy_value >= float(self._config.prog_slot_fallback_min_energy)
+
+    def _advance_prog_action_backoff(self) -> None:
+        for action_name in tuple(self._prog_action_backoff):
+            remaining = self._prog_action_backoff[action_name] - 1
+            if remaining <= 0:
+                self._prog_action_backoff.pop(action_name, None)
+            else:
+                self._prog_action_backoff[action_name] = remaining
+
+    def _analyze_action_effectiveness(
+        self,
+        *,
+        action: str,
+        previous_state: GameStateSnapshot,
+        current_state: GameStateSnapshot,
+    ) -> tuple[bool, str | None]:
+        if action == "space":
+            if self._transition_has_effect(previous_state=previous_state, current_state=current_state):
+                return (True, None)
+            return (False, "space_no_effect")
+
+        if action.startswith("prog_slot_"):
+            energy_before = _state_numeric(previous_state.energy)
+            energy_after = _state_numeric(current_state.energy)
+            energy_spent: bool | None = None
+            if energy_before is not None and energy_after is not None:
+                energy_spent = energy_after < energy_before
+
+            state_changed = self._transition_has_effect(
+                previous_state=previous_state,
+                current_state=current_state,
+            )
+            if energy_spent is None and not state_changed:
+                return (False, "prog_no_effect")
+            if energy_spent is False and not state_changed:
+                return (False, "prog_no_effect")
+        return (True, None)
+
+    def _transition_has_effect(
+        self,
+        *,
+        previous_state: GameStateSnapshot,
+        current_state: GameStateSnapshot,
+    ) -> bool:
+        numeric_changes: list[bool | None] = []
+        for before_field, after_field in (
+            (previous_state.energy, current_state.energy),
+            (previous_state.currency, current_state.currency),
+            (previous_state.health, current_state.health),
+        ):
+            before_value = _state_numeric(before_field)
+            after_value = _state_numeric(after_field)
+            if before_value is None or after_value is None:
+                numeric_changes.append(None)
+                continue
+            numeric_changes.append(after_value != before_value)
+
+        prev_siphons = _count_siphons(previous_state)
+        curr_siphons = _count_siphons(current_state)
+        siphon_change = None if prev_siphons is None or curr_siphons is None else (prev_siphons != curr_siphons)
+
+        prev_enemies = _count_live_enemies(previous_state)
+        curr_enemies = _count_live_enemies(current_state)
+        enemy_change = None if prev_enemies is None or curr_enemies is None else (prev_enemies != curr_enemies)
+
+        player_change: bool | None = None
+        if previous_state.map.status == "ok" and current_state.map.status == "ok":
+            player_change = previous_state.map.player_position != current_state.map.player_position
+
+        inventory_change: bool | None = None
+        if previous_state.inventory.status == "ok" and current_state.inventory.status == "ok":
+            inventory_change = previous_state.inventory.raw_prog_ids != current_state.inventory.raw_prog_ids
+
+        signals = (
+            *numeric_changes,
+            siphon_change,
+            enemy_change,
+            player_change,
+            inventory_change,
+        )
+        if any(signal is True for signal in signals):
+            return True
+        return not any(signal is not None for signal in signals)
 
     def _read_state_once_for_step(self) -> GameStateSnapshot:
         return self._run_with_timeout(

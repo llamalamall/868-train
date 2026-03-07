@@ -30,6 +30,16 @@ _HEALTH_FIELD_CANDIDATES = ("player_health", "health")
 _ENERGY_FIELD_CANDIDATES = ("player_energy", "energy")
 _CURRENCY_FIELD_CANDIDATES = ("player_credits", "player_currency", "currency")
 _COLLECTED_PROGS_FIELD_CANDIDATES = ("collected_progs",)
+_CAN_SIPHON_NOW_FIELD_CANDIDATES = (
+    "can_siphon_now",
+    "siphon_prompt_active",
+    "siphon_available",
+)
+_PROG_SLOTS_AVAILABLE_MASK_FIELD_CANDIDATES = (
+    "prog_slots_available_mask",
+    "prog_slot_available_mask",
+    "available_prog_slots_mask",
+)
 _GAME_STATE_ROOT_FIELD_CANDIDATES = (
     "player_x",
     "player_y",
@@ -316,6 +326,50 @@ def _extract_field(
         )
 
     return _ok_field(decoded.value, address=address, source_field=entry.name)
+
+
+def _extract_optional_bool(
+    *,
+    reader: ProcessMemoryReader,
+    entry: OffsetEntry | None,
+    module_base_resolver: ModuleBaseResolver | None,
+) -> bool | None:
+    field = _extract_field(
+        reader=reader,
+        entry=entry,
+        module_base_resolver=module_base_resolver,
+    )
+    if field.status != "ok":
+        return None
+
+    value = field.value
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, int):
+        return value != 0
+    return None
+
+
+def _extract_optional_uint32_mask(
+    *,
+    reader: ProcessMemoryReader,
+    entry: OffsetEntry | None,
+    module_base_resolver: ModuleBaseResolver | None,
+) -> int | None:
+    field = _extract_field(
+        reader=reader,
+        entry=entry,
+        module_base_resolver=module_base_resolver,
+    )
+    if field.status != "ok":
+        return None
+
+    value = field.value
+    if not isinstance(value, int):
+        return None
+    if value < 0:
+        return None
+    return int(value & 0xFFFFFFFF)
 
 
 def _log_unknown_prog_ids_once(unknown_prog_ids: tuple[int, ...]) -> None:
@@ -791,6 +845,11 @@ def extract_state(
     energy_entry = _select_entry(entries, _ENERGY_FIELD_CANDIDATES)
     currency_entry = _select_entry(entries, _CURRENCY_FIELD_CANDIDATES)
     collected_progs_entry = _select_entry(entries, _COLLECTED_PROGS_FIELD_CANDIDATES)
+    can_siphon_now_entry = _select_entry(entries, _CAN_SIPHON_NOW_FIELD_CANDIDATES)
+    prog_slots_available_mask_entry = _select_entry(
+        entries,
+        _PROG_SLOTS_AVAILABLE_MASK_FIELD_CANDIDATES,
+    )
 
     health = _extract_field(reader=reader, entry=health_entry, module_base_resolver=module_base_resolver)
     energy = _extract_field(reader=reader, entry=energy_entry, module_base_resolver=module_base_resolver)
@@ -805,6 +864,16 @@ def extract_state(
         entries_by_name=entries,
         module_base_resolver=module_base_resolver,
     )
+    can_siphon_now = _extract_optional_bool(
+        reader=reader,
+        entry=can_siphon_now_entry,
+        module_base_resolver=module_base_resolver,
+    )
+    prog_slots_available_mask = _extract_optional_uint32_mask(
+        reader=reader,
+        entry=prog_slots_available_mask_entry,
+        module_base_resolver=module_base_resolver,
+    )
     fail_state = _derive_fail_state(
         health,
         terminal_health_value,
@@ -817,6 +886,8 @@ def extract_state(
             energy_entry,
             currency_entry,
             collected_progs_entry,
+            can_siphon_now_entry,
+            prog_slots_available_mask_entry,
         )
         if entry is not None
     }
@@ -838,5 +909,7 @@ def extract_state(
         fail_state=fail_state,
         inventory=inventory,
         map=map_state,
+        can_siphon_now=can_siphon_now,
+        prog_slots_available_mask=prog_slots_available_mask,
         extra_fields=extra_fields,
     )

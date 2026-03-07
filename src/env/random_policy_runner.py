@@ -89,10 +89,18 @@ def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
     return RewardConfig(
         weights=RewardWeights(
             survival=float(args.reward_survival),
+            step_penalty=float(args.reward_step_penalty),
             health_delta=float(args.reward_health_delta),
             currency_delta=float(args.reward_currency_delta),
+            siphon_collected=float(args.reward_siphon_collected),
+            enemy_cleared=float(args.reward_enemy_cleared),
+            phase_progress=float(args.reward_phase_progress),
+            map_clear_bonus=float(args.reward_map_clear_bonus),
+            premature_exit_penalty=float(args.reward_premature_exit_penalty),
+            invalid_action_penalty=float(args.reward_invalid_action_penalty),
             fail_penalty=float(args.reward_fail_penalty),
-        )
+        ),
+        reward_clip_abs=float(args.reward_clip_abs),
     )
 
 
@@ -112,25 +120,40 @@ def _build_reward_fn(
             current_state=current_state,
             done=done,
             config=reward_config,
+            info=info,
         )
         info["reward_breakdown"] = {
             "survival": result.breakdown.survival,
+            "step_penalty": result.breakdown.step_penalty,
             "health_change": result.breakdown.health_change,
             "currency_change": result.breakdown.currency_change,
+            "siphon_collected": result.breakdown.siphon_collected,
+            "enemy_cleared": result.breakdown.enemy_cleared,
+            "phase_progress": result.breakdown.phase_progress,
+            "map_clear_bonus": result.breakdown.map_clear_bonus,
+            "premature_exit_penalty": result.breakdown.premature_exit_penalty,
+            "invalid_action_penalty": result.breakdown.invalid_action_penalty,
             "fail_penalty": result.breakdown.fail_penalty,
             "total": result.total,
         }
         if print_breakdown:
             print(
                 "reward step={step} action={action} total={total:.3f} "
-                "survival={survival:.3f} health={health:.3f} "
-                "currency={currency:.3f} fail_penalty={fail_penalty:.3f} done={done}".format(
+                "survival={survival:.3f} step_penalty={step_penalty:.3f} health={health:.3f} "
+                "currency={currency:.3f} siphon={siphon:.3f} enemy={enemy:.3f} "
+                "premature_exit={premature:.3f} invalid={invalid:.3f} "
+                "fail_penalty={fail_penalty:.3f} done={done}".format(
                     step=info.get("step_index"),
                     action=info.get("action"),
                     total=result.total,
                     survival=result.breakdown.survival,
+                    step_penalty=result.breakdown.step_penalty,
                     health=result.breakdown.health_change,
                     currency=result.breakdown.currency_change,
+                    siphon=result.breakdown.siphon_collected,
+                    enemy=result.breakdown.enemy_cleared,
+                    premature=result.breakdown.premature_exit_penalty,
+                    invalid=result.breakdown.invalid_action_penalty,
                     fail_penalty=result.breakdown.fail_penalty,
                     done=done,
                 )
@@ -214,6 +237,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reset watchdog timeout in seconds.",
     )
     parser.add_argument(
+        "--prog-backoff-steps",
+        type=int,
+        default=3,
+        help="Fallback prog-slot backoff steps after ineffective attempts.",
+    )
+    parser.add_argument(
         "--require-non-terminal-reset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -224,6 +253,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=default_weights.survival,
         help="Survival reward applied for non-terminal steps.",
+    )
+    parser.add_argument(
+        "--reward-step-penalty",
+        type=float,
+        default=default_weights.step_penalty,
+        help="Per-step penalty magnitude applied each transition.",
     )
     parser.add_argument(
         "--reward-health-delta",
@@ -238,10 +273,52 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Weight multiplied by (current_currency - previous_currency).",
     )
     parser.add_argument(
+        "--reward-siphon-collected",
+        type=float,
+        default=default_weights.siphon_collected,
+        help="Reward per siphon removed from map.",
+    )
+    parser.add_argument(
+        "--reward-enemy-cleared",
+        type=float,
+        default=default_weights.enemy_cleared,
+        help="Reward per live enemy removed from map.",
+    )
+    parser.add_argument(
+        "--reward-phase-progress",
+        type=float,
+        default=default_weights.phase_progress,
+        help="Weight for progress toward active objective (siphon->enemy->exit).",
+    )
+    parser.add_argument(
+        "--reward-map-clear-bonus",
+        type=float,
+        default=default_weights.map_clear_bonus,
+        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+    )
+    parser.add_argument(
+        "--reward-premature-exit-penalty",
+        type=float,
+        default=default_weights.premature_exit_penalty,
+        help="Penalty when stepping onto exit before objectives are complete.",
+    )
+    parser.add_argument(
+        "--reward-invalid-action-penalty",
+        type=float,
+        default=default_weights.invalid_action_penalty,
+        help="Penalty when action appears ineffective/invalid.",
+    )
+    parser.add_argument(
         "--reward-fail-penalty",
         type=float,
         default=default_weights.fail_penalty,
         help="Terminal fail penalty magnitude (applied as negative).",
+    )
+    parser.add_argument(
+        "--reward-clip-abs",
+        type=float,
+        default=5.0,
+        help="Absolute value used to clip final reward per step.",
     )
     parser.add_argument(
         "--print-reward-breakdown",
@@ -274,6 +351,7 @@ def main() -> None:
     config = GameEnvConfig(
         step_timeout_seconds=args.step_timeout,
         reset_timeout_seconds=args.reset_timeout,
+        prog_slot_backoff_steps=max(int(args.prog_backoff_steps), 0),
         require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
     )
     action_config = _build_action_config(

@@ -32,7 +32,7 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.require_non_terminal_reset is True
     assert args.tui is True
     assert args.gamma == 0.99
-    assert args.learning_rate == 0.01
+    assert args.learning_rate == 0.005
 
 
 def test_dqn_runner_parser_accepts_overrides() -> None:
