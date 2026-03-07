@@ -24,9 +24,21 @@ _NUMPAD_KEY_CODES = {
     "NUMPAD6": 0x66,
     "NUMPAD8": 0x68,
 }
+_PROG_SLOT_ACTION_BINDINGS = {
+    "prog_slot_1": "1",
+    "prog_slot_2": "2",
+    "prog_slot_3": "3",
+    "prog_slot_4": "4",
+    "prog_slot_5": "5",
+    "prog_slot_6": "6",
+    "prog_slot_7": "7",
+    "prog_slot_8": "8",
+    "prog_slot_9": "9",
+    "prog_slot_10": "0",
+}
 
 
-def _build_action_config(movement_keys: str) -> ActionConfig:
+def _build_action_config(movement_keys: str, *, include_prog_actions: bool = True) -> ActionConfig:
     default_config = ActionConfig()
     bindings = dict(default_config.action_key_bindings)
     key_codes = dict(default_config.key_codes)
@@ -55,6 +67,15 @@ def _build_action_config(movement_keys: str) -> ActionConfig:
         raise ValueError(
             "movement_keys must be one of: arrows, wasd, numpad."
         )
+
+    if include_prog_actions:
+        bindings.update(_PROG_SLOT_ACTION_BINDINGS)
+    else:
+        bindings = {
+            action_name: key_name
+            for action_name, key_name in bindings.items()
+            if not action_name.startswith("prog_slot_")
+        }
 
     return ActionConfig(
         action_key_bindings=bindings,
@@ -130,6 +151,12 @@ def _build_parser() -> argparse.ArgumentParser:
         choices=("arrows", "wasd", "numpad"),
         default="arrows",
         help="Movement key mapping profile.",
+    )
+    parser.add_argument(
+        "--prog-actions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include prog-slot actions (prog_slot_1..prog_slot_10 mapped to 1..0).",
     )
     parser.add_argument(
         "--actions",
@@ -221,7 +248,10 @@ def main() -> None:
         reset_timeout_seconds=args.reset_timeout,
         require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
     )
-    action_config = _build_action_config(args.movement_keys)
+    action_config = _build_action_config(
+        args.movement_keys,
+        include_prog_actions=bool(args.prog_actions),
+    )
     reward_config = _build_reward_config(args)
     reward_fn = _build_reward_fn(
         reward_config=reward_config,

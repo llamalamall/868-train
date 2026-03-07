@@ -10,7 +10,7 @@ import pytest
 
 from src.env.game_env import GameEnv, GameEnvConfig, ResetTimeoutError, StepTimeoutError, run_random_policy
 from src.env.reset_manager import NoopResetManager
-from src.state.schema import FieldState, GameStateSnapshot, GridPosition, MapCellState, MapState
+from src.state.schema import FieldState, GameStateSnapshot, GridPosition, InventoryState, MapCellState, MapState
 
 
 def _field(value: object, *, status: str = "ok") -> FieldState:
@@ -24,6 +24,7 @@ def _snapshot(
     credits: int = 3,
     failed: bool = False,
     map_state: MapState | None = None,
+    inventory_state: InventoryState | None = None,
 ) -> GameStateSnapshot:
     return GameStateSnapshot(
         timestamp_utc="2026-03-06T00:00:00+00:00",
@@ -31,6 +32,7 @@ def _snapshot(
         energy=_field(energy),
         currency=_field(credits),
         fail_state=_field(failed),
+        inventory=inventory_state or InventoryState(status="missing"),
         map=map_state or MapState(status="missing"),
     )
 
@@ -358,3 +360,57 @@ def test_available_actions_adds_space_only_when_siphons_present() -> None:
 
     env.step("move_up")
     assert env.available_actions() == ("move_up", "space")
+
+
+def test_available_actions_includes_only_owned_prog_slots() -> None:
+    state = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=2,
+            player_position=GridPosition(0, 0),
+        ),
+        inventory_state=InventoryState(
+            status="ok",
+            raw_prog_ids=(2, 7),
+        ),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([state]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "prog_slot_1", "prog_slot_2", "prog_slot_3"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    assert env.available_actions() == ("move_up", "prog_slot_1", "prog_slot_2")
+
+
+def test_available_actions_hides_prog_slots_when_inventory_unavailable() -> None:
+    map_state = MapState(
+        status="ok",
+        width=2,
+        height=2,
+        player_position=GridPosition(0, 0),
+    )
+    missing_inventory = _snapshot(
+        map_state=map_state,
+        inventory_state=InventoryState(status="missing"),
+    )
+    invalid_inventory = _snapshot(
+        map_state=map_state,
+        inventory_state=InventoryState(status="invalid", error_code="read_failed"),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([missing_inventory, invalid_inventory]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "prog_slot_1"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+    assert env.available_actions() == ("move_up",)
+
+    env.step("move_up")
+    assert env.available_actions() == ("move_up",)

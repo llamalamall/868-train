@@ -13,20 +13,29 @@
 - `HeuristicBaselineConfig.resource_goal_weight` (default `0.60`)
 - `HeuristicBaselineConfig.prog_goal_weight` (default `0.30`)
 - `HeuristicBaselineConfig.points_goal_weight` (default `0.10`)
+- `HeuristicBaselineConfig.enable_prog_usage` (default `True`)
+- `HeuristicBaselineConfig.prog_energy_floor` (default `4`)
+- `HeuristicBaselineConfig.prog_retry_backoff_steps` (default `4`)
+- `HeuristicBaselineConfig.show_recast_gap_steps` (default `6`)
 
 ## Decision Order
 1. Validate `action_space` is non-empty.
-2. If health is known and `health <= low_health_threshold`, choose `wait` when available.
-3. If siphon count decreases (a siphon was collected), build a temporary harvest plan by weighted random choice:
+2. Evaluate guarded prog-slot actions (`prog_slot_1..prog_slot_10`) when inventory data is available:
+   - emergency-first `.delay` / `.anti-v` under pressure,
+   - periodic `.show` / `.debug` recon,
+   - `.step` only when route to objective appears blocked.
+3. Apply short per-slot backoff after ineffective prog attempts (for example, no energy spend observed).
+4. If health is known and `health <= low_health_threshold`, choose `wait` when available.
+5. If siphon count decreases (a siphon was collected), build a temporary harvest plan by weighted random choice:
    - `resources` (favored),
    - `progs`,
    - `points`.
-4. If a harvest plan is active, move to its target and press `space` at target.
-5. If map/player data is available:
+6. If a harvest plan is active, move to its target and press `space` at target.
+7. If map/player data is available:
    - If an enemy is in direct line-of-sight (same row/column with no wall between), move toward that enemy.
    - Otherwise, if siphons remain, move toward the nearest siphon.
    - Otherwise, move toward the exit.
-6. Fallback priority:
+8. Fallback priority:
    - `confirm` (if available)
    - `wait` (if available)
    - random choice from available actions (tie/fallback)

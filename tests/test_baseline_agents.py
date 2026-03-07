@@ -2,12 +2,20 @@
 
 from __future__ import annotations
 
-import random
 import logging
+import random
 
 from src.agent.baseline_heuristic import HeuristicBaselineAgent, HeuristicBaselineConfig
 from src.agent.baseline_random import RandomBaselineAgent
-from src.state.schema import EnemyState, FieldState, GameStateSnapshot, GridPosition, MapCellState, MapState
+from src.state.schema import (
+    EnemyState,
+    FieldState,
+    GameStateSnapshot,
+    GridPosition,
+    InventoryState,
+    MapCellState,
+    MapState,
+)
 
 
 def _field(value: object) -> FieldState:
@@ -17,12 +25,14 @@ def _field(value: object) -> FieldState:
 def _snapshot(
     *,
     health: int = 10,
+    energy: int = 0,
     player: GridPosition | None = None,
     exit_pos: GridPosition | None = None,
     enemies: tuple[EnemyState, ...] = (),
     siphons: tuple[GridPosition, ...] = (),
     walls: tuple[GridPosition, ...] = (),
     cells: tuple[MapCellState, ...] = (),
+    inventory: InventoryState | None = None,
 ) -> GameStateSnapshot:
     wall_cells = tuple(
         MapCellState(
@@ -46,11 +56,16 @@ def _snapshot(
     return GameStateSnapshot(
         timestamp_utc="2026-03-06T00:00:00+00:00",
         health=_field(health),
-        energy=_field(0),
+        energy=_field(energy),
         currency=_field(0),
         fail_state=_field(False),
+        inventory=inventory or InventoryState(status="missing"),
         map=map_state,
     )
+
+
+def _inventory(*prog_ids: int) -> InventoryState:
+    return InventoryState(status="ok", raw_prog_ids=tuple(prog_ids))
 
 
 def test_random_baseline_agent_is_reproducible_with_same_seed() -> None:
@@ -253,6 +268,137 @@ def test_heuristic_baseline_verbose_logging_emits_chosen_action(
     assert action == "move_right"
     assert "heuristic_action" in caplog.text
     assert "choice=move_right" in caplog.text
+
+
+def test_heuristic_uses_show_prog_when_recon_value_is_high() -> None:
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            enable_prog_usage=True,
+            prog_energy_floor=1,
+        )
+    )
+    unknown_walls = (
+        MapCellState(position=GridPosition(1, 0), cell_type=1, tile_variant=0, wall_state=0, is_wall=True),
+        MapCellState(position=GridPosition(2, 0), cell_type=1, tile_variant=0, wall_state=0, is_wall=True),
+    )
+    state = _snapshot(
+        energy=10,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(0, 1),),
+        cells=unknown_walls,
+        inventory=_inventory(2),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("prog_slot_1", "move_up"),
+        rng=random.Random(31),
+    )
+
+    assert action == "prog_slot_1"
+
+
+def test_heuristic_uses_delay_prog_under_immediate_pressure() -> None:
+    enemy = EnemyState(slot=1, type_id=1, position=GridPosition(1, 0), hp=1, state=1, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            low_health_threshold=3,
+            enable_prog_usage=True,
+            prog_energy_floor=1,
+        )
+    )
+    state = _snapshot(
+        health=2,
+        energy=10,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        enemies=(enemy,),
+        siphons=(GridPosition(0, 1),),
+        inventory=_inventory(7),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("prog_slot_1", "wait", "move_up"),
+        rng=random.Random(32),
+    )
+
+    assert action == "prog_slot_1"
+
+
+def test_heuristic_skips_prog_when_energy_is_below_floor() -> None:
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            enable_prog_usage=True,
+            prog_energy_floor=4,
+        )
+    )
+    unknown_walls = (
+        MapCellState(position=GridPosition(1, 0), cell_type=1, tile_variant=0, wall_state=0, is_wall=True),
+        MapCellState(position=GridPosition(2, 0), cell_type=1, tile_variant=0, wall_state=0, is_wall=True),
+    )
+    state = _snapshot(
+        energy=2,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(0, 1),),
+        cells=unknown_walls,
+        inventory=_inventory(2),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("prog_slot_1", "move_up"),
+        rng=random.Random(33),
+    )
+
+    assert action == "move_up"
+
+
+def test_heuristic_backs_off_prog_slot_after_ineffective_attempt() -> None:
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            enable_prog_usage=True,
+            prog_energy_floor=1,
+            prog_retry_backoff_steps=4,
+            show_recast_gap_steps=0,
+        )
+    )
+    unknown_walls = (
+        MapCellState(position=GridPosition(1, 0), cell_type=1, tile_variant=0, wall_state=0, is_wall=True),
+        MapCellState(position=GridPosition(2, 0), cell_type=1, tile_variant=0, wall_state=0, is_wall=True),
+    )
+    before = _snapshot(
+        energy=10,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(0, 1),),
+        cells=unknown_walls,
+        inventory=_inventory(2),
+    )
+    after = _snapshot(
+        energy=10,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(0, 1),),
+        cells=unknown_walls,
+        inventory=_inventory(2),
+    )
+
+    first_action = agent.select_action(
+        state=before,
+        action_space=("prog_slot_1", "move_up"),
+        rng=random.Random(34),
+    )
+    second_action = agent.select_action(
+        state=after,
+        action_space=("prog_slot_1", "move_up"),
+        rng=random.Random(34),
+    )
+
+    assert first_action == "prog_slot_1"
+    assert second_action == "move_up"
 
 
 def test_heuristic_post_siphon_prefers_resources_and_harvests_with_space() -> None:

@@ -33,6 +33,25 @@ _MOVE_ACTION_DELTAS: dict[str, tuple[int, int]] = {
     "move_left": (-1, 0),
     "move_right": (1, 0),
 }
+_PROG_SLOT_ACTION_BY_INDEX: tuple[str, ...] = tuple(f"prog_slot_{index}" for index in range(1, 11))
+_PROG_SLOT_INDEX_BY_ACTION: dict[str, int] = {
+    action_name: index
+    for index, action_name in enumerate(_PROG_SLOT_ACTION_BY_INDEX)
+}
+
+
+def _prog_slot_index_for_action(action_name: str) -> int | None:
+    return _PROG_SLOT_INDEX_BY_ACTION.get(action_name)
+
+
+def _available_prog_slot_actions(snapshot: GameStateSnapshot | None) -> set[str]:
+    if snapshot is None or snapshot.inventory.status != "ok":
+        return set()
+
+    available: set[str] = set()
+    for slot_index, _prog_id in enumerate(snapshot.inventory.raw_prog_ids[:10]):
+        available.add(_PROG_SLOT_ACTION_BY_INDEX[slot_index])
+    return available
 
 
 class GameEnvError(RuntimeError):
@@ -242,6 +261,15 @@ class GameEnv:
             action for action in self._action_space if action not in {"wait", "cancel"}
         )
         snapshot = state if state is not None else self._current_state
+        allowed_prog_actions = _available_prog_slot_actions(snapshot)
+        base_actions = tuple(
+            action
+            for action in base_actions
+            if (
+                _prog_slot_index_for_action(action) is None
+                or action in allowed_prog_actions
+            )
+        )
         fail_active = (
             snapshot is not None
             and snapshot.fail_state.status == "ok"

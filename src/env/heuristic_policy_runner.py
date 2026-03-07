@@ -28,6 +28,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Movement key mapping profile.",
     )
     parser.add_argument(
+        "--prog-actions",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Include prog-slot actions (prog_slot_1..prog_slot_10 mapped to 1..0).",
+    )
+    parser.add_argument(
         "--reset-sequence",
         default="confirm",
         nargs="?",
@@ -134,7 +140,10 @@ def main() -> None:
         reset_sequence=reset_sequence if reset_sequence else None,
         focus_window_on_attach=bool(args.focus_window),
         window_targeted_input=bool(args.window_input),
-        action_config=_build_action_config(args.movement_keys),
+        action_config=_build_action_config(
+            args.movement_keys,
+            include_prog_actions=bool(args.prog_actions),
+        ),
         reward_fn=reward_fn,
     )
     try:

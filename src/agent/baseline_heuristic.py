@@ -18,6 +18,12 @@ _MOVE_VECTORS: dict[str, tuple[int, int]] = {
     "move_left": (-1, 0),
     "move_right": (1, 0),
 }
+_PROG_ACTION_BY_SLOT_INDEX: tuple[str, ...] = tuple(f"prog_slot_{slot}" for slot in range(1, 11))
+_PROG_ID_SHOW = 2
+_PROG_ID_DELAY = 7
+_PROG_ID_STEP = 8
+_PROG_ID_ANTI_V = 9
+_PROG_ID_DEBUG = 10
 
 
 @dataclass(frozen=True)
@@ -29,6 +35,10 @@ class HeuristicBaselineConfig:
     resource_goal_weight: float = 0.60
     prog_goal_weight: float = 0.30
     points_goal_weight: float = 0.10
+    enable_prog_usage: bool = True
+    prog_energy_floor: int = 4
+    prog_retry_backoff_steps: int = 4
+    show_recast_gap_steps: int = 6
 
 
 @dataclass(frozen=True)
@@ -51,6 +61,11 @@ class HeuristicBaselineAgent:
     config: HeuristicBaselineConfig = HeuristicBaselineConfig()
     _last_siphon_count: int | None = field(default=None, init=False, repr=False)
     _harvest_plan: _HarvestPlan | None = field(default=None, init=False, repr=False)
+    _decision_step: int = field(default=0, init=False, repr=False)
+    _last_prog_action: str | None = field(default=None, init=False, repr=False)
+    _last_prog_energy: int | None = field(default=None, init=False, repr=False)
+    _prog_backoff_steps: dict[str, int] = field(default_factory=dict, init=False, repr=False)
+    _last_show_step: int | None = field(default=None, init=False, repr=False)
 
     def select_action(
         self,
@@ -68,7 +83,21 @@ class HeuristicBaselineAgent:
         if not actions:
             raise ValueError("No safe actions available after applying siphon-before-exit policy.")
 
-        self._update_harvest_plan_on_siphon_change(state=state, rng=rng)
+        reset_detected = self._update_harvest_plan_on_siphon_change(state=state, rng=rng)
+        self._advance_prog_usage_state(state=state, reset_detected=reset_detected)
+
+        prog_action, prog_reason = self._select_prog_action(
+            state=state,
+            action_space=actions,
+        )
+        if prog_action is not None and prog_reason is not None:
+            self._record_prog_action_attempt(action_name=prog_action, state=state)
+            return self._log_choice(
+                state=state,
+                action=prog_action,
+                reason=prog_reason,
+                action_space=actions,
+            )
 
         planned_action, planned_reason = self._execute_harvest_plan(state=state, action_space=actions)
         if planned_action is not None and planned_reason is not None:
@@ -141,26 +170,31 @@ class HeuristicBaselineAgent:
         *,
         state: GameStateSnapshot,
         rng: random.Random,
-    ) -> None:
+    ) -> bool:
         if state.map.status != "ok":
             self._last_siphon_count = None
             self._harvest_plan = None
-            return
+            self._reset_prog_usage_state()
+            return False
 
         current_siphon_count = len(state.map.siphons)
         if self._last_siphon_count is None:
             self._last_siphon_count = current_siphon_count
-            return
+            return False
 
+        reset_detected = False
         if current_siphon_count > self._last_siphon_count:
             # Likely reset/new episode.
             self._harvest_plan = None
+            self._reset_prog_usage_state()
+            reset_detected = True
         elif current_siphon_count < self._last_siphon_count:
             self._harvest_plan = None
             if current_siphon_count > 0:
                 self._harvest_plan = self._choose_harvest_plan(state=state, rng=rng)
 
         self._last_siphon_count = current_siphon_count
+        return reset_detected
 
     def _execute_harvest_plan(
         self,
@@ -200,6 +234,232 @@ class HeuristicBaselineAgent:
             return (None, None)
 
         return (route.action, f"move_to_{plan.category}_target")
+
+    def _advance_prog_usage_state(
+        self,
+        *,
+        state: GameStateSnapshot,
+        reset_detected: bool,
+    ) -> None:
+        self._decision_step += 1
+        for action_name in tuple(self._prog_backoff_steps):
+            remaining = self._prog_backoff_steps[action_name] - 1
+            if remaining <= 0:
+                self._prog_backoff_steps.pop(action_name, None)
+            else:
+                self._prog_backoff_steps[action_name] = remaining
+
+        if reset_detected:
+            self._last_prog_action = None
+            self._last_prog_energy = None
+            return
+
+        if self._last_prog_action is None:
+            return
+
+        current_energy = self._coerce_int(state.energy.value) if state.energy.status == "ok" else None
+        energy_spent = (
+            self._last_prog_energy is not None
+            and current_energy is not None
+            and current_energy < self._last_prog_energy
+        )
+        if not energy_spent and self.config.prog_retry_backoff_steps > 0:
+            backoff_steps = max(int(self.config.prog_retry_backoff_steps), 0)
+            existing = self._prog_backoff_steps.get(self._last_prog_action, 0)
+            self._prog_backoff_steps[self._last_prog_action] = max(existing, backoff_steps)
+
+        self._last_prog_action = None
+        self._last_prog_energy = None
+
+    def _reset_prog_usage_state(self) -> None:
+        self._last_prog_action = None
+        self._last_prog_energy = None
+        self._prog_backoff_steps.clear()
+        self._last_show_step = None
+
+    def _record_prog_action_attempt(
+        self,
+        *,
+        action_name: str,
+        state: GameStateSnapshot,
+    ) -> None:
+        self._last_prog_action = action_name
+        self._last_prog_energy = self._coerce_int(state.energy.value) if state.energy.status == "ok" else None
+
+    def _select_prog_action(
+        self,
+        *,
+        state: GameStateSnapshot,
+        action_space: tuple[str, ...],
+    ) -> tuple[str | None, str | None]:
+        if not self.config.enable_prog_usage:
+            return (None, None)
+        if state.map.status != "ok":
+            return (None, None)
+
+        energy = self._coerce_int(state.energy.value) if state.energy.status == "ok" else None
+        if energy is None or energy < self.config.prog_energy_floor:
+            return (None, None)
+
+        slot_prog_actions = self._slot_prog_actions(state=state, action_space=action_space)
+        if not slot_prog_actions:
+            return (None, None)
+
+        has_enemy_pressure = self._has_enemy_pressure(state=state)
+        low_health = self._is_low_health(state=state)
+
+        if low_health and has_enemy_pressure:
+            delay_action = self._find_prog_action_by_id(
+                slot_prog_actions=slot_prog_actions,
+                prog_id=_PROG_ID_DELAY,
+            )
+            if delay_action is not None:
+                return (delay_action, "use_prog_delay_emergency")
+
+            anti_v_action = self._find_prog_action_by_id(
+                slot_prog_actions=slot_prog_actions,
+                prog_id=_PROG_ID_ANTI_V,
+            )
+            if anti_v_action is not None and len(state.map.enemies) >= 2:
+                return (anti_v_action, "use_prog_anti_v_emergency")
+
+        if self._should_cast_show(state=state, has_enemy_pressure=has_enemy_pressure):
+            show_action = self._find_prog_action_by_id(
+                slot_prog_actions=slot_prog_actions,
+                prog_id=_PROG_ID_SHOW,
+            )
+            if show_action is not None:
+                self._last_show_step = self._decision_step
+                return (show_action, "use_prog_show_recon")
+
+        if self._should_cast_debug(state=state, has_enemy_pressure=has_enemy_pressure):
+            debug_action = self._find_prog_action_by_id(
+                slot_prog_actions=slot_prog_actions,
+                prog_id=_PROG_ID_DEBUG,
+            )
+            if debug_action is not None:
+                return (debug_action, "use_prog_debug_recon")
+
+        if self._should_cast_step(state=state, has_enemy_pressure=has_enemy_pressure):
+            step_action = self._find_prog_action_by_id(
+                slot_prog_actions=slot_prog_actions,
+                prog_id=_PROG_ID_STEP,
+            )
+            if step_action is not None:
+                return (step_action, "use_prog_step_unblock")
+
+        return (None, None)
+
+    def _slot_prog_actions(
+        self,
+        *,
+        state: GameStateSnapshot,
+        action_space: tuple[str, ...],
+    ) -> dict[int, tuple[str, ...]]:
+        if state.inventory.status != "ok":
+            return {}
+
+        available_actions = set(action_space)
+        by_prog_id: dict[int, list[str]] = {}
+        for slot_index, prog_id in enumerate(state.inventory.raw_prog_ids[:10]):
+            action_name = _PROG_ACTION_BY_SLOT_INDEX[slot_index]
+            if action_name not in available_actions:
+                continue
+            if self._prog_action_is_suppressed(action_name):
+                continue
+            by_prog_id.setdefault(int(prog_id), []).append(action_name)
+        return {prog_id: tuple(actions) for prog_id, actions in by_prog_id.items()}
+
+    @staticmethod
+    def _find_prog_action_by_id(
+        *,
+        slot_prog_actions: dict[int, tuple[str, ...]],
+        prog_id: int,
+    ) -> str | None:
+        actions = slot_prog_actions.get(prog_id)
+        if not actions:
+            return None
+        return actions[0]
+
+    def _prog_action_is_suppressed(self, action_name: str) -> bool:
+        return self._prog_backoff_steps.get(action_name, 0) > 0
+
+    def _is_low_health(self, *, state: GameStateSnapshot) -> bool:
+        health_value = self._coerce_int(state.health.value) if state.health.status == "ok" else None
+        return health_value is not None and health_value <= self.config.low_health_threshold
+
+    def _has_enemy_pressure(self, *, state: GameStateSnapshot) -> bool:
+        if state.map.status != "ok" or state.map.player_position is None:
+            return False
+        if not state.map.enemies:
+            return False
+
+        player = state.map.player_position
+        nearest_enemy = min(_manhattan(player, enemy.position) for enemy in state.map.enemies)
+        return nearest_enemy <= 1 or (nearest_enemy <= 2 and len(state.map.enemies) >= 2) or len(state.map.enemies) >= 4
+
+    def _should_cast_show(self, *, state: GameStateSnapshot, has_enemy_pressure: bool) -> bool:
+        if has_enemy_pressure:
+            return False
+        if not state.map.siphons:
+            return False
+        if self._count_unknown_walls(state=state) < 2:
+            return False
+        if self._last_show_step is None:
+            return True
+        return (self._decision_step - self._last_show_step) >= self.config.show_recast_gap_steps
+
+    def _should_cast_debug(self, *, state: GameStateSnapshot, has_enemy_pressure: bool) -> bool:
+        if has_enemy_pressure:
+            return False
+        player = state.map.player_position
+        if player is None:
+            return False
+
+        reachable_walls = 0
+        nearby_unknown = 0
+        for wall in _iter_wall_candidates(state):
+            if wall.prog_id is None and wall.points <= 0 and _manhattan(player, wall.position) <= 2:
+                nearby_unknown += 1
+            if _best_adjacent_position(player=player, target_wall=wall.position, state=state) is not None:
+                reachable_walls += 1
+
+        return nearby_unknown >= 1 and reachable_walls >= 2
+
+    def _should_cast_step(self, *, state: GameStateSnapshot, has_enemy_pressure: bool) -> bool:
+        if has_enemy_pressure:
+            return False
+        player = state.map.player_position
+        if player is None:
+            return False
+        if state.map.siphons:
+            targets = tuple(state.map.siphons)
+        elif state.map.exit_position is not None:
+            targets = (state.map.exit_position,)
+        else:
+            return False
+
+        walls = _wall_positions(state)
+        for target in targets:
+            route = _shortest_path_first_action(
+                start=player,
+                target=target,
+                width=state.map.width,
+                height=state.map.height,
+                walls=walls,
+                allowed_first_actions=tuple(_MOVE_VECTORS.keys()),
+            )
+            if route is not None:
+                return False
+        return True
+
+    @staticmethod
+    def _count_unknown_walls(*, state: GameStateSnapshot) -> int:
+        return sum(
+            1
+            for wall in _iter_wall_candidates(state)
+            if wall.prog_id is None and wall.points <= 0
+        )
 
     def _choose_harvest_plan(
         self,
