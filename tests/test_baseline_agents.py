@@ -145,7 +145,7 @@ def test_heuristic_baseline_does_not_pursue_enemy_when_los_blocked() -> None:
     state = _snapshot(
         health=8,
         player=GridPosition(0, 1),
-        exit_pos=GridPosition(0, 2),
+        exit_pos=GridPosition(2, 2),
         enemies=(enemy,),
         siphons=(GridPosition(0, 2),),
         walls=(GridPosition(1, 1),),
@@ -158,6 +158,79 @@ def test_heuristic_baseline_does_not_pursue_enemy_when_los_blocked() -> None:
     )
 
     assert action == "move_up"
+
+
+def test_heuristic_baseline_pathfinds_around_wall_to_exit() -> None:
+    agent = HeuristicBaselineAgent()
+    state = _snapshot(
+        health=9,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(2, 0),
+        walls=(GridPosition(1, 0),),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_up", "move_left"),
+        rng=random.Random(5),
+    )
+
+    assert action == "move_up"
+
+
+def test_heuristic_baseline_targets_reachable_siphon_via_pathfinding() -> None:
+    agent = HeuristicBaselineAgent()
+    state = _snapshot(
+        health=9,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(2, 2),
+        siphons=(GridPosition(2, 0), GridPosition(0, 2)),
+        walls=(GridPosition(1, 0), GridPosition(1, 1), GridPosition(1, 2)),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_up", "move_right"),
+        rng=random.Random(6),
+    )
+
+    assert action == "move_up"
+
+
+def test_heuristic_baseline_avoids_exit_step_while_siphons_remain() -> None:
+    agent = HeuristicBaselineAgent()
+    state = _snapshot(
+        health=9,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(1, 0),
+        siphons=(GridPosition(0, 1),),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_up"),
+        rng=random.Random(7),
+    )
+
+    assert action == "move_up"
+
+
+def test_heuristic_baseline_never_fallbacks_to_exit_when_siphons_remain() -> None:
+    agent = HeuristicBaselineAgent()
+    state = _snapshot(
+        health=9,
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(1, 0),
+        siphons=(GridPosition(0, 1),),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "space"),
+        rng=random.Random(8),
+    )
+
+    assert action == "space"
 
 
 def test_heuristic_baseline_verbose_logging_emits_chosen_action(

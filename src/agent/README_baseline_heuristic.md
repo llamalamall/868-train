@@ -33,15 +33,17 @@
 ## Enemy LOS Rule
 - Scans enemies in the same row or column as the player.
 - Requires a clear path (no wall cells between player and enemy).
-- Chooses a move that reduces distance to the closest visible enemy.
+- Chooses the first step on a shortest wall-aware path toward the closest visible enemy.
 
 ## Siphon Rule
 - If `map.siphons` contains entries, targets the nearest siphon first.
 - This causes siphons to be collected before routing to the exit when possible.
+- Uses shortest-path search (BFS) over the map grid so detours around walls are handled.
+- While siphons remain, the heuristic filters out any immediate move that would step onto the exit tile.
 
 ## Goal Rule
 - Uses player and exit positions from `state.map` once no siphon target remains.
-- Chooses a movement action that strictly reduces Manhattan distance to exit.
+- Uses shortest-path search (BFS) toward the exit so wall detours are handled.
 
 ## Failure Behavior
 - Raises `ValueError` when `action_space` is empty.
