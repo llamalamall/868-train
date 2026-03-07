@@ -69,12 +69,20 @@ python -m src.cli run-random --episodes 5 --max-steps 200
 # Run heuristic baseline episodes
 python -m src.cli run-heuristic --episodes 5 --max-steps 200 --movement-keys wasd
 
+# Run heuristic with deeper enemy lookahead
+python -m src.cli run-heuristic --episodes 5 --enemy-prediction-horizon-steps 4
+
+# Step through actions manually (press Enter in TUI before each move)
+python -m src.cli run-dqn --episodes 1 --step-through
+
 # Train DQN and auto-save checkpoint (path auto-generated under artifacts/checkpoints)
 python -m src.cli run-dqn --episodes 20 --max-steps 200
 
 # Evaluate from a saved DQN checkpoint
 python -m src.cli run-dqn --mode eval --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 5
 ```
+
+When `--tui` or `--step-through` is enabled, runners automatically use window-targeted input so actions still dispatch to the game while the TUI has focus.
 
 ## Control Smoke Test
 
@@ -140,6 +148,7 @@ TUI controls:
 - `z`: pause/resume polling
 - `r`: refresh immediately
 - `p`: toggle pointer mode (`cached-addresses` vs `resolve-each-poll`)
+- `enter`: advance one pending runner step when `--step-through` is enabled
 - `up/down/left/right`, `1` through `0`, `escape`, `space`: pass controls to the game window
 
 ## Telemetry Logging (Task 10)
@@ -180,6 +189,8 @@ Two baseline policy runners are available:
 - Heuristic baseline: `python -m src.cli run-heuristic ...`
 
 Both support reward shaping flags (`--reward-*`) and print per-episode + summary metrics for quick comparison.
+All policy runners (`run-random`, `run-heuristic`, `run-dqn`) now launch the live state-monitor TUI by
+default in a separate window; disable with `--no-tui` and tune polling with `--tui-interval`.
 
 ## Project Structure
 

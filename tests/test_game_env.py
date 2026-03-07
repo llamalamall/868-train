@@ -10,7 +10,7 @@ import pytest
 
 from src.env.game_env import GameEnv, GameEnvConfig, ResetTimeoutError, StepTimeoutError, run_random_policy
 from src.env.reset_manager import NoopResetManager
-from src.state.schema import FieldState, GameStateSnapshot, GridPosition, MapCellState, MapState
+from src.state.schema import FieldState, GameStateSnapshot, GridPosition, InventoryState, MapCellState, MapState
 
 
 def _field(value: object, *, status: str = "ok") -> FieldState:
@@ -24,6 +24,7 @@ def _snapshot(
     credits: int = 3,
     failed: bool = False,
     map_state: MapState | None = None,
+    inventory_state: InventoryState | None = None,
 ) -> GameStateSnapshot:
     return GameStateSnapshot(
         timestamp_utc="2026-03-06T00:00:00+00:00",
@@ -31,6 +32,7 @@ def _snapshot(
         energy=_field(energy),
         currency=_field(credits),
         fail_state=_field(failed),
+        inventory=inventory_state or InventoryState(status="missing"),
         map=map_state or MapState(status="missing"),
     )
 
@@ -187,6 +189,28 @@ def test_game_env_reset_dispatches_confirm_and_space_when_start_screen_null_poin
     assert actions.actions == ["confirm", "space"]
 
 
+def test_game_env_reset_dispatches_recovery_actions_when_terminal_state_persists() -> None:
+    state_provider = QueueStateProvider([_snapshot(failed=True), _snapshot(failed=False)])
+    actions = FakeActionAPI()
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait", "confirm", "space"),
+        config=GameEnvConfig(
+            require_non_terminal_on_reset=True,
+            state_poll_interval_seconds=0.0,
+            post_action_poll_delay_seconds=0.0,
+        ),
+    )
+
+    state = env.reset()
+
+    assert state.fail_state.status == "ok"
+    assert state.fail_state.value is False
+    assert actions.actions == ["confirm", "space"]
+
+
 def test_game_env_reset_timeout_when_terminal_state_persists() -> None:
     state_provider = QueueStateProvider([_snapshot(failed=True)])
     env = GameEnv(
@@ -238,6 +262,55 @@ def test_run_random_policy_returns_episode_results() -> None:
     assert len(results) == 2
     assert all(result.steps == 2 for result in results)
     assert all(result.done is False for result in results)
+
+
+def test_run_random_policy_step_callback_reports_action_and_reason() -> None:
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([_snapshot(failed=False)]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "wait"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    events: list[dict[str, object]] = []
+
+    _ = run_random_policy(
+        env=env,
+        episodes=1,
+        max_steps_per_episode=1,
+        seed=7,
+        step_callback=lambda event: events.append(event),
+    )
+
+    assert events
+    first = events[0]
+    assert isinstance(first["action"], str)
+    assert first["action_reason"] == "random_policy_sample"
+
+
+def test_run_random_policy_before_step_callback_reports_pending_action() -> None:
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([_snapshot(failed=False)]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "wait"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    events: list[dict[str, object]] = []
+
+    _ = run_random_policy(
+        env=env,
+        episodes=1,
+        max_steps_per_episode=1,
+        seed=7,
+        before_step_callback=lambda event: events.append(event),
+    )
+
+    assert events
+    first = events[0]
+    assert isinstance(first["action"], str)
+    assert first["action_reason"] == "random_policy_sample"
+    assert isinstance(first["total_reward"], float)
 
 
 def test_run_random_policy_uses_supplied_action_subset() -> None:
@@ -358,3 +431,57 @@ def test_available_actions_adds_space_only_when_siphons_present() -> None:
 
     env.step("move_up")
     assert env.available_actions() == ("move_up", "space")
+
+
+def test_available_actions_includes_only_owned_prog_slots() -> None:
+    state = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=2,
+            player_position=GridPosition(0, 0),
+        ),
+        inventory_state=InventoryState(
+            status="ok",
+            raw_prog_ids=(2, 7),
+        ),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([state]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "prog_slot_1", "prog_slot_2", "prog_slot_3"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    assert env.available_actions() == ("move_up", "prog_slot_1", "prog_slot_2")
+
+
+def test_available_actions_hides_prog_slots_when_inventory_unavailable() -> None:
+    map_state = MapState(
+        status="ok",
+        width=2,
+        height=2,
+        player_position=GridPosition(0, 0),
+    )
+    missing_inventory = _snapshot(
+        map_state=map_state,
+        inventory_state=InventoryState(status="missing"),
+    )
+    invalid_inventory = _snapshot(
+        map_state=map_state,
+        inventory_state=InventoryState(status="invalid", error_code="read_failed"),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([missing_inventory, invalid_inventory]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "prog_slot_1"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+    assert env.available_actions() == ("move_up",)
+
+    env.step("move_up")
+    assert env.available_actions() == ("move_up",)

@@ -9,6 +9,7 @@ Controls:
     z: pause/resume polling
     r: refresh now
     p: toggle resolve-each-poll
+    enter: advance one paused runner step (when runner step-through is enabled)
     arrows / 0-9 / escape / space: pass key input through to the game window
 """
 
@@ -19,6 +20,7 @@ from collections import Counter
 import ctypes
 import ctypes.wintypes
 import datetime as dt
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -116,6 +118,68 @@ class PollSnapshot:
     timestamp: str
     fields: tuple[FieldSnapshot, ...]
     board_stats: str = ""
+
+
+@dataclass(frozen=True)
+class ExternalStatusSnapshot:
+    """Optional runner-provided live status lines shown in the TUI footer area."""
+
+    training_line: str = ""
+    action_line: str = ""
+
+
+def load_external_status_snapshot(status_file: Path | None) -> ExternalStatusSnapshot:
+    """Read optional runner status JSON payload from disk."""
+    if status_file is None:
+        return ExternalStatusSnapshot()
+    if not status_file.exists():
+        return ExternalStatusSnapshot()
+
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ExternalStatusSnapshot()
+
+    if not isinstance(payload, dict):
+        return ExternalStatusSnapshot()
+    training_line = payload.get("training_line", "")
+    action_line = payload.get("action_line", "")
+    return ExternalStatusSnapshot(
+        training_line=str(training_line),
+        action_line=str(action_line),
+    )
+
+
+def load_external_advance_counter(control_file: Path | None) -> int:
+    """Read optional runner control payload and return current Enter-press counter."""
+    if control_file is None:
+        return 0
+    if not control_file.exists():
+        return 0
+    try:
+        payload = json.loads(control_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return 0
+    if not isinstance(payload, dict):
+        return 0
+    try:
+        return int(payload.get("advance_counter", 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def increment_external_advance_counter(control_file: Path | None) -> int:
+    """Increment and persist runner control Enter-press counter."""
+    if control_file is None:
+        return 0
+    counter = load_external_advance_counter(control_file) + 1
+    staging_path = control_file.with_suffix(".tmp")
+    staging_path.write_text(
+        json.dumps({"advance_counter": counter}),
+        encoding="utf-8",
+    )
+    staging_path.replace(control_file)
+    return counter
 
 
 def map_tui_key_to_passthrough_key(key: str) -> str | None:
@@ -734,10 +798,28 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-resolve pointer chains every poll.",
     )
+    parser.add_argument(
+        "--external-status-file",
+        type=Path,
+        default=None,
+        help="Optional JSON file with training/action lines produced by runner sessions.",
+    )
+    parser.add_argument(
+        "--external-control-file",
+        type=Path,
+        default=None,
+        help="Optional JSON file used for runner step-through Enter handshakes.",
+    )
     return parser
 
 
-def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
+def _run_tui(
+    engine: MemoryStateMonitor,
+    interval: float,
+    *,
+    external_status_file: Path | None = None,
+    external_control_file: Path | None = None,
+) -> None:
     try:
         from textual import events
         from textual.app import App, ComposeResult
@@ -762,13 +844,24 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
 
         paused = False
 
-        def __init__(self, monitor_engine: MemoryStateMonitor, poll_interval: float) -> None:
+        def __init__(
+            self,
+            monitor_engine: MemoryStateMonitor,
+            poll_interval: float,
+            *,
+            status_file: Path | None,
+            control_file: Path | None,
+        ) -> None:
             super().__init__()
             self._engine = monitor_engine
             self._poll_interval = poll_interval
+            self._external_status_file = status_file
+            self._external_control_file = control_file
             self._status_widget: Static | None = None
             self._progs_widget: Static | None = None
             self._board_widget: Static | None = None
+            self._training_widget: Static | None = None
+            self._action_widget: Static | None = None
             self._table: DataTable | None = None
             self._last_snapshot: PollSnapshot | None = None
             self._controls = ActionAPI(input_driver=InputDriver())
@@ -782,6 +875,8 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             yield Static("", id="status_line")
             yield Static("", id="progs_line")
             yield Static("", id="board_line")
+            yield Static("", id="training_line")
+            yield Static("", id="action_line")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -789,6 +884,8 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             self._status_widget = self.query_one("#status_line", Static)
             self._progs_widget = self.query_one("#progs_line", Static)
             self._board_widget = self.query_one("#board_line", Static)
+            self._training_widget = self.query_one("#training_line", Static)
+            self._action_widget = self.query_one("#action_line", Static)
 
             self._table.cursor_type = "none"
             self._table.zebra_stripes = True
@@ -851,6 +948,8 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
                 self._status_widget is None
                 or self._progs_widget is None
                 or self._board_widget is None
+                or self._training_widget is None
+                or self._action_widget is None
                 or self._last_snapshot is None
             ):
                 return
@@ -859,16 +958,24 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             mode = "resolve-each-poll" if self._engine.resolve_each_poll else "cached-addresses"
             paused_flag = "paused" if self.paused else "running"
             command = f" | command={self._last_command}" if self._last_command else ""
+            advance_counter = (
+                f" | advance={load_external_advance_counter(self._external_control_file)}"
+                if self._external_control_file is not None
+                else ""
+            )
             fail_message = " | FAIL DETECTED" if is_fail_state_detected(snapshot) else ""
             progs_message = format_collected_progs_status(snapshot)
             board_message = snapshot.board_stats
             self._status_widget.update(
                 f"{snapshot.timestamp} | pid={self._engine.attached.pid} | {paused_flag} | "
                 f"mode={mode} | interval={self._poll_interval:.2f}s | {self._control_state}{command}"
-                f"{fail_message}"
+                f"{advance_counter}{fail_message}"
             )
             self._progs_widget.update(progs_message)
             self._board_widget.update(board_message)
+            external_status = load_external_status_snapshot(self._external_status_file)
+            self._training_widget.update(external_status.training_line)
+            self._action_widget.update(external_status.action_line)
 
         def action_toggle_pause(self) -> None:
             self.paused = not self.paused
@@ -895,6 +1002,10 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
 
         def on_key(self, event: events.Key) -> None:
             if event.key in {"up", "down", "left", "right"}:
+                return
+            if event.key == "enter":
+                event.stop()
+                self._signal_step_advance()
                 return
             passthrough_key = map_tui_key_to_passthrough_key(event.key)
             if passthrough_key is None:
@@ -926,7 +1037,21 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
                 self._control_state = f"controls=error ({error})"
             self._update_status_line()
 
-    MonitorApp(engine, interval).run()
+        def _signal_step_advance(self) -> None:
+            try:
+                counter = increment_external_advance_counter(self._external_control_file)
+                self._last_command = f"advance:{counter}"
+            except OSError as error:
+                self._last_command = "advance:failed"
+                self._control_state = f"controls=error ({error})"
+            self._update_status_line()
+
+    MonitorApp(
+        engine,
+        interval,
+        status_file=external_status_file,
+        control_file=external_control_file,
+    ).run()
 
 
 def main() -> None:
@@ -946,7 +1071,12 @@ def main() -> None:
 
     try:
         engine.start()
-        _run_tui(engine, args.interval)
+        _run_tui(
+            engine,
+            args.interval,
+            external_status_file=args.external_status_file,
+            external_control_file=args.external_control_file,
+        )
     finally:
         engine.stop()
 

@@ -7,7 +7,10 @@ from src.memory.state_monitor_tui import (
     FieldSnapshot,
     PollSnapshot,
     format_collected_progs_status,
+    increment_external_advance_counter,
     is_fail_state_detected,
+    load_external_advance_counter,
+    load_external_status_snapshot,
     map_tui_key_to_passthrough_key,
     render_ascii_map,
     summarize_board_state,
@@ -346,3 +349,34 @@ def test_render_ascii_map_shows_key_board_features() -> None:
 
 def test_render_ascii_map_reports_non_ok_status() -> None:
     assert render_ascii_map(MapState(status="missing")) == "map unavailable (missing)"
+
+
+def test_load_external_status_snapshot_returns_empty_for_missing_file(tmp_path) -> None:
+    status = load_external_status_snapshot(tmp_path / "missing.json")
+    assert status.training_line == ""
+    assert status.action_line == ""
+
+
+def test_load_external_status_snapshot_reads_training_and_action_lines(tmp_path) -> None:
+    status_file = tmp_path / "status.json"
+    status_file.write_text(
+        '{"training_line":"episode=1 step=4 total_reward=2.100","action_line":"action=move_up reason=collect_siphon"}',
+        encoding="utf-8",
+    )
+
+    status = load_external_status_snapshot(status_file)
+    assert status.training_line == "episode=1 step=4 total_reward=2.100"
+    assert status.action_line == "action=move_up reason=collect_siphon"
+
+
+def test_load_external_advance_counter_returns_zero_for_missing_file(tmp_path) -> None:
+    control_file = tmp_path / "control.json"
+    assert load_external_advance_counter(control_file) == 0
+
+
+def test_increment_external_advance_counter_updates_counter_file(tmp_path) -> None:
+    control_file = tmp_path / "control.json"
+
+    assert increment_external_advance_counter(control_file) == 1
+    assert increment_external_advance_counter(control_file) == 2
+    assert load_external_advance_counter(control_file) == 2

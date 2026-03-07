@@ -33,6 +33,25 @@ _MOVE_ACTION_DELTAS: dict[str, tuple[int, int]] = {
     "move_left": (-1, 0),
     "move_right": (1, 0),
 }
+_PROG_SLOT_ACTION_BY_INDEX: tuple[str, ...] = tuple(f"prog_slot_{index}" for index in range(1, 11))
+_PROG_SLOT_INDEX_BY_ACTION: dict[str, int] = {
+    action_name: index
+    for index, action_name in enumerate(_PROG_SLOT_ACTION_BY_INDEX)
+}
+
+
+def _prog_slot_index_for_action(action_name: str) -> int | None:
+    return _PROG_SLOT_INDEX_BY_ACTION.get(action_name)
+
+
+def _available_prog_slot_actions(snapshot: GameStateSnapshot | None) -> set[str]:
+    if snapshot is None or snapshot.inventory.status != "ok":
+        return set()
+
+    available: set[str] = set()
+    for slot_index, _prog_id in enumerate(snapshot.inventory.raw_prog_ids[:10]):
+        available.add(_PROG_SLOT_ACTION_BY_INDEX[slot_index])
+    return available
 
 
 class GameEnvError(RuntimeError):
@@ -242,6 +261,15 @@ class GameEnv:
             action for action in self._action_space if action not in {"wait", "cancel"}
         )
         snapshot = state if state is not None else self._current_state
+        allowed_prog_actions = _available_prog_slot_actions(snapshot)
+        base_actions = tuple(
+            action
+            for action in base_actions
+            if (
+                _prog_slot_index_for_action(action) is None
+                or action in allowed_prog_actions
+            )
+        )
         fail_active = (
             snapshot is not None
             and snapshot.fail_state.status == "ok"
@@ -459,12 +487,16 @@ class GameEnv:
                 operation_name="state_provider",
             )
             if _state_indicates_start_screen(state):
-                self._dispatch_start_screen_recovery_actions()
+                self._dispatch_reset_recovery_actions(reason="start_screen_null_pointer")
                 self._sleep_fn(self._config.state_poll_interval_seconds)
                 continue
-            if not require_non_terminal or not _state_is_terminal(state):
-                return state
-            self._sleep_fn(self._config.state_poll_interval_seconds)
+            if _state_is_terminal(state):
+                if not require_non_terminal:
+                    return state
+                self._dispatch_reset_recovery_actions(reason="terminal_fail_state")
+                self._sleep_fn(self._config.state_poll_interval_seconds)
+                continue
+            return state
 
         raise ResetTimeoutError(
             "Reset timed out waiting for a non-terminal state."
@@ -492,18 +524,20 @@ class GameEnv:
                     f"Watchdog timeout during {operation_name} after {timeout_seconds:.2f}s."
                 ) from error
 
-    def _dispatch_start_screen_recovery_actions(self) -> None:
+    def _dispatch_reset_recovery_actions(self, *, reason: str) -> None:
         recovery_actions = tuple(
             action for action in ("confirm", "space") if action in self._action_space
         )
         if not recovery_actions:
             self._logger.warning(
-                "Detected start-screen null-pointer state, but no confirm/space actions are configured."
+                "Detected reset recovery condition (%s), but no confirm/space actions are configured.",
+                reason,
             )
             return
 
         self._logger.info(
-            "Detected start-screen null-pointer state; dispatching recovery actions: %s.",
+            "Detected reset recovery condition (%s); dispatching recovery actions: %s.",
+            reason,
             ", ".join(recovery_actions),
         )
         for action_name in recovery_actions:
@@ -661,6 +695,8 @@ def run_random_policy(
     max_steps_per_episode: int = 200,
     seed: int | None = None,
     actions: tuple[str, ...] | None = None,
+    before_step_callback: Callable[[dict[str, Any]], None] | None = None,
+    step_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[RandomPolicyEpisodeResult, ...]:
     """Run random actions for N episodes to validate env contract."""
     import random
@@ -694,6 +730,7 @@ def run_random_policy(
         terminal_reason: str | None = None
 
         while steps < max_steps_per_episode and not done:
+            step_index = steps
             if actions is None:
                 step_actions = env.available_actions()
             else:
@@ -702,12 +739,36 @@ def run_random_policy(
                 raise GameEnvError("No available actions after map-edge/wall filtering.")
 
             action = rng.choice(step_actions)
+            if before_step_callback is not None:
+                before_step_callback(
+                    {
+                        "episode_id": env.current_episode_id,
+                        "step_index": step_index,
+                        "action": action,
+                        "action_reason": "random_policy_sample",
+                        "total_reward": total_reward,
+                    }
+                )
             _, reward, done, info = env.step(action)
             total_reward += float(reward)
             steps += 1
             terminal_reason_value = info.get("terminal_reason")
             if isinstance(terminal_reason_value, str):
                 terminal_reason = terminal_reason_value
+
+            if step_callback is not None:
+                step_callback(
+                    {
+                        "episode_id": env.current_episode_id,
+                        "step_index": step_index,
+                        "action": action,
+                        "action_reason": "random_policy_sample",
+                        "reward": float(reward),
+                        "total_reward": total_reward,
+                        "done": done,
+                        "terminal_reason": terminal_reason,
+                    }
+                )
 
         results.append(
             RandomPolicyEpisodeResult(

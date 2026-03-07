@@ -6,7 +6,12 @@ import argparse
 
 import pytest
 
-from src.env.random_policy_runner import _build_action_config, _build_reward_config, _build_reward_fn
+from src.env.random_policy_runner import (
+    _build_action_config,
+    _build_parser,
+    _build_reward_config,
+    _build_reward_fn,
+)
 from src.state.schema import FieldState, GameStateSnapshot
 
 
@@ -50,9 +55,47 @@ def test_build_action_config_numpad_includes_numpad_key_codes() -> None:
     assert config.key_codes["NUMPAD6"] == 0x66
 
 
+def test_build_action_config_includes_prog_slot_actions_by_default() -> None:
+    config = _build_action_config("arrows")
+
+    assert config.action_key_bindings["prog_slot_1"] == "1"
+    assert config.action_key_bindings["prog_slot_5"] == "5"
+    assert config.action_key_bindings["prog_slot_10"] == "0"
+    assert config.key_codes["1"] == 0x31
+    assert config.key_codes["0"] == 0x30
+
+
+def test_build_action_config_can_disable_prog_slot_actions() -> None:
+    config = _build_action_config("arrows", include_prog_actions=False)
+
+    assert all(not action.startswith("prog_slot_") for action in config.action_key_bindings)
+
+
 def test_build_action_config_rejects_unknown_profile() -> None:
     with pytest.raises(ValueError, match="movement_keys must be one of"):
         _build_action_config("vim")
+
+
+def test_random_runner_parser_prog_actions_defaults_to_enabled() -> None:
+    parser = _build_parser()
+    args = parser.parse_args([])
+
+    assert args.prog_actions is True
+    assert args.step_through is False
+    assert args.require_non_terminal_reset is True
+    assert args.tui is True
+
+
+def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        ["--no-prog-actions", "--step-through", "--no-require-non-terminal-reset", "--no-tui"]
+    )
+
+    assert args.prog_actions is False
+    assert args.step_through is True
+    assert args.require_non_terminal_reset is False
+    assert args.tui is False
 
 
 def test_build_reward_fn_applies_configured_components_and_writes_breakdown() -> None:
