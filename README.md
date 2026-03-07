@@ -89,6 +89,8 @@ python -m src.cli evaluate run --checkpoint artifacts/checkpoints/dqn-latest.jso
 python -m src.cli evaluate compare --checkpoint-a artifacts/checkpoints/dqn-a.json --checkpoint-b artifacts/checkpoints/dqn-b.json --episodes 10 --seed 42
 ```
 
+`evaluate compare` launches the monitor TUI by default and defaults to `--window-input --no-focus-window` so compare runs can continue while keeping terminal focus.
+
 When `--tui` or `--step-through` is enabled, runners automatically use window-targeted input so actions still dispatch to the game while the TUI has focus.
 
 ## Control Smoke Test

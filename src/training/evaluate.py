@@ -13,8 +13,11 @@ from typing import Any, Callable, Protocol
 from src.agent.dqn_agent import DQNAgent
 from src.env.game_env import GameEnv, GameEnvConfig
 from src.env.random_policy_runner import _build_action_config, _build_reward_config, _build_reward_fn
+from src.env.runner_tui import RunnerTuiSession
 from src.state.schema import FieldState, GameStateSnapshot
 from src.training.train import BaselineAgent, EpisodeEnv, EpisodeRolloutResult, run_agent_policy
+
+EvaluationEventCallback = Callable[[dict[str, Any]], None]
 
 
 class ClosableEpisodeEnv(EpisodeEnv, Protocol):
@@ -266,6 +269,8 @@ def evaluate_dqn_checkpoint(
     max_steps_per_episode: int = 200,
     seed: int | None = 0,
     label: str | None = None,
+    step_callback: EvaluationEventCallback | None = None,
+    episode_callback: EvaluationEventCallback | None = None,
 ) -> DQNEvaluationReport:
     """Run fixed-seed, no-exploration episodes and compute Task-15 KPIs."""
     _validate_rollout_settings(episodes=episodes, max_steps_per_episode=max_steps_per_episode)
@@ -285,6 +290,19 @@ def evaluate_dqn_checkpoint(
             episode_seed = None if seed is None else int(seed) + episode_index
             state = _reset_episode(env, episode_seed=episode_seed)
             episode_id = env.current_episode_id or f"episode-{episode_index + 1:05d}"
+            if episode_callback is not None:
+                episode_callback(
+                    {
+                        "event_type": "episode_start",
+                        "checkpoint_label": report_label,
+                        "checkpoint_path": str(checkpoint),
+                        "episode_id": episode_id,
+                        "episode_index": episode_index,
+                        "episodes_total": episodes,
+                        "max_steps_per_episode": max_steps_per_episode,
+                        "seed": episode_seed,
+                    }
+                )
 
             initial_health = _field_to_float(state.health)
             initial_currency = _field_to_float(state.currency)
@@ -299,25 +317,59 @@ def evaluate_dqn_checkpoint(
                     available_actions=allowed_actions,
                     explore=False,
                 )
-                state, _reward, done, info = env.step(action)
+                state, reward, done, info = env.step(action)
                 steps += 1
                 reason = info.get("terminal_reason")
                 if isinstance(reason, str) and reason.strip():
                     terminal_reason = reason
+                if step_callback is not None:
+                    step_callback(
+                        {
+                            "event_type": "step",
+                            "checkpoint_label": report_label,
+                            "checkpoint_path": str(checkpoint),
+                            "episode_id": episode_id,
+                            "episode_index": episode_index,
+                            "episodes_total": episodes,
+                            "step_index": steps - 1,
+                            "max_steps_per_episode": max_steps_per_episode,
+                            "action": action,
+                            "action_reason": getattr(agent, "last_decision_reason", None) or "greedy_q",
+                            "reward": float(reward),
+                            "done": bool(done),
+                            "terminal_reason": terminal_reason,
+                        }
+                    )
 
             final_health = _field_to_float(state.health)
             final_currency = _field_to_float(state.currency)
-            per_episode.append(
-                DQNEpisodeKpi(
-                    episode_id=episode_id,
-                    steps=steps,
-                    done=done,
-                    terminal_reason=terminal_reason,
-                    failed=_episode_failed(final_state=state, terminal_reason=terminal_reason),
-                    health_delta=_delta_or_zero(initial=initial_health, final=final_health),
-                    currency_gain=_delta_or_zero(initial=initial_currency, final=final_currency),
-                )
+            episode_result = DQNEpisodeKpi(
+                episode_id=episode_id,
+                steps=steps,
+                done=done,
+                terminal_reason=terminal_reason,
+                failed=_episode_failed(final_state=state, terminal_reason=terminal_reason),
+                health_delta=_delta_or_zero(initial=initial_health, final=final_health),
+                currency_gain=_delta_or_zero(initial=initial_currency, final=final_currency),
             )
+            per_episode.append(episode_result)
+            if episode_callback is not None:
+                episode_callback(
+                    {
+                        "event_type": "episode_end",
+                        "checkpoint_label": report_label,
+                        "checkpoint_path": str(checkpoint),
+                        "episode_id": episode_id,
+                        "episode_index": episode_index,
+                        "episodes_total": episodes,
+                        "steps": episode_result.steps,
+                        "done": episode_result.done,
+                        "failed": episode_result.failed,
+                        "terminal_reason": episode_result.terminal_reason,
+                        "health_delta": episode_result.health_delta,
+                        "currency_gain": episode_result.currency_gain,
+                    }
+                )
     finally:
         env.close()
 
@@ -358,6 +410,15 @@ def compare_dqn_checkpoints(
         seed=seed,
         label=label_b,
     )
+    return summarize_dqn_comparison(report_a=report_a, report_b=report_b)
+
+
+def summarize_dqn_comparison(
+    *,
+    report_a: DQNEvaluationReport,
+    report_b: DQNEvaluationReport,
+) -> DQNCheckpointComparison:
+    """Build comparison KPI deltas from two per-checkpoint evaluation reports."""
     return DQNCheckpointComparison(
         checkpoint_a=report_a,
         checkpoint_b=report_b,
@@ -424,7 +485,12 @@ def format_comparison_table(report: DQNCheckpointComparison) -> str:
     return "\n".join(lines)
 
 
-def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
+def _add_shared_eval_args(
+    parser: argparse.ArgumentParser,
+    *,
+    focus_window_default: bool,
+    window_input_default: bool,
+) -> None:
     parser.add_argument("--exe", default="868-HACK.exe", help="Target executable name.")
     parser.add_argument("--episodes", type=int, default=10, help="Number of fixed-seed episodes.")
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
@@ -451,13 +517,13 @@ def _add_shared_eval_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--focus-window",
         action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Focus game window during attach/reacquire (default: enabled).",
+        default=focus_window_default,
+        help="Focus game window during attach/reacquire.",
     )
     parser.add_argument(
         "--window-input",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=window_input_default,
         help="Use window-targeted PostMessage input instead of global SendInput.",
     )
     parser.add_argument(
@@ -526,7 +592,11 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Evaluate one DQN checkpoint.",
         description="Run fixed-seed evaluation for one checkpoint and print KPIs.",
     )
-    _add_shared_eval_args(run_parser)
+    _add_shared_eval_args(
+        run_parser,
+        focus_window_default=True,
+        window_input_default=False,
+    )
     run_parser.add_argument("--checkpoint", required=True, help="Path to DQN checkpoint JSON.")
     run_parser.add_argument("--label", default=None, help="Optional display label in KPI table.")
 
@@ -535,11 +605,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Compare two DQN checkpoints under identical evaluation settings.",
         description="Run fixed-seed KPI evaluation for checkpoint A and B, then print deltas.",
     )
-    _add_shared_eval_args(compare_parser)
+    _add_shared_eval_args(
+        compare_parser,
+        focus_window_default=False,
+        window_input_default=True,
+    )
     compare_parser.add_argument("--checkpoint-a", required=True, help="Baseline checkpoint path.")
     compare_parser.add_argument("--checkpoint-b", required=True, help="Candidate checkpoint path.")
     compare_parser.add_argument("--label-a", default=None, help="Optional table label for A.")
     compare_parser.add_argument("--label-b", default=None, help="Optional table label for B.")
+    compare_parser.add_argument(
+        "--tui",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Launch live state monitor TUI during compare runs.",
+    )
+    compare_parser.add_argument(
+        "--tui-interval",
+        type=float,
+        default=0.5,
+        help="Polling interval for compare TUI state monitor (seconds).",
+    )
     return parser
 
 
@@ -548,6 +634,8 @@ def _validate_cli_args(parser: argparse.ArgumentParser, args: argparse.Namespace
         parser.error("--episodes must be >= 1.")
     if int(args.max_steps) < 1:
         parser.error("--max-steps must be >= 1.")
+    if args.command == "compare" and float(args.tui_interval) <= 0:
+        parser.error("--tui-interval must be > 0.")
 
 
 def _build_live_env_factory(args: argparse.Namespace) -> Callable[[], GameEnv]:
@@ -611,16 +699,115 @@ def main() -> None:
         return
 
     if args.command == "compare":
-        report = compare_dqn_checkpoints(
-            env_factory=env_factory,
-            checkpoint_a=args.checkpoint_a,
-            checkpoint_b=args.checkpoint_b,
-            episodes=int(args.episodes),
-            max_steps_per_episode=int(args.max_steps),
-            seed=args.seed,
-            label_a=args.label_a,
-            label_b=args.label_b,
+        label_a = args.label_a or Path(str(args.checkpoint_a)).name
+        label_b = args.label_b or Path(str(args.checkpoint_b)).name
+        tui = RunnerTuiSession(
+            executable_name=str(args.exe),
+            enabled=bool(args.tui),
+            interval_seconds=float(args.tui_interval),
         )
+
+        def _on_step(event: dict[str, Any]) -> None:
+            tui.update(
+                training_line=(
+                    "compare checkpoint={label} episode={episode}/{episode_total} "
+                    "step={step}/{step_max} reward={reward:.3f} done={done} terminal={terminal}".format(
+                        label=event.get("checkpoint_label"),
+                        episode=int(event.get("episode_index", 0)) + 1,
+                        episode_total=int(event.get("episodes_total", 0)),
+                        step=int(event.get("step_index", 0)) + 1,
+                        step_max=int(event.get("max_steps_per_episode", 0)),
+                        reward=float(event.get("reward", 0.0)),
+                        done=bool(event.get("done", False)),
+                        terminal=event.get("terminal_reason") or "-",
+                    )
+                ),
+                action_line="action={action} reason={reason}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "greedy_q",
+                ),
+            )
+
+        def _on_episode(event: dict[str, Any]) -> None:
+            event_type = str(event.get("event_type", ""))
+            if event_type == "episode_start":
+                tui.update(
+                    training_line=(
+                        "compare checkpoint={label} episode={episode}/{episode_total} "
+                        "status=running seed={seed}".format(
+                            label=event.get("checkpoint_label"),
+                            episode=int(event.get("episode_index", 0)) + 1,
+                            episode_total=int(event.get("episodes_total", 0)),
+                            seed=event.get("seed"),
+                        )
+                    ),
+                    action_line="action=idle reason=episode_start",
+                )
+                return
+            if event_type == "episode_end":
+                tui.update(
+                    training_line=(
+                        "compare checkpoint={label} episode={episode}/{episode_total} "
+                        "steps={steps} failed={failed} health_delta={health:+.3f} "
+                        "currency_gain={currency:+.3f} terminal={terminal}".format(
+                            label=event.get("checkpoint_label"),
+                            episode=int(event.get("episode_index", 0)) + 1,
+                            episode_total=int(event.get("episodes_total", 0)),
+                            steps=int(event.get("steps", 0)),
+                            failed=bool(event.get("failed", False)),
+                            health=float(event.get("health_delta", 0.0)),
+                            currency=float(event.get("currency_gain", 0.0)),
+                            terminal=event.get("terminal_reason") or "-",
+                        )
+                    ),
+                    action_line="action=idle reason=episode_complete",
+                )
+
+        try:
+            tui.start()
+            tui.update(
+                training_line="compare checkpoint={label} status=starting".format(label=label_a),
+                action_line="action=idle reason=checkpoint_start",
+            )
+            report_a = evaluate_dqn_checkpoint(
+                env_factory=env_factory,
+                checkpoint_path=args.checkpoint_a,
+                episodes=int(args.episodes),
+                max_steps_per_episode=int(args.max_steps),
+                seed=args.seed,
+                label=label_a,
+                step_callback=_on_step if bool(args.tui) else None,
+                episode_callback=_on_episode if bool(args.tui) else None,
+            )
+            tui.update(
+                training_line="compare checkpoint={label} status=complete".format(label=label_a),
+                action_line="action=idle reason=checkpoint_complete",
+            )
+            tui.update(
+                training_line="compare checkpoint={label} status=starting".format(label=label_b),
+                action_line="action=idle reason=checkpoint_start",
+            )
+            report_b = evaluate_dqn_checkpoint(
+                env_factory=env_factory,
+                checkpoint_path=args.checkpoint_b,
+                episodes=int(args.episodes),
+                max_steps_per_episode=int(args.max_steps),
+                seed=args.seed,
+                label=label_b,
+                step_callback=_on_step if bool(args.tui) else None,
+                episode_callback=_on_episode if bool(args.tui) else None,
+            )
+            tui.update(
+                training_line="compare status=complete checkpoint_a={a} checkpoint_b={b}".format(
+                    a=label_a,
+                    b=label_b,
+                ),
+                action_line="action=idle reason=compare_complete",
+            )
+        finally:
+            tui.close()
+
+        report = summarize_dqn_comparison(report_a=report_a, report_b=report_b)
         print(format_comparison_table(report))
         _emit_json_output(comparison_report_to_json(report), output_path=args.json_out)
         return

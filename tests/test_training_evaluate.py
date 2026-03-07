@@ -8,6 +8,7 @@ from pathlib import Path
 from src.agent.dqn_agent import DQNAgent, DQNConfig
 from src.state.schema import FieldState, GameStateSnapshot, MapState
 from src.training.evaluate import (
+    _build_parser,
     compare_dqn_checkpoints,
     comparison_report_to_json,
     evaluate_dqn_checkpoint,
@@ -188,3 +189,12 @@ def test_task15_outputs_include_json_and_table_formats(tmp_path: Path) -> None:
     assert comparison_json["avg_currency_gain_delta"] == comparison.avg_currency_gain_delta
     assert "avg_currency_gain" in report_table
     assert "delta_b_minus_a" in comparison_table
+
+
+def test_compare_parser_defaults_window_targeted_input_without_focus() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["compare", "--checkpoint-a", "a.json", "--checkpoint-b", "b.json"])
+
+    assert args.focus_window is False
+    assert args.window_input is True
+    assert args.tui is True
