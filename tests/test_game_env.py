@@ -35,6 +35,23 @@ def _snapshot(
     )
 
 
+def _start_screen_snapshot() -> GameStateSnapshot:
+    return GameStateSnapshot(
+        timestamp_utc="2026-03-06T00:00:00+00:00",
+        health=FieldState(
+            value=None,
+            status="invalid",
+            error_code="null_pointer",
+            error="Pointer chain resolved to null while on start screen.",
+            source_field="player_health",
+        ),
+        energy=_field(0),
+        currency=_field(0),
+        fail_state=_field(False, status="missing"),
+        map=MapState(status="missing"),
+    )
+
+
 @dataclass
 class FakeActionAPI:
     """Minimal fake action API for env tests."""
@@ -119,6 +136,55 @@ def test_game_env_step_sets_done_from_fail_detector_result() -> None:
 
     assert done is True
     assert info["terminal_reason"] == "memory:fail_state"
+
+
+def test_game_env_step_marks_done_when_fail_detector_reports_null_pointer_start_screen() -> None:
+    state_provider = QueueStateProvider([_snapshot(failed=False), _start_screen_snapshot()])
+    actions = FakeActionAPI()
+    fail_detector = SimpleNamespace(
+        check=lambda: SimpleNamespace(
+            is_terminal=False,
+            reason="memory_unavailable",
+            source="memory",
+            error="null_pointer",
+        )
+    )
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        fail_detector=fail_detector,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait", "confirm", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+
+    env.reset()
+    _, _, done, info = env.step("wait")
+
+    assert done is True
+    assert info["terminal_reason"] == "state:start_screen"
+    assert info["start_screen_detected"] is True
+
+
+def test_game_env_reset_dispatches_confirm_and_space_when_start_screen_null_pointer_seen() -> None:
+    state_provider = QueueStateProvider([_start_screen_snapshot(), _snapshot(failed=False)])
+    actions = FakeActionAPI()
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait", "confirm", "space"),
+        config=GameEnvConfig(
+            require_non_terminal_on_reset=False,
+            state_poll_interval_seconds=0.0,
+            post_action_poll_delay_seconds=0.0,
+        ),
+    )
+
+    state = env.reset()
+
+    assert state.health.status == "ok"
+    assert actions.actions == ["confirm", "space"]
 
 
 def test_game_env_reset_timeout_when_terminal_state_persists() -> None:

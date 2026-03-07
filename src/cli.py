@@ -9,6 +9,7 @@ from typing import Callable
 
 from src.app import main as app_main
 from src.config.fingerprint import main as fingerprint_main
+from src.env.dqn_policy_runner import main as dqn_runner_main
 from src.env.heuristic_policy_runner import main as heuristic_runner_main
 from src.env.random_policy_runner import main as random_runner_main
 from src.memory.offset_smoke_test import main as offset_smoke_main
@@ -86,6 +87,12 @@ def _build_parser() -> argparse.ArgumentParser:
         summary="Run heuristic baseline episodes.",
         details="Runs src.env.heuristic_policy_runner against the live game environment.",
     )
+    _add_passthrough_parser(
+        subparsers,
+        name="run-dqn",
+        summary="Run DQN train/eval episodes.",
+        details="Runs src.env.dqn_policy_runner against the live game environment.",
+    )
     return parser
 
 
@@ -103,6 +110,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "state-monitor": state_monitor_main,
         "run-random": random_runner_main,
         "run-heuristic": heuristic_runner_main,
+        "run-dqn": dqn_runner_main,
     }
 
     selected = handlers.get(args.command)

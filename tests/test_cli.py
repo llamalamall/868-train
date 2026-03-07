@@ -41,3 +41,17 @@ def test_master_cli_dispatches_bootstrap(monkeypatch) -> None:
     cli.main(["bootstrap"])
 
     assert captured == [("app_main", [])]
+
+
+def test_master_cli_dispatches_run_dqn_with_passthrough(monkeypatch) -> None:
+    captured: list[tuple[str, list[str]]] = []
+    _install_stub(monkeypatch, "src.cli.dqn_runner_main", captured)
+
+    cli.main(["run-dqn", "--mode", "eval", "--checkpoint", "artifacts\\checkpoints\\dqn.json"])
+
+    assert captured == [
+        (
+            "dqn_runner_main",
+            ["--mode", "eval", "--checkpoint", "artifacts\\checkpoints\\dqn.json"],
+        )
+    ]
