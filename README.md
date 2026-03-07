@@ -46,6 +46,7 @@ Available subcommands:
 - `state-monitor`: interactive memory monitor (`src.memory.state_monitor_tui`)
 - `run-random`: random baseline runner (`src.env.random_policy_runner`)
 - `run-heuristic`: heuristic baseline runner (`src.env.heuristic_policy_runner`)
+- `run-dqn`: DQN train/eval runner with checkpoint save/load (`src.env.dqn_policy_runner`)
 
 For command-specific options, forward `--help` to the underlying tool:
 
@@ -67,6 +68,12 @@ python -m src.cli run-random --episodes 5 --max-steps 200
 
 # Run heuristic baseline episodes
 python -m src.cli run-heuristic --episodes 5 --max-steps 200 --movement-keys wasd
+
+# Train DQN and auto-save checkpoint (path auto-generated under artifacts/checkpoints)
+python -m src.cli run-dqn --episodes 20 --max-steps 200
+
+# Evaluate from a saved DQN checkpoint
+python -m src.cli run-dqn --mode eval --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 5
 ```
 
 ## Control Smoke Test

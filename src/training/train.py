@@ -131,6 +131,7 @@ def run_dqn_training(
     episodes: int,
     max_steps_per_episode: int = 200,
     explore: bool = True,
+    learn: bool = True,
 ) -> tuple[LearningEpisodeRolloutResult, ...]:
     """Train (or evaluate) the DQN agent through full episodes."""
     if episodes < 1:
@@ -150,7 +151,8 @@ def run_dqn_training(
         last_loss: float | None = None
         terminal_reason: str | None = None
 
-        agent.start_episode()
+        if learn:
+            agent.start_episode()
 
         while steps < max_steps_per_episode and not done:
             available_actions = env.available_actions(state)
@@ -172,17 +174,18 @@ def run_dqn_training(
                 )
 
             next_state, reward, done, info = env.step(action)
-            update = agent.observe(
-                state=state,
-                action=action,
-                reward=reward,
-                next_state=next_state,
-                done=done,
-                next_available_actions=env.available_actions(next_state),
-            )
-            if update.did_update:
-                updates_applied += 1
-                last_loss = update.loss
+            if learn:
+                update = agent.observe(
+                    state=state,
+                    action=action,
+                    reward=reward,
+                    next_state=next_state,
+                    done=done,
+                    next_available_actions=env.available_actions(next_state),
+                )
+                if update.did_update:
+                    updates_applied += 1
+                    last_loss = update.loss
 
             total_reward += float(reward)
             steps += 1

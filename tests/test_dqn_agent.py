@@ -152,3 +152,32 @@ def test_dqn_checkpoint_round_trip_and_resume_training(tmp_path: Path) -> None:
     assert resumed.episodes_seen == before.episodes_seen + 2
     assert resumed.total_env_steps > before.total_env_steps
     assert resumed.optimization_steps >= before.optimization_steps
+
+
+def test_dqn_training_eval_mode_does_not_mutate_training_state() -> None:
+    env = TinyLineWorldEnv()
+    agent = DQNAgent(action_space=env.action_space, config=_test_config(), seed=17)
+
+    _ = run_dqn_training(
+        env=env,
+        agent=agent,
+        episodes=3,
+        max_steps_per_episode=8,
+        explore=True,
+        learn=True,
+    )
+    before = agent.training_state
+
+    results = run_dqn_training(
+        env=TinyLineWorldEnv(),
+        agent=agent,
+        episodes=2,
+        max_steps_per_episode=8,
+        explore=False,
+        learn=False,
+    )
+
+    assert len(results) == 2
+    assert all(item.updates_applied == 0 for item in results)
+    assert all(item.last_loss is None for item in results)
+    assert agent.training_state == before

@@ -12,7 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
-from src.config.offsets import OffsetEntry, load_offset_registry
+from src.config.offsets import load_offset_registry
 from src.controller.action_api import ActionAPI, ActionConfig
 from src.controller.input_driver import InputDriver
 from src.controller.window_attach import WindowAttachError, attach_window, focus_window
@@ -169,6 +169,15 @@ def _is_terminal_health_value(value: Any) -> bool:
         return int(float(value)) == -1
     except (TypeError, ValueError):
         return False
+
+
+def _is_null_pointer_error(error_code: Any) -> bool:
+    return isinstance(error_code, str) and error_code.strip().lower() == "null_pointer"
+
+
+def _state_indicates_start_screen(snapshot: GameStateSnapshot) -> bool:
+    health = snapshot.health
+    return health.status != "ok" and _is_null_pointer_error(health.error_code)
 
 
 def _resolve_default_action_space(action_api: ActionPerformer) -> tuple[str, ...]:
@@ -384,6 +393,13 @@ class GameEnv:
             if bool(getattr(detector_result, "is_terminal", False)):
                 done = True
                 terminal_reason = str(getattr(detector_result, "reason", "terminal"))
+        if not done and (
+            _state_indicates_start_screen(current_state)
+            or _is_null_pointer_error(detector_info.get("fail_detector_error"))
+        ):
+            done = True
+            terminal_reason = "state:start_screen"
+            detector_info["start_screen_detected"] = True
 
         info: dict[str, Any] = {
             "episode_id": self._current_episode_id,
@@ -435,8 +451,6 @@ class GameEnv:
         require_non_terminal: bool,
     ) -> GameStateSnapshot:
         deadline = self._monotonic_fn() + timeout_seconds
-        last_state: GameStateSnapshot | None = None
-
         while self._monotonic_fn() <= deadline:
             state = self._run_with_timeout(
                 self._state_provider,
@@ -444,7 +458,10 @@ class GameEnv:
                 error_cls=ResetTimeoutError,
                 operation_name="state_provider",
             )
-            last_state = state
+            if _state_indicates_start_screen(state):
+                self._dispatch_start_screen_recovery_actions()
+                self._sleep_fn(self._config.state_poll_interval_seconds)
+                continue
             if not require_non_terminal or not _state_is_terminal(state):
                 return state
             self._sleep_fn(self._config.state_poll_interval_seconds)
@@ -474,6 +491,30 @@ class GameEnv:
                 raise error_cls(
                     f"Watchdog timeout during {operation_name} after {timeout_seconds:.2f}s."
                 ) from error
+
+    def _dispatch_start_screen_recovery_actions(self) -> None:
+        recovery_actions = tuple(
+            action for action in ("confirm", "space") if action in self._action_space
+        )
+        if not recovery_actions:
+            self._logger.warning(
+                "Detected start-screen null-pointer state, but no confirm/space actions are configured."
+            )
+            return
+
+        self._logger.info(
+            "Detected start-screen null-pointer state; dispatching recovery actions: %s.",
+            ", ".join(recovery_actions),
+        )
+        for action_name in recovery_actions:
+            self._run_with_timeout(
+                lambda action=action_name: self._action_api.perform_action(action),
+                timeout_seconds=self._config.step_timeout_seconds,
+                error_cls=ResetTimeoutError,
+                operation_name=f"start_screen_recovery:{action_name}",
+            )
+            if self._config.post_action_poll_delay_seconds > 0:
+                self._sleep_fn(self._config.post_action_poll_delay_seconds)
 
     def _ensure_open(self) -> None:
         if self._closed:
