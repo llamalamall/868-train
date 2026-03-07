@@ -21,15 +21,15 @@ class DQNConfig:
     """Core hyperparameters for the first DQN implementation."""
 
     gamma: float = 0.99
-    learning_rate: float = 0.01
+    learning_rate: float = 0.005
     replay_capacity: int = 20_000
-    min_replay_size: int = 256
-    batch_size: int = 64
-    target_sync_interval: int = 200
+    min_replay_size: int = 1_024
+    batch_size: int = 128
+    target_sync_interval: int = 500
     epsilon_start: float = 1.0
-    epsilon_end: float = 0.05
-    epsilon_decay_steps: int = 10_000
-    feature_count: int = 16
+    epsilon_end: float = 0.10
+    epsilon_decay_steps: int = 25_000
+    feature_count: int = 22
     feature_clip_abs: float = 100.0
     max_gradient_norm: float = 10.0
 
@@ -601,7 +601,13 @@ def state_to_feature_vector(
     )
 
     siphon_positions = tuple(state.map.siphons) if map_known else ()
-    enemy_positions = tuple(enemy.position for enemy in state.map.enemies) if map_known else ()
+    enemy_positions = (
+        tuple(enemy.position for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+        if map_known
+        else ()
+    )
+    on_siphon_tile = 1.0 if player is not None and player in siphon_positions else 0.0
+    on_exit_tile = 1.0 if player is not None and exit_position is not None and player == exit_position else 0.0
 
     nearest_siphon = (
         min(_manhattan(player, target) for target in siphon_positions) / float(max_distance)
@@ -613,6 +619,21 @@ def state_to_feature_vector(
         if player is not None and enemy_positions
         else 1.0
     )
+
+    if siphon_positions:
+        phase_siphon, phase_enemy, phase_exit = (1.0, 0.0, 0.0)
+    elif enemy_positions:
+        phase_siphon, phase_enemy, phase_exit = (0.0, 1.0, 0.0)
+    else:
+        phase_siphon, phase_enemy, phase_exit = (0.0, 0.0, 1.0 if map_known else 0.0)
+
+    mask = state.prog_slots_available_mask
+    if mask is not None:
+        usable_prog_slots = int(mask & 0x3FF).bit_count()
+    elif state.inventory.status == "ok":
+        usable_prog_slots = len(state.inventory.raw_prog_ids[:10])
+    else:
+        usable_prog_slots = 0
 
     features = (
         _scaled_numeric(state.health.value if state.health.status == "ok" else None, scale=10.0),
@@ -631,6 +652,12 @@ def state_to_feature_vector(
         float(len(enemy_positions)) / 8.0,
         float(nearest_siphon),
         float(nearest_enemy),
+        on_siphon_tile,
+        on_exit_tile,
+        phase_siphon,
+        phase_enemy,
+        phase_exit,
+        float(min(max(usable_prog_slots, 0), 10)) / 10.0,
     )
     return tuple(_clip_feature(value, clip_abs=clip_abs) for value in features)
 

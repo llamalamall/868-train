@@ -50,6 +50,11 @@ class DQNEpisodeKpi:
     failed: bool
     health_delta: float
     currency_gain: float
+    map_clear_count: int
+    premature_exit_attempts: int
+    invalid_action_count: int
+    siphons_collected: int
+    enemies_cleared: int
 
 
 @dataclass(frozen=True)
@@ -65,6 +70,11 @@ class DQNEvaluationReport:
     avg_episode_length: float
     avg_health_delta: float
     avg_currency_gain: float
+    map_clear_rate: float
+    premature_exit_rate: float
+    invalid_action_rate: float
+    avg_siphons_collected_per_map: float
+    avg_enemies_cleared_per_map: float
     terminal_reasons: dict[str, int]
     episode_results: tuple[DQNEpisodeKpi, ...]
 
@@ -79,6 +89,11 @@ class DQNCheckpointComparison:
     avg_episode_length_delta: float
     avg_health_delta_delta: float
     avg_currency_gain_delta: float
+    map_clear_rate_delta: float
+    premature_exit_rate_delta: float
+    invalid_action_rate_delta: float
+    avg_siphons_collected_per_map_delta: float
+    avg_enemies_cleared_per_map_delta: float
 
 
 def summarize_rollouts(*, policy_name: str, results: tuple[EpisodeRolloutResult, ...]) -> BaselineMetrics:
@@ -180,6 +195,26 @@ def _delta_or_zero(*, initial: float | None, final: float | None) -> float:
     return float(final - initial)
 
 
+def _count_siphons(state: GameStateSnapshot) -> int | None:
+    if state.map.status != "ok":
+        return None
+    return len(state.map.siphons)
+
+
+def _count_live_enemies(state: GameStateSnapshot) -> int | None:
+    if state.map.status != "ok":
+        return None
+    return sum(1 for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+
+
+def _player_on_exit(state: GameStateSnapshot) -> bool:
+    if state.map.status != "ok":
+        return False
+    player = state.map.player_position
+    exit_position = state.map.exit_position
+    return player is not None and exit_position is not None and player == exit_position
+
+
 def _episode_failed(*, final_state: GameStateSnapshot, terminal_reason: str | None) -> bool:
     if final_state.fail_state.status == "ok" and bool(final_state.fail_state.value):
         return True
@@ -245,6 +280,12 @@ def summarize_dqn_episodes(
             terminal_counts[episode.terminal_reason] = (
                 terminal_counts.get(episode.terminal_reason, 0) + 1
             )
+    total_steps = sum(max(episode.steps, 0) for episode in episodes)
+    total_map_clears = sum(max(episode.map_clear_count, 0) for episode in episodes)
+    total_premature_exit = sum(max(episode.premature_exit_attempts, 0) for episode in episodes)
+    total_invalid_actions = sum(max(episode.invalid_action_count, 0) for episode in episodes)
+    total_siphons_collected = sum(max(episode.siphons_collected, 0) for episode in episodes)
+    total_enemies_cleared = sum(max(episode.enemies_cleared, 0) for episode in episodes)
 
     return DQNEvaluationReport(
         label=label,
@@ -256,6 +297,27 @@ def summarize_dqn_episodes(
         avg_episode_length=mean(episode.steps for episode in episodes),
         avg_health_delta=mean(episode.health_delta for episode in episodes),
         avg_currency_gain=mean(episode.currency_gain for episode in episodes),
+        map_clear_rate=sum(1 for episode in episodes if episode.map_clear_count > 0) / len(episodes),
+        premature_exit_rate=(
+            float(total_premature_exit) / float(total_steps)
+            if total_steps > 0
+            else 0.0
+        ),
+        invalid_action_rate=(
+            float(total_invalid_actions) / float(total_steps)
+            if total_steps > 0
+            else 0.0
+        ),
+        avg_siphons_collected_per_map=(
+            float(total_siphons_collected) / float(total_map_clears)
+            if total_map_clears > 0
+            else 0.0
+        ),
+        avg_enemies_cleared_per_map=(
+            float(total_enemies_cleared) / float(total_map_clears)
+            if total_map_clears > 0
+            else 0.0
+        ),
         terminal_reasons=terminal_counts,
         episode_results=episodes,
     )
@@ -310,7 +372,13 @@ def evaluate_dqn_checkpoint(
             steps = 0
             done = False
             terminal_reason: str | None = None
+            map_clear_count = 0
+            premature_exit_attempts = 0
+            invalid_action_count = 0
+            siphons_collected = 0
+            enemies_cleared = 0
             while steps < max_steps_per_episode and not done:
+                previous_state = state
                 allowed_actions = _resolve_eval_actions(env=env, agent=agent, state=state)
                 action = agent.select_action(
                     state=state,
@@ -319,6 +387,39 @@ def evaluate_dqn_checkpoint(
                 )
                 state, reward, done, info = env.step(action)
                 steps += 1
+
+                previous_siphons = _count_siphons(previous_state)
+                current_siphons = _count_siphons(state)
+                if previous_siphons is not None and current_siphons is not None:
+                    siphons_collected += max(previous_siphons - current_siphons, 0)
+
+                previous_enemies = _count_live_enemies(previous_state)
+                current_enemies = _count_live_enemies(state)
+                if previous_enemies is not None and current_enemies is not None:
+                    enemies_cleared += max(previous_enemies - current_enemies, 0)
+
+                if bool(info.get("premature_exit_attempt", False)):
+                    premature_exit_attempts += 1
+                if info.get("action_effective") is False:
+                    invalid_action_count += 1
+
+                current_map_clear = (
+                    _player_on_exit(state)
+                    and current_siphons is not None
+                    and current_siphons == 0
+                    and current_enemies is not None
+                    and current_enemies == 0
+                )
+                previous_map_clear = (
+                    _player_on_exit(previous_state)
+                    and previous_siphons is not None
+                    and previous_siphons == 0
+                    and previous_enemies is not None
+                    and previous_enemies == 0
+                )
+                if current_map_clear and not previous_map_clear:
+                    map_clear_count += 1
+
                 reason = info.get("terminal_reason")
                 if isinstance(reason, str) and reason.strip():
                     terminal_reason = reason
@@ -338,6 +439,11 @@ def evaluate_dqn_checkpoint(
                             "reward": float(reward),
                             "done": bool(done),
                             "terminal_reason": terminal_reason,
+                            "map_clear_count": map_clear_count,
+                            "premature_exit_attempts": premature_exit_attempts,
+                            "invalid_action_count": invalid_action_count,
+                            "siphons_collected": siphons_collected,
+                            "enemies_cleared": enemies_cleared,
                         }
                     )
 
@@ -351,6 +457,11 @@ def evaluate_dqn_checkpoint(
                 failed=_episode_failed(final_state=state, terminal_reason=terminal_reason),
                 health_delta=_delta_or_zero(initial=initial_health, final=final_health),
                 currency_gain=_delta_or_zero(initial=initial_currency, final=final_currency),
+                map_clear_count=map_clear_count,
+                premature_exit_attempts=premature_exit_attempts,
+                invalid_action_count=invalid_action_count,
+                siphons_collected=siphons_collected,
+                enemies_cleared=enemies_cleared,
             )
             per_episode.append(episode_result)
             if episode_callback is not None:
@@ -368,6 +479,11 @@ def evaluate_dqn_checkpoint(
                         "terminal_reason": episode_result.terminal_reason,
                         "health_delta": episode_result.health_delta,
                         "currency_gain": episode_result.currency_gain,
+                        "map_clear_count": episode_result.map_clear_count,
+                        "premature_exit_attempts": episode_result.premature_exit_attempts,
+                        "invalid_action_count": episode_result.invalid_action_count,
+                        "siphons_collected": episode_result.siphons_collected,
+                        "enemies_cleared": episode_result.enemies_cleared,
                     }
                 )
     finally:
@@ -426,6 +542,15 @@ def summarize_dqn_comparison(
         avg_episode_length_delta=report_b.avg_episode_length - report_a.avg_episode_length,
         avg_health_delta_delta=report_b.avg_health_delta - report_a.avg_health_delta,
         avg_currency_gain_delta=report_b.avg_currency_gain - report_a.avg_currency_gain,
+        map_clear_rate_delta=report_b.map_clear_rate - report_a.map_clear_rate,
+        premature_exit_rate_delta=report_b.premature_exit_rate - report_a.premature_exit_rate,
+        invalid_action_rate_delta=report_b.invalid_action_rate - report_a.invalid_action_rate,
+        avg_siphons_collected_per_map_delta=(
+            report_b.avg_siphons_collected_per_map - report_a.avg_siphons_collected_per_map
+        ),
+        avg_enemies_cleared_per_map_delta=(
+            report_b.avg_enemies_cleared_per_map - report_a.avg_enemies_cleared_per_map
+        ),
     )
 
 
@@ -446,11 +571,18 @@ def comparison_report_to_json(report: DQNCheckpointComparison) -> dict[str, Any]
 def format_evaluation_table(report: DQNEvaluationReport) -> str:
     """Render one checkpoint report as a compact human-readable table."""
     lines = [
-        "label\tepisodes\tfail_rate\tavg_episode_length\tavg_health_delta\tavg_currency_gain",
+        (
+            "label\tepisodes\tfail_rate\tavg_episode_length\tavg_health_delta\tavg_currency_gain\t"
+            "map_clear_rate\tpremature_exit_rate\tinvalid_action_rate\t"
+            "avg_siphons_collected_per_map\tavg_enemies_cleared_per_map"
+        ),
         (
             f"{report.label}\t{report.episodes}\t{report.fail_rate:.2%}\t"
             f"{report.avg_episode_length:.2f}\t{report.avg_health_delta:.3f}\t"
-            f"{report.avg_currency_gain:.3f}"
+            f"{report.avg_currency_gain:.3f}\t{report.map_clear_rate:.2%}\t"
+            f"{report.premature_exit_rate:.2%}\t{report.invalid_action_rate:.2%}\t"
+            f"{report.avg_siphons_collected_per_map:.3f}\t"
+            f"{report.avg_enemies_cleared_per_map:.3f}"
         ),
     ]
     if report.terminal_reasons:
@@ -480,6 +612,28 @@ def format_comparison_table(report: DQNCheckpointComparison) -> str:
         (
             f"avg_currency_gain\t{a.avg_currency_gain:.3f}\t{b.avg_currency_gain:.3f}\t"
             f"{report.avg_currency_gain_delta:+.3f}"
+        ),
+        (
+            f"map_clear_rate\t{a.map_clear_rate:.2%}\t{b.map_clear_rate:.2%}\t"
+            f"{report.map_clear_rate_delta:+.2%}"
+        ),
+        (
+            f"premature_exit_rate\t{a.premature_exit_rate:.2%}\t{b.premature_exit_rate:.2%}\t"
+            f"{report.premature_exit_rate_delta:+.2%}"
+        ),
+        (
+            f"invalid_action_rate\t{a.invalid_action_rate:.2%}\t{b.invalid_action_rate:.2%}\t"
+            f"{report.invalid_action_rate_delta:+.2%}"
+        ),
+        (
+            "avg_siphons_collected_per_map\t"
+            f"{a.avg_siphons_collected_per_map:.3f}\t{b.avg_siphons_collected_per_map:.3f}\t"
+            f"{report.avg_siphons_collected_per_map_delta:+.3f}"
+        ),
+        (
+            "avg_enemies_cleared_per_map\t"
+            f"{a.avg_enemies_cleared_per_map:.3f}\t{b.avg_enemies_cleared_per_map:.3f}\t"
+            f"{report.avg_enemies_cleared_per_map_delta:+.3f}"
         ),
     ]
     return "\n".join(lines)
@@ -539,6 +693,12 @@ def _add_shared_eval_args(
         help="Reset watchdog timeout in seconds.",
     )
     parser.add_argument(
+        "--prog-backoff-steps",
+        type=int,
+        default=3,
+        help="Fallback prog-slot backoff steps after ineffective attempts.",
+    )
+    parser.add_argument(
         "--require-non-terminal-reset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -547,26 +707,74 @@ def _add_shared_eval_args(
     parser.add_argument(
         "--reward-survival",
         type=float,
-        default=0.1,
+        default=0.02,
         help="Survival reward applied for non-terminal steps.",
+    )
+    parser.add_argument(
+        "--reward-step-penalty",
+        type=float,
+        default=0.01,
+        help="Per-step penalty magnitude applied each transition.",
     )
     parser.add_argument(
         "--reward-health-delta",
         type=float,
-        default=0.25,
+        default=0.40,
         help="Weight multiplied by (current_health - previous_health).",
     )
     parser.add_argument(
         "--reward-currency-delta",
         type=float,
-        default=0.1,
+        default=0.03,
         help="Weight multiplied by (current_currency - previous_currency).",
+    )
+    parser.add_argument(
+        "--reward-siphon-collected",
+        type=float,
+        default=2.5,
+        help="Reward per siphon removed from map.",
+    )
+    parser.add_argument(
+        "--reward-enemy-cleared",
+        type=float,
+        default=1.5,
+        help="Reward per live enemy removed from map.",
+    )
+    parser.add_argument(
+        "--reward-phase-progress",
+        type=float,
+        default=0.25,
+        help="Weight for progress toward active objective (siphon->enemy->exit).",
+    )
+    parser.add_argument(
+        "--reward-map-clear-bonus",
+        type=float,
+        default=8.0,
+        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+    )
+    parser.add_argument(
+        "--reward-premature-exit-penalty",
+        type=float,
+        default=2.5,
+        help="Penalty when stepping onto exit before objectives are complete.",
+    )
+    parser.add_argument(
+        "--reward-invalid-action-penalty",
+        type=float,
+        default=0.75,
+        help="Penalty when action appears ineffective/invalid.",
     )
     parser.add_argument(
         "--reward-fail-penalty",
         type=float,
-        default=5.0,
+        default=12.0,
         help="Terminal fail penalty magnitude (applied as negative).",
+    )
+    parser.add_argument(
+        "--reward-clip-abs",
+        type=float,
+        default=5.0,
+        help="Absolute value used to clip final reward per step.",
     )
     parser.add_argument(
         "--print-reward-breakdown",
@@ -654,6 +862,7 @@ def _build_live_env_factory(args: argparse.Namespace) -> Callable[[], GameEnv]:
             config=GameEnvConfig(
                 step_timeout_seconds=float(args.step_timeout),
                 reset_timeout_seconds=float(args.reset_timeout),
+                prog_slot_backoff_steps=max(int(args.prog_backoff_steps), 0),
                 require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
             ),
             reset_sequence=reset_sequence if reset_sequence else None,

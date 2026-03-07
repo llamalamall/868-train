@@ -4,7 +4,7 @@
 - `src/agent/dqn_agent.py`
 
 ## Implemented Scope
-- Compact state featurizer for `GameStateSnapshot` (`state_to_feature_vector`).
+- Objective-aware compact state featurizer for `GameStateSnapshot` (`state_to_feature_vector`).
 - Linear DQN-style Q approximator with:
   - replay buffer sampling,
   - target-network sync,
@@ -30,4 +30,5 @@
 
 ## Notes
 - This first version intentionally keeps the function approximator simple for stability and deterministic tests.
+- Default feature vector length is `22` and includes objective-phase and action-availability signals.
 - The checkpoint format is JSON and versioned (`CHECKPOINT_VERSION`), with validation on load.

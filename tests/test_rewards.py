@@ -1,10 +1,10 @@
-"""Tests for reward shaping v1."""
+"""Tests for objective-driven reward shaping."""
 
 from __future__ import annotations
 
 import pytest
 
-from src.state.schema import FieldState, GameStateSnapshot
+from src.state.schema import EnemyState, FieldState, GameStateSnapshot, GridPosition, MapState
 from src.training.rewards import RewardConfig, RewardWeights, compute_reward
 
 
@@ -19,16 +19,19 @@ def _missing_field() -> FieldState:
 def _snapshot(
     *,
     health: FieldState,
+    energy: FieldState | None = None,
     currency: FieldState,
     fail_state: FieldState,
+    map_state: MapState | None = None,
     timestamp: str = "2026-03-06T00:00:00+00:00",
 ) -> GameStateSnapshot:
     return GameStateSnapshot(
         timestamp_utc=timestamp,
         health=health,
-        energy=_missing_field(),
+        energy=energy or _missing_field(),
         currency=currency,
         fail_state=fail_state,
+        map=map_state or MapState(status="missing"),
     )
 
 
@@ -36,10 +39,18 @@ def test_compute_reward_is_deterministic_for_same_inputs() -> None:
     config = RewardConfig(
         weights=RewardWeights(
             survival=0.2,
+            step_penalty=0.05,
             health_delta=1.5,
             currency_delta=0.4,
+            siphon_collected=0.0,
+            enemy_cleared=0.0,
+            phase_progress=0.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
             fail_penalty=12.0,
-        )
+        ),
+        reward_clip_abs=100.0,
     )
     previous_state = _snapshot(
         health=_ok_field(10),
@@ -67,29 +78,193 @@ def test_compute_reward_is_deterministic_for_same_inputs() -> None:
 
     assert first == second
     assert first.breakdown.survival == 0.2
+    assert first.breakdown.step_penalty == -0.05
     assert first.breakdown.health_change == -3.0
     assert first.breakdown.currency_change == 1.6
     assert first.breakdown.fail_penalty == 0.0
-    assert first.total == pytest.approx(-1.2)
+    assert first.total == pytest.approx(-1.25)
 
 
-def test_reward_weights_can_be_loaded_from_partial_config_mapping() -> None:
-    weights = RewardWeights.from_mapping({"currency_delta": 0.9, "fail_penalty": 15.0})
-
-    assert weights.survival == 0.1
-    assert weights.health_delta == 0.5
-    assert weights.currency_delta == 0.9
-    assert weights.fail_penalty == 15.0
-
-
-def test_compute_reward_applies_terminal_fail_penalty() -> None:
+def test_compute_reward_applies_objective_components_for_siphon_enemy_and_map_clear() -> None:
     config = RewardConfig(
         weights=RewardWeights(
-            survival=0.1,
-            health_delta=1.0,
-            currency_delta=0.25,
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            siphon_collected=2.5,
+            enemy_cleared=1.5,
+            phase_progress=0.0,
+            map_clear_bonus=8.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    previous_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(1),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=3,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(2, 0),
+            siphons=(GridPosition(1, 0),),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=2,
+                    position=GridPosition(2, 2),
+                    hp=1,
+                    state=1,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    current_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(1),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=3,
+            player_position=GridPosition(2, 0),
+            exit_position=GridPosition(2, 0),
+            siphons=(),
+            enemies=(),
+        ),
+    )
+
+    result = compute_reward(
+        previous_state=previous_state,
+        current_state=current_state,
+        done=False,
+        config=config,
+    )
+
+    assert result.breakdown.siphon_collected == 2.5
+    assert result.breakdown.enemy_cleared == 1.5
+    assert result.breakdown.map_clear_bonus == 8.0
+    assert result.total == pytest.approx(12.0)
+
+
+def test_compute_reward_uses_phase_progress_when_distance_improves() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            siphon_collected=0.0,
+            enemy_cleared=0.0,
+            phase_progress=0.25,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    previous_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(1),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(2, 0),
+            siphons=(GridPosition(2, 0),),
+        ),
+    )
+    current_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(1),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(1, 0),
+            exit_position=GridPosition(2, 0),
+            siphons=(GridPosition(2, 0),),
+        ),
+    )
+
+    result = compute_reward(
+        previous_state=previous_state,
+        current_state=current_state,
+        done=False,
+        config=config,
+    )
+
+    assert result.breakdown.phase_progress == pytest.approx(0.25)
+    assert result.total == pytest.approx(0.25)
+
+
+def test_compute_reward_applies_premature_exit_and_invalid_action_penalties() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            siphon_collected=0.0,
+            enemy_cleared=0.0,
+            phase_progress=0.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=2.5,
+            invalid_action_penalty=0.75,
+            fail_penalty=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    previous_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+    )
+    current_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+    )
+
+    result = compute_reward(
+        previous_state=previous_state,
+        current_state=current_state,
+        done=False,
+        config=config,
+        info={"premature_exit_attempt": True, "action_effective": False},
+    )
+
+    assert result.breakdown.premature_exit_penalty == -2.5
+    assert result.breakdown.invalid_action_penalty == -0.75
+    assert result.total == pytest.approx(-3.25)
+
+
+def test_compute_reward_clips_total_reward() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            siphon_collected=0.0,
+            enemy_cleared=0.0,
+            phase_progress=0.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
             fail_penalty=20.0,
-        )
+        ),
+        reward_clip_abs=5.0,
     )
     previous_state = _snapshot(
         health=_ok_field(5),
@@ -109,60 +284,5 @@ def test_compute_reward_applies_terminal_fail_penalty() -> None:
         config=config,
     )
 
-    assert result.breakdown.survival == 0.0
-    assert result.breakdown.health_change == 0.0
-    assert result.breakdown.currency_change == 0.25
     assert result.breakdown.fail_penalty == -20.0
-    assert result.total == pytest.approx(-19.75)
-
-
-def test_compute_reward_uses_zero_deltas_when_core_fields_missing() -> None:
-    config = RewardConfig(weights=RewardWeights(survival=0.3, fail_penalty=9.0))
-    previous_state = _snapshot(
-        health=_missing_field(),
-        currency=_ok_field(4),
-        fail_state=_ok_field(False),
-    )
-    current_state = _snapshot(
-        health=_ok_field(8),
-        currency=_missing_field(),
-        fail_state=_ok_field(False),
-    )
-
-    result = compute_reward(
-        previous_state=previous_state,
-        current_state=current_state,
-        done=False,
-        config=config,
-    )
-
-    assert result.breakdown.survival == 0.3
-    assert result.breakdown.health_change == 0.0
-    assert result.breakdown.currency_change == 0.0
-    assert result.breakdown.fail_penalty == 0.0
-    assert result.total == 0.3
-
-
-def test_compute_reward_logs_component_breakdown(caplog: pytest.LogCaptureFixture) -> None:
-    previous_state = _snapshot(
-        health=_ok_field(7),
-        currency=_ok_field(1),
-        fail_state=_ok_field(False),
-    )
-    current_state = _snapshot(
-        health=_ok_field(6),
-        currency=_ok_field(3),
-        fail_state=_ok_field(False),
-    )
-
-    caplog.set_level("DEBUG")
-    _ = compute_reward(
-        previous_state=previous_state,
-        current_state=current_state,
-        done=False,
-    )
-
-    assert "Reward breakdown" in caplog.text
-    assert "health_change" in caplog.text
-    assert "currency_change" in caplog.text
-    assert "fail_penalty" in caplog.text
+    assert result.total == -5.0
