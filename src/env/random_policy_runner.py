@@ -257,10 +257,11 @@ def main() -> None:
     args = parser.parse_args()
     if bool(args.step_through) and not bool(args.tui):
         parser.error("--step-through requires --tui.")
-    effective_window_input = bool(args.window_input) or bool(args.step_through)
-    if bool(args.step_through) and not bool(args.window_input):
+    effective_window_input = bool(args.window_input) or bool(args.step_through) or bool(args.tui)
+    if effective_window_input and not bool(args.window_input):
+        mode = "step-through" if bool(args.step_through) else "tui"
         print(
-            "step-through enabled: using window-targeted input so actions still go to the game "
+            f"{mode} enabled: using window-targeted input so actions still go to the game "
             "while the TUI window has focus."
         )
 
