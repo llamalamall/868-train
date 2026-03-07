@@ -22,8 +22,9 @@ def _snapshot(
     enemies: tuple[EnemyState, ...] = (),
     siphons: tuple[GridPosition, ...] = (),
     walls: tuple[GridPosition, ...] = (),
+    cells: tuple[MapCellState, ...] = (),
 ) -> GameStateSnapshot:
-    cells = tuple(
+    wall_cells = tuple(
         MapCellState(
             position=position,
             cell_type=1,
@@ -33,13 +34,14 @@ def _snapshot(
         )
         for position in walls
     )
+    merged_cells = (*wall_cells, *cells)
     map_state = MapState(
         status="ok" if player is not None else "missing",
         player_position=player,
         exit_position=exit_pos,
         enemies=enemies,
         siphons=siphons,
-        cells=cells,
+        cells=merged_cells,
     )
     return GameStateSnapshot(
         timestamp_utc="2026-03-06T00:00:00+00:00",
@@ -251,3 +253,126 @@ def test_heuristic_baseline_verbose_logging_emits_chosen_action(
     assert action == "move_right"
     assert "heuristic_action" in caplog.text
     assert "choice=move_right" in caplog.text
+
+
+def test_heuristic_post_siphon_prefers_resources_and_harvests_with_space() -> None:
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            resource_goal_weight=1.0,
+            prog_goal_weight=0.0,
+            points_goal_weight=0.0,
+        )
+    )
+    before = _snapshot(
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(4, 4), GridPosition(5, 4)),
+    )
+    rich_cells = (
+        MapCellState(position=GridPosition(1, 1), cell_type=0, tile_variant=0, wall_state=0, credits=2, energy=2),
+        MapCellState(position=GridPosition(1, 2), cell_type=0, tile_variant=0, wall_state=0, credits=1, energy=1),
+        MapCellState(position=GridPosition(2, 1), cell_type=0, tile_variant=0, wall_state=0, credits=1, energy=0),
+    )
+    after = _snapshot(
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(5, 4),),
+        cells=rich_cells,
+    )
+
+    _ = agent.select_action(state=before, action_space=("move_up", "move_right", "space"), rng=random.Random(21))
+    action = agent.select_action(
+        state=after,
+        action_space=("move_up", "move_right", "space"),
+        rng=random.Random(21),
+    )
+
+    assert action == "space"
+
+
+def test_heuristic_post_siphon_prog_plan_targets_preferred_prog_wall() -> None:
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            resource_goal_weight=0.0,
+            prog_goal_weight=1.0,
+            points_goal_weight=0.0,
+        )
+    )
+    before = _snapshot(
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(4, 4), GridPosition(5, 4)),
+    )
+    prog_wall = MapCellState(
+        position=GridPosition(1, 0),
+        cell_type=1,
+        tile_variant=0,
+        wall_state=0,
+        prog_id=10,  # .debug
+        is_wall=True,
+    )
+    after = _snapshot(
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(5, 4),),
+        cells=(prog_wall,),
+    )
+
+    _ = agent.select_action(state=before, action_space=("move_right", "space"), rng=random.Random(22))
+    action = agent.select_action(
+        state=after,
+        action_space=("move_right", "space"),
+        rng=random.Random(22),
+    )
+
+    assert action == "space"
+
+
+def test_heuristic_post_siphon_points_plan_moves_toward_highest_points_wall() -> None:
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            resource_goal_weight=0.0,
+            prog_goal_weight=0.0,
+            points_goal_weight=1.0,
+        )
+    )
+    before = _snapshot(
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(4, 4), GridPosition(5, 4)),
+    )
+    low_points_wall = MapCellState(
+        position=GridPosition(2, 0),
+        cell_type=2,
+        tile_variant=0,
+        wall_state=0,
+        points=3,
+        is_wall=True,
+    )
+    high_points_wall = MapCellState(
+        position=GridPosition(0, 2),
+        cell_type=2,
+        tile_variant=0,
+        wall_state=0,
+        points=9,
+        is_wall=True,
+    )
+    after = _snapshot(
+        player=GridPosition(0, 0),
+        exit_pos=GridPosition(5, 5),
+        siphons=(GridPosition(5, 4),),
+        cells=(low_points_wall, high_points_wall),
+    )
+
+    _ = agent.select_action(
+        state=before,
+        action_space=("move_up", "move_right", "space"),
+        rng=random.Random(23),
+    )
+    action = agent.select_action(
+        state=after,
+        action_space=("move_up", "move_right", "space"),
+        rng=random.Random(23),
+    )
+
+    assert action == "move_up"

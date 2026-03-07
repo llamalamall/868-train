@@ -10,15 +10,23 @@
 ## Config
 - `HeuristicBaselineConfig.low_health_threshold` (default `3`)
 - `HeuristicBaselineConfig.verbose_action_logging` (default `False`)
+- `HeuristicBaselineConfig.resource_goal_weight` (default `0.60`)
+- `HeuristicBaselineConfig.prog_goal_weight` (default `0.30`)
+- `HeuristicBaselineConfig.points_goal_weight` (default `0.10`)
 
 ## Decision Order
 1. Validate `action_space` is non-empty.
 2. If health is known and `health <= low_health_threshold`, choose `wait` when available.
-3. If map/player data is available:
+3. If siphon count decreases (a siphon was collected), build a temporary harvest plan by weighted random choice:
+   - `resources` (favored),
+   - `progs`,
+   - `points`.
+4. If a harvest plan is active, move to its target and press `space` at target.
+5. If map/player data is available:
    - If an enemy is in direct line-of-sight (same row/column with no wall between), move toward that enemy.
    - Otherwise, if siphons remain, move toward the nearest siphon.
    - Otherwise, move toward the exit.
-4. Fallback priority:
+6. Fallback priority:
    - `confirm` (if available)
    - `wait` (if available)
    - random choice from available actions (tie/fallback)
@@ -40,6 +48,16 @@
 - This causes siphons to be collected before routing to the exit when possible.
 - Uses shortest-path search (BFS) over the map grid so detours around walls are handled.
 - While siphons remain, the heuristic filters out any immediate move that would step onto the exit tile.
+
+## Post-Siphon Harvest Rule
+- Trigger: remaining siphon count decreases between consecutive states.
+- Weighted random category selection favors:
+  - resources (`credits + energy` cluster score),
+  - then progs (favoring `.debug`, `.push`, `.anti-v`, `.d_bom`, `.step`),
+  - then points (highest-point wall).
+- Harvest behavior:
+  - Resources: move to best resource cluster cell and press `space`.
+  - Progs/Points: move to a cell adjacent to target wall and press `space`.
 
 ## Goal Rule
 - Uses player and exit positions from `state.map` once no siphon target remains.
