@@ -12,6 +12,7 @@ from src.config.fingerprint import main as fingerprint_main
 from src.env.dqn_policy_runner import main as dqn_runner_main
 from src.env.heuristic_policy_runner import main as heuristic_runner_main
 from src.env.random_policy_runner import main as random_runner_main
+from src.env.re_heuristic_policy_runner import main as re_heuristic_runner_main
 from src.memory.offset_smoke_test import main as offset_smoke_main
 from src.memory.state_monitor_tui import main as state_monitor_main
 from src.training.evaluate import main as evaluate_main
@@ -96,6 +97,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_passthrough_parser(
         subparsers,
+        name="run-re-heuristic",
+        summary="Run re-heuristic episodes.",
+        details="Runs src.env.re_heuristic_policy_runner against the live game environment.",
+    )
+    _add_passthrough_parser(
+        subparsers,
         name="evaluate",
         summary="DQN checkpoint KPI evaluation.",
         details=(
@@ -121,6 +128,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "run-random": random_runner_main,
         "run-heuristic": heuristic_runner_main,
         "run-dqn": dqn_runner_main,
+        "run-re-heuristic": re_heuristic_runner_main,
         "evaluate": evaluate_main,
     }
 

@@ -57,6 +57,15 @@ def test_master_cli_dispatches_run_dqn_with_passthrough(monkeypatch) -> None:
     ]
 
 
+def test_master_cli_dispatches_run_re_heuristic_with_passthrough(monkeypatch) -> None:
+    captured: list[tuple[str, list[str]]] = []
+    _install_stub(monkeypatch, "src.cli.re_heuristic_runner_main", captured)
+
+    cli.main(["run-re-heuristic", "--episodes", "4", "--max-steps", "88"])
+
+    assert captured == [("re_heuristic_runner_main", ["--episodes", "4", "--max-steps", "88"])]
+
+
 def test_master_cli_dispatches_evaluate_with_passthrough(monkeypatch) -> None:
     captured: list[tuple[str, list[str]]] = []
     _install_stub(monkeypatch, "src.cli.evaluate_main", captured)

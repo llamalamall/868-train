@@ -46,6 +46,7 @@ Available subcommands:
 - `state-monitor`: interactive memory monitor (`src.memory.state_monitor_tui`)
 - `run-random`: random baseline runner (`src.env.random_policy_runner`)
 - `run-heuristic`: heuristic baseline runner (`src.env.heuristic_policy_runner`)
+- `run-re-heuristic`: re-heuristic runner (`src.env.re_heuristic_policy_runner`)
 - `run-dqn`: DQN train/eval runner with checkpoint save/load (`src.env.dqn_policy_runner`)
 - `evaluate`: fixed-seed DQN KPI harness and checkpoint comparison (`src.training.evaluate`)
 
@@ -69,6 +70,9 @@ python -m src.cli run-random --episodes 5 --max-steps 200
 
 # Run heuristic baseline episodes
 python -m src.cli run-heuristic --episodes 5 --max-steps 200 --movement-keys wasd
+
+# Run re-heuristic baseline+mined-rule episodes
+python -m src.cli run-re-heuristic --episodes 5 --max-steps 200 --rule-pack-path artifacts/re_heuristic/accepted_rule_pack.json
 
 # Run heuristic with deeper enemy lookahead
 python -m src.cli run-heuristic --episodes 5 --enemy-prediction-horizon-steps 4
@@ -200,6 +204,19 @@ Two baseline policy runners are available:
 Both support reward shaping flags (`--reward-*`) and print per-episode + summary metrics for quick comparison.
 All policy runners (`run-random`, `run-heuristic`, `run-dqn`) now launch the live state-monitor TUI by
 default in a separate window; disable with `--no-tui` and tune polling with `--tui-interval`.
+
+## Re-Heuristic Rule-Mining Loop
+
+Run the automatic analyze -> synthesize -> validate loop:
+
+```powershell
+python artifacts/run_re_heuristic_loop.py --live-validation optional
+```
+
+Artifacts are written under `artifacts/re_heuristic/`:
+- per-iteration output: `artifacts/re_heuristic/iterations/iter-XXXX/`
+- accepted rule pack: `artifacts/re_heuristic/accepted_rule_pack.json`
+- loop state summary: `artifacts/re_heuristic/loop_state.json`
 
 ## Project Structure
 
