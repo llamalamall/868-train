@@ -189,6 +189,28 @@ def test_game_env_reset_dispatches_confirm_and_space_when_start_screen_null_poin
     assert actions.actions == ["confirm", "space"]
 
 
+def test_game_env_reset_dispatches_recovery_actions_when_terminal_state_persists() -> None:
+    state_provider = QueueStateProvider([_snapshot(failed=True), _snapshot(failed=False)])
+    actions = FakeActionAPI()
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait", "confirm", "space"),
+        config=GameEnvConfig(
+            require_non_terminal_on_reset=True,
+            state_poll_interval_seconds=0.0,
+            post_action_poll_delay_seconds=0.0,
+        ),
+    )
+
+    state = env.reset()
+
+    assert state.fail_state.status == "ok"
+    assert state.fail_state.value is False
+    assert actions.actions == ["confirm", "space"]
+
+
 def test_game_env_reset_timeout_when_terminal_state_persists() -> None:
     state_provider = QueueStateProvider([_snapshot(failed=True)])
     env = GameEnv(

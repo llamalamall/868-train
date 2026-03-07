@@ -197,7 +197,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--require-non-terminal-reset",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Require reset() to observe a non-terminal state before starting steps.",
     )
     parser.add_argument(

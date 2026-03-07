@@ -487,12 +487,16 @@ class GameEnv:
                 operation_name="state_provider",
             )
             if _state_indicates_start_screen(state):
-                self._dispatch_start_screen_recovery_actions()
+                self._dispatch_reset_recovery_actions(reason="start_screen_null_pointer")
                 self._sleep_fn(self._config.state_poll_interval_seconds)
                 continue
-            if not require_non_terminal or not _state_is_terminal(state):
-                return state
-            self._sleep_fn(self._config.state_poll_interval_seconds)
+            if _state_is_terminal(state):
+                if not require_non_terminal:
+                    return state
+                self._dispatch_reset_recovery_actions(reason="terminal_fail_state")
+                self._sleep_fn(self._config.state_poll_interval_seconds)
+                continue
+            return state
 
         raise ResetTimeoutError(
             "Reset timed out waiting for a non-terminal state."
@@ -520,18 +524,20 @@ class GameEnv:
                     f"Watchdog timeout during {operation_name} after {timeout_seconds:.2f}s."
                 ) from error
 
-    def _dispatch_start_screen_recovery_actions(self) -> None:
+    def _dispatch_reset_recovery_actions(self, *, reason: str) -> None:
         recovery_actions = tuple(
             action for action in ("confirm", "space") if action in self._action_space
         )
         if not recovery_actions:
             self._logger.warning(
-                "Detected start-screen null-pointer state, but no confirm/space actions are configured."
+                "Detected reset recovery condition (%s), but no confirm/space actions are configured.",
+                reason,
             )
             return
 
         self._logger.info(
-            "Detected start-screen null-pointer state; dispatching recovery actions: %s.",
+            "Detected reset recovery condition (%s); dispatching recovery actions: %s.",
+            reason,
             ", ".join(recovery_actions),
         )
         for action_name in recovery_actions:
