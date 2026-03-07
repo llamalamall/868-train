@@ -12,6 +12,7 @@ from src.config.fingerprint import main as fingerprint_main
 from src.env.dqn_policy_runner import main as dqn_runner_main
 from src.env.heuristic_policy_runner import main as heuristic_runner_main
 from src.env.random_policy_runner import main as random_runner_main
+from src.gui.dqn_runner_gui import main as dqn_gui_main
 from src.memory.offset_smoke_test import main as offset_smoke_main
 from src.memory.state_monitor_tui import main as state_monitor_main
 from src.training.evaluate import main as evaluate_main
@@ -96,6 +97,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_passthrough_parser(
         subparsers,
+        name="dqn-gui",
+        summary="Launch GUI for DQN run/eval/compare workflows.",
+        details=(
+            "Runs src.gui.dqn_runner_gui and exposes DQN runner/evaluation flags in an "
+            "interactive window."
+        ),
+    )
+    _add_passthrough_parser(
+        subparsers,
         name="evaluate",
         summary="DQN checkpoint KPI evaluation.",
         details=(
@@ -121,6 +131,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "run-random": random_runner_main,
         "run-heuristic": heuristic_runner_main,
         "run-dqn": dqn_runner_main,
+        "dqn-gui": dqn_gui_main,
         "evaluate": evaluate_main,
     }
 

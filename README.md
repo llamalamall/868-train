@@ -47,6 +47,7 @@ Available subcommands:
 - `run-random`: random baseline runner (`src.env.random_policy_runner`)
 - `run-heuristic`: heuristic baseline runner (`src.env.heuristic_policy_runner`)
 - `run-dqn`: DQN train/eval runner with checkpoint save/load (`src.env.dqn_policy_runner`)
+- `dqn-gui`: GUI launcher for DQN run/eval/compare settings (`src.gui.dqn_runner_gui`)
 - `evaluate`: fixed-seed DQN KPI harness and checkpoint comparison (`src.training.evaluate`)
 
 For command-specific options, forward `--help` to the underlying tool:
@@ -81,6 +82,9 @@ python -m src.cli run-dqn --episodes 20 --max-steps 200
 
 # Evaluate from a saved DQN checkpoint
 python -m src.cli run-dqn --mode eval --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 5
+
+# Launch GUI to run DQN/evaluate with all available flags
+python -m src.cli dqn-gui
 
 # Task-15 KPI evaluation for one checkpoint
 python -m src.cli evaluate run --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 10 --seed 42
