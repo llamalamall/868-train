@@ -695,6 +695,7 @@ def run_random_policy(
     max_steps_per_episode: int = 200,
     seed: int | None = None,
     actions: tuple[str, ...] | None = None,
+    step_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[RandomPolicyEpisodeResult, ...]:
     """Run random actions for N episodes to validate env contract."""
     import random
@@ -728,6 +729,7 @@ def run_random_policy(
         terminal_reason: str | None = None
 
         while steps < max_steps_per_episode and not done:
+            step_index = steps
             if actions is None:
                 step_actions = env.available_actions()
             else:
@@ -742,6 +744,20 @@ def run_random_policy(
             terminal_reason_value = info.get("terminal_reason")
             if isinstance(terminal_reason_value, str):
                 terminal_reason = terminal_reason_value
+
+            if step_callback is not None:
+                step_callback(
+                    {
+                        "episode_id": env.current_episode_id,
+                        "step_index": step_index,
+                        "action": action,
+                        "action_reason": "random_policy_sample",
+                        "reward": float(reward),
+                        "total_reward": total_reward,
+                        "done": done,
+                        "terminal_reason": terminal_reason,
+                    }
+                )
 
         results.append(
             RandomPolicyEpisodeResult(

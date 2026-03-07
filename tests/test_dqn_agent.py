@@ -181,3 +181,24 @@ def test_dqn_training_eval_mode_does_not_mutate_training_state() -> None:
     assert all(item.updates_applied == 0 for item in results)
     assert all(item.last_loss is None for item in results)
     assert agent.training_state == before
+
+
+def test_dqn_training_step_callback_reports_action_and_reason() -> None:
+    env = TinyLineWorldEnv()
+    agent = DQNAgent(action_space=env.action_space, config=_test_config(), seed=19)
+    events: list[dict[str, object]] = []
+
+    _ = run_dqn_training(
+        env=env,
+        agent=agent,
+        episodes=1,
+        max_steps_per_episode=4,
+        explore=True,
+        learn=True,
+        step_callback=lambda event: events.append(event),
+    )
+
+    assert events
+    first = events[0]
+    assert isinstance(first["action"], str)
+    assert first["action_reason"] in {"epsilon_explore", "greedy_q", "dqn_select_action"}

@@ -82,14 +82,16 @@ def test_random_runner_parser_prog_actions_defaults_to_enabled() -> None:
 
     assert args.prog_actions is True
     assert args.require_non_terminal_reset is True
+    assert args.tui is True
 
 
 def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
     parser = _build_parser()
-    args = parser.parse_args(["--no-prog-actions", "--no-require-non-terminal-reset"])
+    args = parser.parse_args(["--no-prog-actions", "--no-require-non-terminal-reset", "--no-tui"])
 
     assert args.prog_actions is False
     assert args.require_non_terminal_reset is False
+    assert args.tui is False
 
 
 def test_build_reward_fn_applies_configured_components_and_writes_breakdown() -> None:

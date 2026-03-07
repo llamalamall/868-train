@@ -294,6 +294,7 @@ class DQNAgent:
         self._episodes_seen = 0
         self._last_loss: float | None = None
         self._checkpoint_metadata: dict[str, Any] = {}
+        self.last_decision_reason: str | None = None
 
     @property
     def training_state(self) -> DQNTrainingState:
@@ -338,11 +339,13 @@ class DQNAgent:
             raise ValueError("No valid actions available for selection.")
 
         if explore and self._rng.random() < self.epsilon:
+            self.last_decision_reason = "epsilon_explore"
             return str(self._rng.choice(valid_actions))
 
         state_features = self.featurize_state(state)
         q_values = self._online_model.q_values(state_features)
         best_action = max(valid_actions, key=lambda action: q_values[self._action_to_index[action]])
+        self.last_decision_reason = "greedy_q"
         return str(best_action)
 
     def observe(

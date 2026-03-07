@@ -8,6 +8,7 @@ from statistics import mean
 
 from src.controller.action_api import ActionConfig
 from src.env.game_env import GameEnv, GameEnvConfig, RewardFunction, run_random_policy
+from src.env.runner_tui import RunnerTuiSession
 from src.state.schema import GameStateSnapshot
 from src.training.rewards import RewardConfig, RewardWeights, compute_reward
 
@@ -183,6 +184,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Use window-targeted PostMessage input instead of global SendInput.",
     )
     parser.add_argument(
+        "--tui",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Launch live state monitor TUI in a separate console window.",
+    )
+    parser.add_argument(
+        "--tui-interval",
+        type=float,
+        default=0.5,
+        help="Polling interval for the live TUI (seconds).",
+    )
+    parser.add_argument(
         "--step-timeout",
         type=float,
         default=3.0,
@@ -257,16 +270,43 @@ def main() -> None:
         reward_config=reward_config,
         print_breakdown=bool(args.print_reward_breakdown),
     )
-    env = GameEnv.from_live_process(
-        executable_name=args.exe,
-        config=config,
-        reset_sequence=reset_sequence if reset_sequence else None,
-        focus_window_on_attach=bool(args.focus_window),
-        window_targeted_input=bool(args.window_input),
-        action_config=action_config,
-        reward_fn=reward_fn,
+    env: GameEnv | None = None
+    tui = RunnerTuiSession(
+        executable_name=str(args.exe),
+        enabled=bool(args.tui),
+        interval_seconds=float(args.tui_interval),
     )
     try:
+        env = GameEnv.from_live_process(
+            executable_name=args.exe,
+            config=config,
+            reset_sequence=reset_sequence if reset_sequence else None,
+            focus_window_on_attach=bool(args.focus_window),
+            window_targeted_input=bool(args.window_input),
+            action_config=action_config,
+            reward_fn=reward_fn,
+        )
+        tui.start()
+
+        def _on_step(event: dict[str, Any]) -> None:
+            tui.update(
+                training_line=(
+                    "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
+                    "done={done} terminal={terminal}".format(
+                        episode=event.get("episode_id"),
+                        step=int(event.get("step_index", 0)) + 1,
+                        reward=float(event.get("reward", 0.0)),
+                        total=float(event.get("total_reward", 0.0)),
+                        done=bool(event.get("done", False)),
+                        terminal=event.get("terminal_reason") or "-",
+                    )
+                ),
+                action_line="action={action} reason={reason}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "random_policy_sample",
+                ),
+            )
+
         if args.actions:
             policy_actions = tuple(
                 action.strip()
@@ -274,19 +314,24 @@ def main() -> None:
                 if action.strip()
             )
         else:
+            assert env is not None
             policy_actions = tuple(action for action in env.action_space if action != "cancel")
             if not policy_actions:
                 policy_actions = env.action_space
 
+        assert env is not None
         results = run_random_policy(
             env=env,
             episodes=args.episodes,
             max_steps_per_episode=args.max_steps,
             seed=args.seed,
             actions=policy_actions,
+            step_callback=_on_step if bool(args.tui) else None,
         )
     finally:
-        env.close()
+        if env is not None:
+            env.close()
+        tui.close()
 
     print("episode_id\tsteps\tdone\ttotal_reward\tterminal_reason")
     for result in results:

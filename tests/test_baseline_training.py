@@ -182,3 +182,23 @@ def test_run_agent_policy_falls_back_to_random_action_when_none_available() -> N
     assert len(results) == 1
     assert len(env.actions_seen) == 1
     assert env.actions_seen[0] in env.action_space
+
+
+def test_run_agent_policy_step_callback_reports_action_and_reason() -> None:
+    env = TinyLineWorldEnv()
+    events: list[dict[str, object]] = []
+
+    _ = run_agent_policy(
+        env=env,
+        agent=HeuristicBaselineAgent(),
+        episodes=1,
+        max_steps_per_episode=5,
+        seed=3,
+        step_callback=lambda event: events.append(event),
+    )
+
+    assert events
+    first = events[0]
+    assert isinstance(first["action"], str)
+    assert isinstance(first["action_reason"], str)
+    assert first["action_reason"] != ""

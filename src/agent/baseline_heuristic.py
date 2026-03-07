@@ -66,6 +66,11 @@ class HeuristicBaselineAgent:
     _last_prog_energy: int | None = field(default=None, init=False, repr=False)
     _prog_backoff_steps: dict[str, int] = field(default_factory=dict, init=False, repr=False)
     _last_show_step: int | None = field(default=None, init=False, repr=False)
+    _last_decision_reason: str | None = field(default=None, init=False, repr=False)
+
+    @property
+    def last_decision_reason(self) -> str | None:
+        return self._last_decision_reason
 
     def select_action(
         self,
@@ -759,6 +764,7 @@ class HeuristicBaselineAgent:
         reason: str,
         action_space: tuple[str, ...],
     ) -> str:
+        self._last_decision_reason = reason
         if self.config.verbose_action_logging:
             LOGGER.info(
                 "heuristic_action choice=%s reason=%s health=%s player=%s exit=%s available=%s",

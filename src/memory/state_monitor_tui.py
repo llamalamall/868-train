@@ -19,6 +19,7 @@ from collections import Counter
 import ctypes
 import ctypes.wintypes
 import datetime as dt
+import json
 import os
 import re
 from dataclasses import dataclass
@@ -116,6 +117,36 @@ class PollSnapshot:
     timestamp: str
     fields: tuple[FieldSnapshot, ...]
     board_stats: str = ""
+
+
+@dataclass(frozen=True)
+class ExternalStatusSnapshot:
+    """Optional runner-provided live status lines shown in the TUI footer area."""
+
+    training_line: str = ""
+    action_line: str = ""
+
+
+def load_external_status_snapshot(status_file: Path | None) -> ExternalStatusSnapshot:
+    """Read optional runner status JSON payload from disk."""
+    if status_file is None:
+        return ExternalStatusSnapshot()
+    if not status_file.exists():
+        return ExternalStatusSnapshot()
+
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ExternalStatusSnapshot()
+
+    if not isinstance(payload, dict):
+        return ExternalStatusSnapshot()
+    training_line = payload.get("training_line", "")
+    action_line = payload.get("action_line", "")
+    return ExternalStatusSnapshot(
+        training_line=str(training_line),
+        action_line=str(action_line),
+    )
 
 
 def map_tui_key_to_passthrough_key(key: str) -> str | None:
@@ -734,10 +765,16 @@ def _build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Re-resolve pointer chains every poll.",
     )
+    parser.add_argument(
+        "--external-status-file",
+        type=Path,
+        default=None,
+        help="Optional JSON file with training/action lines produced by runner sessions.",
+    )
     return parser
 
 
-def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
+def _run_tui(engine: MemoryStateMonitor, interval: float, *, external_status_file: Path | None = None) -> None:
     try:
         from textual import events
         from textual.app import App, ComposeResult
@@ -762,13 +799,22 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
 
         paused = False
 
-        def __init__(self, monitor_engine: MemoryStateMonitor, poll_interval: float) -> None:
+        def __init__(
+            self,
+            monitor_engine: MemoryStateMonitor,
+            poll_interval: float,
+            *,
+            status_file: Path | None,
+        ) -> None:
             super().__init__()
             self._engine = monitor_engine
             self._poll_interval = poll_interval
+            self._external_status_file = status_file
             self._status_widget: Static | None = None
             self._progs_widget: Static | None = None
             self._board_widget: Static | None = None
+            self._training_widget: Static | None = None
+            self._action_widget: Static | None = None
             self._table: DataTable | None = None
             self._last_snapshot: PollSnapshot | None = None
             self._controls = ActionAPI(input_driver=InputDriver())
@@ -782,6 +828,8 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             yield Static("", id="status_line")
             yield Static("", id="progs_line")
             yield Static("", id="board_line")
+            yield Static("", id="training_line")
+            yield Static("", id="action_line")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -789,6 +837,8 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             self._status_widget = self.query_one("#status_line", Static)
             self._progs_widget = self.query_one("#progs_line", Static)
             self._board_widget = self.query_one("#board_line", Static)
+            self._training_widget = self.query_one("#training_line", Static)
+            self._action_widget = self.query_one("#action_line", Static)
 
             self._table.cursor_type = "none"
             self._table.zebra_stripes = True
@@ -851,6 +901,8 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
                 self._status_widget is None
                 or self._progs_widget is None
                 or self._board_widget is None
+                or self._training_widget is None
+                or self._action_widget is None
                 or self._last_snapshot is None
             ):
                 return
@@ -869,6 +921,9 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
             )
             self._progs_widget.update(progs_message)
             self._board_widget.update(board_message)
+            external_status = load_external_status_snapshot(self._external_status_file)
+            self._training_widget.update(external_status.training_line)
+            self._action_widget.update(external_status.action_line)
 
         def action_toggle_pause(self) -> None:
             self.paused = not self.paused
@@ -926,7 +981,7 @@ def _run_tui(engine: MemoryStateMonitor, interval: float) -> None:
                 self._control_state = f"controls=error ({error})"
             self._update_status_line()
 
-    MonitorApp(engine, interval).run()
+    MonitorApp(engine, interval, status_file=external_status_file).run()
 
 
 def main() -> None:
@@ -946,7 +1001,7 @@ def main() -> None:
 
     try:
         engine.start()
-        _run_tui(engine, args.interval)
+        _run_tui(engine, args.interval, external_status_file=args.external_status_file)
     finally:
         engine.stop()
 

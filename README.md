@@ -180,6 +180,8 @@ Two baseline policy runners are available:
 - Heuristic baseline: `python -m src.cli run-heuristic ...`
 
 Both support reward shaping flags (`--reward-*`) and print per-episode + summary metrics for quick comparison.
+All policy runners (`run-random`, `run-heuristic`, `run-dqn`) now launch the live state-monitor TUI by
+default in a separate window; disable with `--no-tui` and tune polling with `--tui-interval`.
 
 ## Project Structure
 

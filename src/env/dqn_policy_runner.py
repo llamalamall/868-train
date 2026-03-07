@@ -11,6 +11,7 @@ from typing import Any
 from src.agent.dqn_agent import DQNAgent, DQNConfig
 from src.env.game_env import GameEnv, GameEnvConfig
 from src.env.random_policy_runner import _build_action_config, _build_reward_config, _build_reward_fn
+from src.env.runner_tui import RunnerTuiSession
 from src.training.rewards import RewardWeights
 from src.training.train import LearningEpisodeRolloutResult, run_dqn_training
 
@@ -75,6 +76,18 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Use window-targeted PostMessage input instead of global SendInput.",
+    )
+    parser.add_argument(
+        "--tui",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Launch live state monitor TUI in a separate console window.",
+    )
+    parser.add_argument(
+        "--tui-interval",
+        type=float,
+        default=0.5,
+        help="Polling interval for the live TUI (seconds).",
     )
     parser.add_argument(
         "--step-timeout",
@@ -274,25 +287,60 @@ def main() -> None:
         reward_config=reward_config,
         print_breakdown=bool(args.print_reward_breakdown),
     )
-    env = GameEnv.from_live_process(
-        executable_name=args.exe,
-        config=GameEnvConfig(
-            step_timeout_seconds=args.step_timeout,
-            reset_timeout_seconds=args.reset_timeout,
-            require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
-        ),
-        reset_sequence=reset_sequence if reset_sequence else None,
-        focus_window_on_attach=bool(args.focus_window),
-        window_targeted_input=bool(args.window_input),
-        action_config=_build_action_config(
-            args.movement_keys,
-            include_prog_actions=bool(args.prog_actions),
-        ),
-        reward_fn=reward_fn,
+    env: GameEnv | None = None
+    tui = RunnerTuiSession(
+        executable_name=str(args.exe),
+        enabled=bool(args.tui),
+        interval_seconds=float(args.tui_interval),
     )
 
     checkpoint_path = _resolve_checkpoint_path(args)
     try:
+        env = GameEnv.from_live_process(
+            executable_name=args.exe,
+            config=GameEnvConfig(
+                step_timeout_seconds=args.step_timeout,
+                reset_timeout_seconds=args.reset_timeout,
+                require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
+            ),
+            reset_sequence=reset_sequence if reset_sequence else None,
+            focus_window_on_attach=bool(args.focus_window),
+            window_targeted_input=bool(args.window_input),
+            action_config=_build_action_config(
+                args.movement_keys,
+                include_prog_actions=bool(args.prog_actions),
+            ),
+            reward_fn=reward_fn,
+        )
+        tui.start()
+
+        def _on_step(event: dict[str, Any]) -> None:
+            tui.update(
+                training_line=(
+                    "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
+                    "epsilon={epsilon:.4f} updates={updates} done={done} terminal={terminal}".format(
+                        episode=event.get("episode_id"),
+                        step=int(event.get("step_index", 0)) + 1,
+                        reward=float(event.get("reward", 0.0)),
+                        total=float(event.get("total_reward", 0.0)),
+                        epsilon=float(event.get("epsilon", 0.0)),
+                        updates=int(event.get("updates_applied", 0)),
+                        done=bool(event.get("done", False)),
+                        terminal=event.get("terminal_reason") or "-",
+                    )
+                ),
+                action_line="action={action} reason={reason} loss={loss}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "dqn_select_action",
+                    loss=(
+                        "{0:.6f}".format(float(event.get("last_loss")))
+                        if event.get("last_loss") is not None
+                        else "-"
+                    ),
+                ),
+            )
+
+        assert env is not None
         if checkpoint_path.exists():
             agent = DQNAgent.load_checkpoint(checkpoint_path)
         elif args.mode == "train":
@@ -325,6 +373,7 @@ def main() -> None:
                     max_steps_per_episode=int(args.max_steps),
                     explore=True,
                     learn=True,
+                    step_callback=_on_step if bool(args.tui) else None,
                 )[0]
                 results.append(episode_result)
 
@@ -360,10 +409,13 @@ def main() -> None:
                     max_steps_per_episode=int(args.max_steps),
                     explore=False,
                     learn=False,
+                    step_callback=_on_step if bool(args.tui) else None,
                 )
             )
     finally:
-        env.close()
+        if env is not None:
+            env.close()
+        tui.close()
 
     _print_results(tuple(results))
 
