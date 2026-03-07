@@ -148,6 +148,12 @@ def main() -> None:
     args = parser.parse_args()
     if bool(args.step_through) and not bool(args.tui):
         parser.error("--step-through requires --tui.")
+    effective_window_input = bool(args.window_input) or bool(args.step_through)
+    if bool(args.step_through) and not bool(args.window_input):
+        print(
+            "step-through enabled: using window-targeted input so actions still go to the game "
+            "while the TUI window has focus."
+        )
     if args.verbose_actions:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -176,7 +182,7 @@ def main() -> None:
             ),
             reset_sequence=reset_sequence if reset_sequence else None,
             focus_window_on_attach=bool(args.focus_window),
-            window_targeted_input=bool(args.window_input),
+            window_targeted_input=effective_window_input,
             action_config=_build_action_config(
                 args.movement_keys,
                 include_prog_actions=bool(args.prog_actions),

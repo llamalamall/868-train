@@ -82,6 +82,8 @@ python -m src.cli run-dqn --episodes 20 --max-steps 200
 python -m src.cli run-dqn --mode eval --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 5
 ```
 
+When `--step-through` is enabled, runners automatically use window-targeted input so actions still dispatch to the game while the TUI has focus.
+
 ## Control Smoke Test
 
 Task 04 adds a deterministic action API in `src/controller/action_api.py` and low-level key

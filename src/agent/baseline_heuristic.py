@@ -92,12 +92,22 @@ class HeuristicBaselineAgent:
         if not actions:
             raise ValueError("action_space must include at least one action.")
 
+        reset_detected = self._update_harvest_plan_on_siphon_change(state=state, rng=rng)
+        self._advance_prog_usage_state(state=state, reset_detected=reset_detected)
+
+        if state.map.status == "ok" and state.map.player_position is not None:
+            enemy_action = self._select_enemy_sight_move(state=state, action_space=actions)
+            if enemy_action is not None:
+                return self._log_choice(
+                    state=state,
+                    action=enemy_action,
+                    reason="attack_enemy_in_line_of_sight",
+                    action_space=actions,
+                )
+
         actions = self._filter_exit_steps_while_siphons_remain(state=state, action_space=actions)
         if not actions:
             raise ValueError("No safe actions available after applying siphon-before-exit policy.")
-
-        reset_detected = self._update_harvest_plan_on_siphon_change(state=state, rng=rng)
-        self._advance_prog_usage_state(state=state, reset_detected=reset_detected)
 
         prog_action, prog_reason = self._select_prog_action(
             state=state,
@@ -163,15 +173,6 @@ class HeuristicBaselineAgent:
             )
 
         if state.map.status == "ok" and state.map.player_position is not None:
-            enemy_action = self._select_enemy_sight_move(state=state, action_space=safe_actions)
-            if enemy_action is not None:
-                return self._log_choice(
-                    state=state,
-                    action=enemy_action,
-                    reason="pursue_enemy_in_sight_or_glitch_wall_shot",
-                    action_space=safe_actions,
-                )
-
             siphon_action = self._select_siphon_move(state=state, action_space=safe_actions)
             if siphon_action is not None:
                 return self._log_choice(
@@ -924,25 +925,12 @@ class HeuristicBaselineAgent:
         if target_enemy is None:
             return None
 
-        target_type, target_position = target_enemy
-        if target_type == _ENEMY_TYPE_GLITCH and target_position in wall_positions:
-            action = _first_step_toward_axis_aligned_target(
-                start=player,
-                target=target_position,
-                allowed_actions=movement_actions,
-            )
-            if action is not None:
-                return action
-
-        route = _shortest_path_first_action(
+        _target_type, target_position = target_enemy
+        return _first_step_toward_axis_aligned_target(
             start=player,
             target=target_position,
-            width=state.map.width,
-            height=state.map.height,
-            walls=wall_positions,
-            allowed_first_actions=movement_actions,
+            allowed_actions=movement_actions,
         )
-        return route.action if route is not None else None
 
     @staticmethod
     def _coerce_int(value: object | None) -> int | None:

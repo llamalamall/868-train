@@ -203,7 +203,7 @@ def test_heuristic_baseline_avoids_move_within_one_space_of_virus() -> None:
 
 
 def test_heuristic_baseline_uses_enemy_lookahead_horizon_for_move_safety() -> None:
-    virus = EnemyState(slot=0, type_id=2, position=GridPosition(4, 1), hp=1, state=0, in_bounds=True)
+    virus = EnemyState(slot=0, type_id=2, position=GridPosition(4, 2), hp=1, state=0, in_bounds=True)
     state = _snapshot(
         health=8,
         player=GridPosition(1, 1),
@@ -232,12 +232,40 @@ def test_heuristic_baseline_uses_enemy_lookahead_horizon_for_move_safety() -> No
     assert lookahead_action == "move_left"
 
 
-def test_heuristic_baseline_uses_prog_when_all_moves_are_dangerous() -> None:
+def test_heuristic_baseline_prioritizes_enemy_attack_over_prog_and_objectives() -> None:
+    enemy = EnemyState(slot=0, type_id=1, position=GridPosition(4, 1), hp=1, state=0, in_bounds=True)
+    agent = HeuristicBaselineAgent(
+        config=HeuristicBaselineConfig(
+            low_health_threshold=3,
+            enable_prog_usage=True,
+            prog_energy_floor=1,
+        )
+    )
+    state = _snapshot(
+        health=2,
+        energy=10,
+        player=GridPosition(1, 1),
+        exit_pos=GridPosition(0, 1),
+        enemies=(enemy,),
+        siphons=(GridPosition(1, 2),),
+        inventory=_inventory(7),
+    )
+
+    action = agent.select_action(
+        state=state,
+        action_space=("move_right", "move_up", "prog_slot_1", "space", "wait"),
+        rng=random.Random(28),
+    )
+
+    assert action == "move_right"
+
+
+def test_heuristic_baseline_uses_prog_when_all_moves_are_dangerous_without_los_attack() -> None:
     enemies = (
-        EnemyState(slot=0, type_id=1, position=GridPosition(0, 1), hp=1, state=0, in_bounds=True),
-        EnemyState(slot=1, type_id=1, position=GridPosition(2, 1), hp=1, state=0, in_bounds=True),
-        EnemyState(slot=2, type_id=1, position=GridPosition(1, 0), hp=1, state=0, in_bounds=True),
-        EnemyState(slot=3, type_id=1, position=GridPosition(1, 2), hp=1, state=0, in_bounds=True),
+        EnemyState(slot=0, type_id=2, position=GridPosition(0, 0), hp=1, state=0, in_bounds=True),
+        EnemyState(slot=1, type_id=2, position=GridPosition(2, 0), hp=1, state=0, in_bounds=True),
+        EnemyState(slot=2, type_id=2, position=GridPosition(0, 2), hp=1, state=0, in_bounds=True),
+        EnemyState(slot=3, type_id=2, position=GridPosition(2, 2), hp=1, state=0, in_bounds=True),
     )
     agent = HeuristicBaselineAgent(
         config=HeuristicBaselineConfig(
