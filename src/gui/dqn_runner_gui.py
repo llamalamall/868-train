@@ -28,6 +28,7 @@ from src.memory.state_monitor_tui import (
     step_external_control,
 )
 from src.training import evaluate
+from src.training.rewards import RewardWeights
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PATH_LIKE_DESTS = {"exe", "checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}
@@ -197,7 +198,39 @@ def _initial_browse_dir(*, dest: str, current_value: str) -> Path:
     return _REPO_ROOT
 
 
+_SMOKE_TEST_REWARD_DESTS: tuple[str, ...] = (
+    "reward_survival",
+    "reward_step_penalty",
+    "reward_health_delta",
+    "reward_currency_delta",
+    "reward_energy_delta",
+    "reward_score_delta",
+    "reward_siphon_collected",
+    "reward_enemy_cleared",
+    "reward_phase_progress",
+    "reward_map_clear_bonus",
+    "reward_premature_exit_penalty",
+    "reward_invalid_action_penalty",
+    "reward_fail_penalty",
+    "reward_safe_tile_bonus",
+    "reward_danger_tile_penalty",
+    "reward_resource_proximity",
+    "reward_prog_collected_base",
+    "reward_points_collected",
+    "reward_damage_taken_penalty",
+)
+
+
+def _build_smoke_test_reward_profile(**active_rewards: float) -> dict[str, object]:
+    profile: dict[str, object] = {"episodes": 5}
+    for reward_dest in _SMOKE_TEST_REWARD_DESTS:
+        profile[reward_dest] = 0.0
+    profile.update({dest: float(value) for dest, value in active_rewards.items()})
+    return profile
+
+
 def _run_dqn_preset_overrides() -> dict[str, dict[str, object]]:
+    default_weights = RewardWeights()
     return {
         "defaults": {},
         "reward survival": {
@@ -216,6 +249,15 @@ def _run_dqn_preset_overrides() -> dict[str, dict[str, object]]:
             "reward_points_collected": 0.004,
             "reward_phase_progress": 0.2,
         },
+        "smoke test - siphon objective": _build_smoke_test_reward_profile(
+            reward_siphon_collected=default_weights.siphon_collected,
+        ),
+        "smoke test - enemy objective": _build_smoke_test_reward_profile(
+            reward_enemy_cleared=default_weights.enemy_cleared,
+        ),
+        "smoke test - exit objective": _build_smoke_test_reward_profile(
+            reward_map_clear_bonus=default_weights.map_clear_bonus,
+        ),
     }
 
 
@@ -390,6 +432,7 @@ class _ArgForm(ttk.Frame):
                 width=24,
             )
             preset_combo.grid(row=0, column=1, sticky="w", padx=(6, 6))
+            preset_combo.bind("<<ComboboxSelected>>", lambda _event: self._apply_selected_preset())
             apply_preset = ttk.Button(preset_row, text="Apply", command=self._apply_selected_preset)
             apply_preset.grid(row=0, column=2, sticky="w")
             self._bind_help(

@@ -312,7 +312,7 @@ python -m src.cli evaluate compare --checkpoint-a artifacts/checkpoints/dqn-a.js
 `dqn-gui` quality-of-life updates:
 - `exe` and `checkpoint` are pinned as the first controls in the first row.
 - Checkpoint/file browse dialogs default to `artifacts/checkpoints/`.
-- The `DQN Run (train/eval)` tab includes a preset dropdown (`defaults`, `reward survival`, `reward exploration`) to pre-populate common reward configurations.
+- The `DQN Run (train/eval)` tab includes a preset dropdown with baseline and smoke-test profiles (`defaults`, `reward survival`, `reward exploration`, `smoke test - siphon objective`, `smoke test - enemy objective`, `smoke test - exit objective`).
 - Hovering over an argument name now shows that argument help text.
 
 When `--tui` or `--step-through` is enabled, runners automatically use window-targeted input so actions still dispatch to the game while the TUI has focus.
