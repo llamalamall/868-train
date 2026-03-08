@@ -20,11 +20,18 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from src.env import dqn_policy_runner
+from src.memory.state_monitor_tui import (
+    CONTROL_MODE_AUTO,
+    CONTROL_MODE_PAUSED,
+    load_external_control_snapshot,
+    set_external_control_mode,
+    step_external_control,
+)
 from src.training import evaluate
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PATH_LIKE_DESTS = {"exe", "checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}
-_HIDDEN_GUI_DESTS = {"external_status_file"}
+_HIDDEN_GUI_DESTS = {"external_status_file", "external_control_file"}
 _MAX_FORM_COLUMNS = 5
 _CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
 _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
@@ -704,9 +711,14 @@ class DqnRunnerGui(tk.Tk):
         self._status_phase = 0
         self._last_form: _ArgForm | None = None
         self._external_status_file: Path | None = None
+        self._external_control_file: Path | None = None
         self._status_snapshot: tuple[str, str] = ("", "")
         self._monitor_training_line = tk.StringVar(value="training=idle")
         self._monitor_action_line = tk.StringVar(value="action=idle")
+        self._monitor_control_state = tk.StringVar(value="session=idle")
+        self._monitor_pause_button: ttk.Button | None = None
+        self._monitor_step_button: ttk.Button | None = None
+        self._monitor_resume_button: ttk.Button | None = None
         self._monitor_metric_vars: dict[str, tk.StringVar] = {}
         self._epsilon_history: list[float] = []
         self._monitor_total_episodes: int | None = None
@@ -960,7 +972,7 @@ class DqnRunnerGui(tk.Tk):
         monitor = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
         monitor.columnconfigure(0, weight=1)
         monitor.rowconfigure(1, weight=0)
-        monitor.rowconfigure(3, weight=1)
+        monitor.rowconfigure(4, weight=1)
 
         ttk.Label(
             monitor,
@@ -1005,8 +1017,46 @@ class DqnRunnerGui(tk.Tk):
             style="FormHelp.TLabel",
         ).grid(row=2, column=0, sticky="e", padx=(120, 0))
 
+        controls = ttk.Frame(monitor, style="Surface.TFrame")
+        controls.grid(row=3, column=0, sticky="ew", pady=(12, 0))
+        controls.columnconfigure(0, weight=0)
+        controls.columnconfigure(1, weight=0)
+        controls.columnconfigure(2, weight=0)
+        controls.columnconfigure(3, weight=1)
+        controls.columnconfigure(4, weight=0)
+
+        self._monitor_pause_button = ttk.Button(
+            controls,
+            text="Pause Session",
+            command=self._pause_monitor_session,
+            style="Secondary.TButton",
+            state="disabled",
+        )
+        self._monitor_pause_button.grid(row=0, column=0, sticky="w")
+        self._monitor_step_button = ttk.Button(
+            controls,
+            text="Step Once",
+            command=self._step_monitor_session,
+            style="Primary.TButton",
+            state="disabled",
+        )
+        self._monitor_step_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._monitor_resume_button = ttk.Button(
+            controls,
+            text="Resume Auto",
+            command=self._resume_monitor_session,
+            style="Secondary.TButton",
+            state="disabled",
+        )
+        self._monitor_resume_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
+        ttk.Label(
+            controls,
+            textvariable=self._monitor_control_state,
+            style="FormHelp.TLabel",
+        ).grid(row=0, column=4, sticky="e")
+
         graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
-        graph_shell.grid(row=3, column=0, sticky="nsew", pady=(20, 0))
+        graph_shell.grid(row=4, column=0, sticky="nsew", pady=(20, 0))
         graph_shell.columnconfigure(0, weight=1)
         graph_shell.rowconfigure(1, weight=1)
         ttk.Label(graph_shell, textvariable=self._monitor_action_line, style="FormHelp.TLabel").grid(
@@ -1024,6 +1074,7 @@ class DqnRunnerGui(tk.Tk):
         )
         self._epsilon_canvas.grid(row=1, column=0, sticky="nsew")
         self._epsilon_canvas.bind("<Configure>", lambda _: self._draw_epsilon_graph())
+        self._set_monitor_controls_enabled(False)
 
         self._notebook.add(monitor, text="Live Monitor")
 
@@ -1147,24 +1198,33 @@ class DqnRunnerGui(tk.Tk):
 
     def _prepare_command_for_monitor(self, command: list[str]) -> list[str]:
         if len(command) < 3:
-            self._external_status_file = None
+            self._clear_monitor_files()
             self._reset_monitor_estimates()
             return command
         is_dqn_runner = command[1:3] == ["-m", "src.env.dqn_policy_runner"]
         is_eval_compare = command[1:4] == ["-m", "src.training.evaluate", "compare"]
         if not is_dqn_runner and not is_eval_compare:
-            self._external_status_file = None
+            self._clear_monitor_files()
             self._reset_monitor_estimates()
             return command
 
-        previous_status_file = self._external_status_file
-        if previous_status_file is not None:
-            previous_status_file.unlink(missing_ok=True)
+        self._clear_monitor_files()
         status_file = self._create_status_file()
         self._external_status_file = status_file
+        control_file = self._create_control_file() if is_dqn_runner else None
+        self._external_control_file = control_file
         self._status_snapshot = ("", "")
         self._monitor_training_line.set("training=starting")
         self._monitor_action_line.set("action=idle reason=launch")
+        if control_file is not None:
+            snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_AUTO)
+            self._monitor_control_state.set(
+                f"session={snapshot.mode} advance={snapshot.advance_counter}"
+            )
+            self._set_monitor_controls_enabled(True)
+        else:
+            self._monitor_control_state.set("session=unavailable")
+            self._set_monitor_controls_enabled(False)
         self._epsilon_history.clear()
         for variable in self._monitor_metric_vars.values():
             variable.set("-")
@@ -1178,6 +1238,9 @@ class DqnRunnerGui(tk.Tk):
             if token == "--external-status-file":
                 skip_next = index + 1 < len(command)
                 continue
+            if token == "--external-control-file":
+                skip_next = index + 1 < len(command)
+                continue
             if token in {"--tui", "--no-tui"}:
                 continue
             filtered.append(token)
@@ -1185,12 +1248,29 @@ class DqnRunnerGui(tk.Tk):
         if is_dqn_runner or is_eval_compare:
             filtered.append("--no-tui")
         filtered.extend(["--external-status-file", str(status_file)])
+        if is_dqn_runner and control_file is not None:
+            filtered.extend(["--external-control-file", str(control_file)])
         return filtered
 
     def _create_status_file(self) -> Path:
         handle, file_path = tempfile.mkstemp(prefix="868-gui-status-", suffix=".json")
         os.close(handle)
         return Path(file_path)
+
+    def _create_control_file(self) -> Path:
+        handle, file_path = tempfile.mkstemp(prefix="868-gui-control-", suffix=".json")
+        os.close(handle)
+        return Path(file_path)
+
+    def _clear_monitor_files(self) -> None:
+        if self._external_status_file is not None:
+            self._external_status_file.unlink(missing_ok=True)
+            self._external_status_file = None
+        if self._external_control_file is not None:
+            self._external_control_file.unlink(missing_ok=True)
+            self._external_control_file = None
+        self._monitor_control_state.set("session=idle")
+        self._set_monitor_controls_enabled(False)
 
     def _poll_external_status(self) -> None:
         status_file = self._external_status_file
@@ -1208,7 +1288,54 @@ class DqnRunnerGui(tk.Tk):
                     self._monitor_training_line.set(training_line or "training=idle")
                     self._monitor_action_line.set(action_line or "action=idle")
                     self._update_monitor_metrics(training_line)
+        self._refresh_monitor_control_state()
         self.after(200, self._poll_external_status)
+
+    def _set_monitor_controls_enabled(self, enabled: bool) -> None:
+        state = "normal" if enabled else "disabled"
+        for button in (
+            self._monitor_pause_button,
+            self._monitor_step_button,
+            self._monitor_resume_button,
+        ):
+            if button is not None:
+                button.configure(state=state)
+
+    def _refresh_monitor_control_state(self) -> None:
+        control_file = self._external_control_file
+        if control_file is None or not control_file.exists():
+            return
+        snapshot = load_external_control_snapshot(control_file)
+        self._monitor_control_state.set(
+            f"session={snapshot.mode} advance={snapshot.advance_counter}"
+        )
+
+    def _pause_monitor_session(self) -> None:
+        control_file = self._external_control_file
+        if control_file is None:
+            return
+        snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_PAUSED)
+        self._monitor_control_state.set(
+            f"session={snapshot.mode} advance={snapshot.advance_counter}"
+        )
+
+    def _step_monitor_session(self) -> None:
+        control_file = self._external_control_file
+        if control_file is None:
+            return
+        snapshot = step_external_control(control_file)
+        self._monitor_control_state.set(
+            f"session={snapshot.mode} advance={snapshot.advance_counter}"
+        )
+
+    def _resume_monitor_session(self) -> None:
+        control_file = self._external_control_file
+        if control_file is None:
+            return
+        snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_AUTO)
+        self._monitor_control_state.set(
+            f"session={snapshot.mode} advance={snapshot.advance_counter}"
+        )
 
     def _update_monitor_metrics(self, training_line: str) -> None:
         status_values = _parse_status_values(training_line)
@@ -1426,18 +1553,14 @@ class DqnRunnerGui(tk.Tk):
                 self._status_label.configure(
                     style="StatusReady.TLabel" if code == 0 else "StatusStop.TLabel"
                 )
-                if self._external_status_file is not None:
-                    self._external_status_file.unlink(missing_ok=True)
-                    self._external_status_file = None
+                self._clear_monitor_files()
                 self._refresh_preview()
         self.after(100, self._drain_event_queue)
 
     def _on_close(self) -> None:
         if self._process is not None:
             self._stop_process()
-        if self._external_status_file is not None:
-            self._external_status_file.unlink(missing_ok=True)
-            self._external_status_file = None
+        self._clear_monitor_files()
         self.destroy()
 
 

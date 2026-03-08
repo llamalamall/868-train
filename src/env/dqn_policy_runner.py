@@ -109,6 +109,14 @@ def _build_parser() -> argparse.ArgumentParser:
         ),
     )
     parser.add_argument(
+        "--external-control-file",
+        default=None,
+        help=(
+            "Optional JSON file path for external pause/step/resume session controls. "
+            "Useful for GUI monitoring without launching the external TUI."
+        ),
+    )
+    parser.add_argument(
         "--step-through",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -432,6 +440,7 @@ def main() -> None:
         step_through=bool(args.step_through),
         launch_monitor=bool(args.tui),
         external_status_file=(str(args.external_status_file) if args.external_status_file else None),
+        external_control_file=(str(args.external_control_file) if args.external_control_file else None),
     )
 
     checkpoint_path = _resolve_checkpoint_path(args)
