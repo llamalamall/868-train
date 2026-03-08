@@ -853,6 +853,12 @@ def _add_shared_eval_args(
 ) -> None:
     default_weights = RewardWeights()
     parser.add_argument("--exe", default="868-HACK.exe", help="Target executable name.")
+    parser.add_argument(
+        "--launch-exe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Launch --exe when not already running before attempting attach.",
+    )
     parser.add_argument("--episodes", type=int, default=10, help="Number of fixed-seed episodes.")
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
     parser.add_argument("--seed", type=int, default=0, help="Base seed for deterministic eval runs.")
@@ -1058,7 +1064,7 @@ def _build_parser() -> argparse.ArgumentParser:
     _add_shared_eval_args(
         run_parser,
         focus_window_default=True,
-        window_input_default=False,
+        window_input_default=True,
     )
     run_parser.add_argument("--checkpoint", required=True, help="Path to DQN checkpoint JSON.")
     run_parser.add_argument("--label", default=None, help="Optional display label in KPI table.")
@@ -1129,6 +1135,7 @@ def _build_live_env_factory(args: argparse.Namespace) -> Callable[[], GameEnv]:
                 require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
             ),
             reset_sequence=reset_sequence if reset_sequence else None,
+            launch_process_if_missing=bool(args.launch_exe),
             focus_window_on_attach=bool(args.focus_window),
             window_targeted_input=bool(args.window_input),
             action_config=_build_action_config(

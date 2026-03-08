@@ -6,9 +6,11 @@ import ctypes
 import ctypes.wintypes
 import logging
 import os
+import subprocess
 import time
 from dataclasses import dataclass
-from typing import Protocol
+from pathlib import Path
+from typing import Callable, Protocol
 
 LOGGER = logging.getLogger(__name__)
 
@@ -22,6 +24,10 @@ INVALID_HANDLE_VALUE = ctypes.c_void_p(-1).value
 
 class ProcessAttachError(RuntimeError):
     """Raised when process discovery or process attach fails."""
+
+
+class ProcessNotFoundError(ProcessAttachError):
+    """Raised when the requested process executable is not currently running."""
 
 
 @dataclass(frozen=True)
@@ -141,7 +147,7 @@ def _attach_once(
     if resolved_pid is None and resolved_name is not None:
         resolved_pid = backend.find_pid_by_executable(resolved_name)
         if resolved_pid is None:
-            raise ProcessAttachError(f"Process not found for executable '{resolved_name}'.")
+            raise ProcessNotFoundError(f"Process not found for executable '{resolved_name}'.")
 
     if resolved_pid is None:
         raise ProcessAttachError("Unable to resolve target process PID.")
@@ -149,7 +155,7 @@ def _attach_once(
     if resolved_name is None:
         resolved_name = backend.get_executable_name(resolved_pid)
         if resolved_name is None:
-            raise ProcessAttachError(f"PID {resolved_pid} is not running.")
+            raise ProcessNotFoundError(f"PID {resolved_pid} is not running.")
 
     handle = backend.open_process(resolved_pid)
     if handle is None:
@@ -161,12 +167,56 @@ def _attach_once(
     return AttachedProcess(pid=resolved_pid, executable_name=resolved_name, handle=handle)
 
 
+def _resolve_launch_command(executable_name: str) -> tuple[list[str], Path | None]:
+    requested = Path(executable_name).expanduser()
+    if requested.is_absolute() or requested.parent != Path("."):
+        if requested.exists():
+            return [str(requested)], requested.parent
+        raise ProcessAttachError(f"Configured executable path does not exist: {requested}")
+
+    cwd_candidate = Path.cwd() / requested
+    if cwd_candidate.exists():
+        return [str(cwd_candidate)], cwd_candidate.parent
+
+    # Fallback to configured binary path when names match.
+    try:
+        from src.config.fingerprint import FingerprintValidationError, load_binary_fingerprint_config
+
+        fingerprint = load_binary_fingerprint_config()
+        if (
+            fingerprint.binary_path
+            and fingerprint.binary_path.exists()
+            and fingerprint.binary_path.name.lower() == requested.name.lower()
+        ):
+            return [str(fingerprint.binary_path)], fingerprint.binary_path.parent
+    except (ImportError, FingerprintValidationError, OSError, ValueError):
+        pass
+
+    return [executable_name], None
+
+
+def launch_process(executable_name: str, *, logger: logging.Logger | None = None) -> None:
+    """Launch an executable and return immediately without waiting for exit."""
+    active_logger = logger or LOGGER
+    command, launch_cwd = _resolve_launch_command(executable_name)
+    creationflags = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+    try:
+        subprocess.Popen(command, cwd=(str(launch_cwd) if launch_cwd else None), creationflags=creationflags)
+    except OSError as error:
+        raise ProcessAttachError(
+            f"Failed to launch executable '{executable_name}' with command {command}: {error}."
+        ) from error
+    active_logger.info("Launched executable %s", command[0])
+
+
 def attach_process(
     *,
     pid: int | None = None,
     executable_name: str | None = None,
     retries: int = 3,
     retry_delay_seconds: float = 0.5,
+    launch_if_missing: bool = False,
+    launcher: Callable[[str], None] | None = None,
     backend: ProcessBackend | None = None,
     logger: logging.Logger | None = None,
 ) -> AttachedProcess:
@@ -176,6 +226,8 @@ def attach_process(
 
     active_logger = logger or LOGGER
     active_backend = backend or _default_backend()
+    active_launcher = launcher or (lambda executable: launch_process(executable, logger=active_logger))
+    launch_attempted = False
     last_error: ProcessAttachError | None = None
 
     for attempt in range(1, retries + 1):
@@ -191,6 +243,35 @@ def attach_process(
                 attached.executable_name,
             )
             return attached
+        except ProcessNotFoundError as error:
+            last_error = error
+            should_launch = (
+                launch_if_missing
+                and not launch_attempted
+                and pid is None
+                and executable_name is not None
+            )
+            if should_launch:
+                launch_attempted = True
+                try:
+                    active_launcher(executable_name)
+                except ProcessAttachError as launch_error:
+                    last_error = launch_error
+                    active_logger.warning("Failed to auto-launch '%s': %s", executable_name, launch_error)
+                    break
+                except Exception as launch_error:  # pragma: no cover - defensive catch for custom launchers
+                    last_error = ProcessAttachError(
+                        f"Unexpected launcher failure for '{executable_name}': {launch_error}"
+                    )
+                    active_logger.warning("%s", last_error)
+                    break
+                if attempt < retries:
+                    time.sleep(retry_delay_seconds)
+                continue
+
+            active_logger.warning("Process attach attempt %s/%s failed: %s", attempt, retries, error)
+            if attempt < retries:
+                time.sleep(retry_delay_seconds)
         except ProcessAttachError as error:
             last_error = error
             active_logger.warning("Process attach attempt %s/%s failed: %s", attempt, retries, error)

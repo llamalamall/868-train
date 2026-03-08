@@ -21,6 +21,12 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     heuristic_defaults = HeuristicBaselineConfig()
     parser.add_argument("--exe", default="868-HACK.exe", help="Target executable name.")
+    parser.add_argument(
+        "--launch-exe",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Launch --exe when not already running before attempting attach.",
+    )
     parser.add_argument("--episodes", type=int, default=3, help="Number of episodes to run.")
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed for tie-breaks.")
@@ -52,7 +58,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--window-input",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Use window-targeted PostMessage input instead of global SendInput.",
     )
     parser.add_argument(
@@ -285,6 +291,7 @@ def main() -> None:
                 require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
             ),
             reset_sequence=reset_sequence if reset_sequence else None,
+            launch_process_if_missing=bool(args.launch_exe),
             focus_window_on_attach=bool(args.focus_window),
             window_targeted_input=effective_window_input,
             action_config=_build_action_config(

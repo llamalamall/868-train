@@ -749,6 +749,7 @@ class GameEnv:
         config: GameEnvConfig = GameEnvConfig(),
         telemetry_logger: TelemetryLogger | None = None,
         reset_sequence: tuple[str, ...] | None = ("confirm",),
+        launch_process_if_missing: bool = True,
         focus_window_on_attach: bool = True,
         window_targeted_input: bool = False,
         action_config: ActionConfig | None = None,
@@ -760,6 +761,7 @@ class GameEnv:
             executable_name=executable_name,
             retries=5,
             retry_delay_seconds=0.5,
+            launch_if_missing=launch_process_if_missing,
         )
         try:
             attached_window = attach_window(
