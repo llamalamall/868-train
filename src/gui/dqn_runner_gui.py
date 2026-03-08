@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import math
 import queue
 import subprocess
 import sys
@@ -17,6 +18,7 @@ from src.training import evaluate
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PATH_LIKE_DESTS = {"exe", "checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}
+_MAX_FORM_COLUMNS = 5
 
 
 def _iter_parser_actions(parser: argparse.ArgumentParser) -> tuple[argparse.Action, ...]:
@@ -71,6 +73,70 @@ def _default_text(action: argparse.Action) -> str:
     return str(action.default)
 
 
+def _display_label(action: argparse.Action) -> str:
+    return _primary_option(action).removeprefix("--")
+
+
+def _is_numeric_action(action: argparse.Action) -> bool:
+    if action.type in {int, float}:
+        return True
+    default = action.default
+    return isinstance(default, (int, float)) and not isinstance(default, bool)
+
+
+def _numeric_step(action: argparse.Action) -> int | float:
+    default = action.default
+    is_int_like = action.type is int or (
+        isinstance(default, int) and not isinstance(default, bool)
+    )
+    if is_int_like:
+        magnitude = abs(int(default)) if isinstance(default, int) else 0
+        if magnitude >= 10_000:
+            return 1_000
+        if magnitude >= 1_000:
+            return 100
+        if magnitude >= 100:
+            return 10
+        if magnitude >= 20:
+            return 5
+        return 1
+
+    magnitude = abs(float(default)) if isinstance(default, (int, float)) else 0.0
+    if magnitude <= 0:
+        return 0.1
+    exponent = math.floor(math.log10(magnitude))
+    return float(10 ** (exponent - 1))
+
+
+def _max_form_columns(action_count: int) -> int:
+    if action_count >= 30:
+        return _MAX_FORM_COLUMNS
+    if action_count >= 18:
+        return 4
+    return 3
+
+
+def _field_column_span(action: argparse.Action, *, max_columns: int) -> int:
+    if max_columns < 4:
+        return 1
+    if action.dest in _PATH_LIKE_DESTS:
+        return 2
+    if _is_numeric_action(action) or _is_boolean_optional(action) or action.choices is not None:
+        return 1
+    return 2
+
+
+def _widget_width_for_action(action: argparse.Action) -> int:
+    if action.dest in _PATH_LIKE_DESTS:
+        return 30
+    if _is_numeric_action(action):
+        return 8
+    if action.choices is not None:
+        longest_choice = max(len(str(choice)) for choice in action.choices)
+        return max(10, min(longest_choice + 3, 18))
+    return 16
+
+
 def _validate_text_input(action: argparse.Action, *, value: str, field_name: str) -> None:
     if action.type is not None:
         try:
@@ -106,81 +172,142 @@ class _ArgForm(ttk.Frame):
         parser: argparse.ArgumentParser,
         module_args: tuple[str, ...],
     ) -> None:
-        super().__init__(master)
+        super().__init__(master, padding=(4, 4, 4, 2))
         self._profile_id = profile_id
         self._module_args = module_args
         self._fields: list[_FormField] = []
+        self._default_help = "Focus a field to show option help."
+        self._help_text = tk.StringVar(value=self._default_help)
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(0, weight=1)
-        canvas = tk.Canvas(self, highlightthickness=0)
-        canvas.grid(row=0, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(self, orient="vertical", command=canvas.yview)
-        scrollbar.grid(row=0, column=1, sticky="ns")
-        canvas.configure(yscrollcommand=scrollbar.set)
 
-        body = ttk.Frame(canvas, padding=10)
-        body.columnconfigure(1, weight=1)
-        window = canvas.create_window((0, 0), window=body, anchor="nw")
+        body = ttk.Frame(self, padding=(4, 2, 4, 0))
+        body.grid(row=0, column=0, sticky="nsew")
 
-        def _sync_scrollregion(_: tk.Event[tk.Misc]) -> None:
-            canvas.configure(scrollregion=canvas.bbox("all"))
-
-        def _sync_inner_width(event: tk.Event[tk.Misc]) -> None:
-            canvas.itemconfigure(window, width=event.width)
-
-        body.bind("<Configure>", _sync_scrollregion)
-        canvas.bind("<Configure>", _sync_inner_width)
+        actions = _iter_parser_actions(parser)
+        max_columns = _max_form_columns(len(actions))
+        for column_index in range(max_columns):
+            body.columnconfigure(column_index, weight=1, uniform="arg-columns")
 
         row_index = 0
-        for action in _iter_parser_actions(parser):
-            field_label = _primary_option(action)
-            help_text = action.help or ""
+        column_index = 0
+        for action in actions:
+            span = min(_field_column_span(action, max_columns=max_columns), max_columns)
+            if column_index + span > max_columns:
+                row_index += 1
+                column_index = 0
 
-            ttk.Label(body, text=field_label).grid(row=row_index, column=0, sticky="nw", padx=(0, 8))
+            card = ttk.Frame(body, padding=(3, 1, 3, 1))
+            card.grid(
+                row=row_index,
+                column=column_index,
+                columnspan=span,
+                sticky="ew",
+                padx=2,
+                pady=1,
+            )
+            card.columnconfigure(0, weight=1)
+
+            help_text = action.help or ""
+            label_text = _display_label(action)
             if _is_boolean_optional(action):
                 variable = tk.BooleanVar(value=bool(action.default))
-                checkbox = ttk.Checkbutton(body, variable=variable, text=help_text)
-                checkbox.grid(row=row_index, column=1, sticky="w", padx=(0, 8), pady=(0, 8))
+                widget = ttk.Checkbutton(card, variable=variable, text=label_text)
+                widget.grid(row=0, column=0, sticky="w")
+                self._bind_help(widget, help_text)
                 self._fields.append(_FormField(action=action, variable=variable))
-                row_index += 1
-                continue
-
-            if action.choices is not None:
-                default_value = _default_text(action)
-                initial = default_value or str(next(iter(action.choices)))
-                variable = tk.StringVar(value=initial)
-                widget = ttk.Combobox(
-                    body,
-                    textvariable=variable,
-                    values=[str(choice) for choice in action.choices],
-                    state="readonly",
-                )
             else:
+                ttk.Label(card, text=label_text).grid(row=0, column=0, sticky="w")
                 variable = tk.StringVar(value=_default_text(action))
-                widget = ttk.Entry(body, textvariable=variable, width=48)
+                widget = self._build_value_widget(card, action=action, variable=variable)
+                self._bind_help(widget, help_text)
+                self._fields.append(_FormField(action=action, variable=variable))
 
-            widget.grid(row=row_index, column=1, sticky="ew", padx=(0, 8))
-            if action.dest in _PATH_LIKE_DESTS:
-                browse_button = ttk.Button(
-                    body,
-                    text="Browse",
-                    command=lambda var=variable, dest=action.dest: self._browse_path(var, dest),
-                )
-                browse_button.grid(row=row_index, column=2, sticky="e", padx=(0, 8))
-            if help_text:
-                ttk.Label(body, text=help_text, foreground="#555555").grid(
-                    row=row_index + 1,
-                    column=1,
-                    columnspan=2,
-                    sticky="w",
-                    padx=(0, 8),
-                    pady=(0, 8),
-                )
-                row_index += 2
-            else:
+            column_index += span
+            if column_index >= max_columns:
                 row_index += 1
-            self._fields.append(_FormField(action=action, variable=variable))
+                column_index = 0
+
+        help_label = ttk.Label(
+            self,
+            textvariable=self._help_text,
+            foreground="#555555",
+            padding=(8, 4, 8, 2),
+            anchor="w",
+        )
+        help_label.grid(row=1, column=0, sticky="ew")
+
+    def _bind_help(self, widget: tk.Misc, help_text: str) -> None:
+        if not help_text:
+            return
+
+        def _on_focus_in(_: tk.Event[tk.Misc]) -> None:
+            self._help_text.set(help_text)
+
+        def _on_focus_out(_: tk.Event[tk.Misc]) -> None:
+            self._help_text.set(self._default_help)
+
+        widget.bind("<FocusIn>", _on_focus_in)
+        widget.bind("<FocusOut>", _on_focus_out)
+
+    def _build_value_widget(
+        self,
+        card: ttk.Frame,
+        *,
+        action: argparse.Action,
+        variable: tk.StringVar,
+    ) -> tk.Misc:
+        if action.choices is not None:
+            default_value = _default_text(action)
+            initial = default_value or str(next(iter(action.choices)))
+            variable.set(initial)
+            widget = ttk.Combobox(
+                card,
+                textvariable=variable,
+                values=[str(choice) for choice in action.choices],
+                state="readonly",
+                width=_widget_width_for_action(action),
+            )
+            widget.grid(row=1, column=0, sticky="w")
+            return widget
+
+        if _is_numeric_action(action):
+            widget = ttk.Spinbox(
+                card,
+                textvariable=variable,
+                from_=-1_000_000_000,
+                to=1_000_000_000,
+                increment=_numeric_step(action),
+                width=_widget_width_for_action(action),
+                justify="right",
+            )
+            widget.grid(row=1, column=0, sticky="w")
+            return widget
+
+        if action.dest in _PATH_LIKE_DESTS:
+            row = ttk.Frame(card)
+            row.grid(row=1, column=0, sticky="ew")
+            row.columnconfigure(0, weight=1)
+            widget = ttk.Entry(
+                row,
+                textvariable=variable,
+                width=max(_widget_width_for_action(action), 24),
+            )
+            widget.grid(row=0, column=0, sticky="ew")
+            browse_button = ttk.Button(
+                row,
+                text="...",
+                width=3,
+                command=lambda var=variable, dest=action.dest: self._browse_path(var, dest),
+            )
+            browse_button.grid(row=0, column=1, sticky="e", padx=(4, 0))
+            self._bind_help(browse_button, action.help or "")
+            return widget
+
+        widget = ttk.Entry(card, textvariable=variable, width=_widget_width_for_action(action))
+        widget.grid(row=1, column=0, sticky="ew")
+        return widget
 
     def _browse_path(self, variable: tk.StringVar, dest: str) -> None:
         current_value = variable.get().strip()
@@ -262,8 +389,8 @@ class DqnRunnerGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("868 DQN Launcher")
-        self.geometry("1100x820")
-        self.minsize(900, 680)
+        self.geometry("1240x860")
+        self.minsize(1040, 700)
 
         self._event_queue: queue.Queue[tuple[str, str | int]] = queue.Queue()
         self._process: subprocess.Popen[str] | None = None
@@ -271,7 +398,7 @@ class DqnRunnerGui(tk.Tk):
         self._forms: dict[str, _ArgForm] = {}
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
+        self.rowconfigure(1, weight=4)
         self.rowconfigure(3, weight=1)
 
         header = ttk.Label(
@@ -309,7 +436,7 @@ class DqnRunnerGui(tk.Tk):
         output_frame.columnconfigure(0, weight=1)
         output_frame.rowconfigure(0, weight=1)
 
-        self._output = tk.Text(output_frame, wrap="none")
+        self._output = tk.Text(output_frame, wrap="none", height=10)
         self._output.grid(row=0, column=0, sticky="nsew")
         output_scroll = ttk.Scrollbar(output_frame, orient="vertical", command=self._output.yview)
         output_scroll.grid(row=0, column=1, sticky="ns")
@@ -447,4 +574,3 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
-
