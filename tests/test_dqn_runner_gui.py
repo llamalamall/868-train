@@ -6,6 +6,7 @@ import pytest
 
 from src.env import dqn_policy_runner
 from src.gui.dqn_runner_gui import (
+    _SMOKE_TEST_REWARD_DESTS,
     _CHECKPOINT_DIR,
     _estimate_epsilon_eta_seconds,
     _format_duration_seconds,
@@ -15,6 +16,7 @@ from src.gui.dqn_runner_gui import (
     _run_dqn_preset_overrides,
     _sort_form_actions,
 )
+from src.training.rewards import RewardWeights
 
 
 def test_sort_form_actions_prioritizes_exe_and_checkpoint() -> None:
@@ -35,6 +37,26 @@ def test_run_dqn_presets_include_expected_profiles() -> None:
     assert "defaults" in presets
     assert "reward survival" in presets
     assert "reward exploration" in presets
+    assert "smoke test - siphon objective" in presets
+    assert "smoke test - enemy objective" in presets
+    assert "smoke test - exit objective" in presets
+
+
+def test_smoke_test_presets_zero_all_rewards_except_target_objective() -> None:
+    presets = _run_dqn_preset_overrides()
+    default_weights = RewardWeights()
+    smoke_profiles = {
+        "smoke test - siphon objective": ("reward_siphon_collected", default_weights.siphon_collected),
+        "smoke test - enemy objective": ("reward_enemy_cleared", default_weights.enemy_cleared),
+        "smoke test - exit objective": ("reward_map_clear_bonus", default_weights.map_clear_bonus),
+    }
+
+    for profile_name, (active_reward_dest, active_reward_value) in smoke_profiles.items():
+        profile = presets[profile_name]
+        assert profile["episodes"] == 5
+        for reward_dest in _SMOKE_TEST_REWARD_DESTS:
+            expected_value = active_reward_value if reward_dest == active_reward_dest else 0.0
+            assert profile[reward_dest] == pytest.approx(expected_value)
 
 
 def test_parse_episode_progress_handles_dqn_episode_id_with_fallback_total() -> None:
