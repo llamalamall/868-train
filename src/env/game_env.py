@@ -191,7 +191,10 @@ class GameEnvConfig:
     reset_timeout_seconds: float = 15.0
     state_timeout_seconds: float = 2.0
     state_poll_interval_seconds: float = 0.10
-    post_action_poll_delay_seconds: float = 0.05
+    post_action_poll_delay_seconds: float = 0.2
+    wait_for_action_processing: bool = False
+    action_ack_timeout_seconds: float = 0.35
+    action_ack_poll_interval_seconds: float = 0.05
     post_reset_grace_seconds: float = 0.10
     require_non_terminal_on_reset: bool = True
     prog_slot_backoff_steps: int = 3
@@ -470,7 +473,15 @@ class GameEnv:
         if self._config.post_action_poll_delay_seconds > 0:
             self._sleep_fn(self._config.post_action_poll_delay_seconds)
 
-        current_state = self._read_state_once_for_step()
+        (
+            current_state,
+            action_acknowledged,
+            action_ack_reason,
+            action_ack_checks,
+        ) = self._read_state_after_action(
+            action=action,
+            previous_state=previous_state,
+        )
         done = _state_is_terminal(current_state)
         terminal_reason = "state:fail_state" if done else None
 
@@ -503,6 +514,9 @@ class GameEnv:
             previous_state=previous_state,
             current_state=current_state,
         )
+        if not action_acknowledged and action != "wait" and invalid_action_reason is None:
+            action_effective = False
+            invalid_action_reason = "action_not_acknowledged"
         siphons_remaining = _count_siphons(current_state)
         enemies_remaining = _count_live_enemies(current_state)
         premature_exit_attempt = (
@@ -530,6 +544,9 @@ class GameEnv:
             "terminal_reason": terminal_reason,
             "action_effective": action_effective,
             "invalid_action_reason": invalid_action_reason,
+            "action_acknowledged": action_acknowledged,
+            "action_ack_reason": action_ack_reason,
+            "action_ack_checks": action_ack_checks,
             "premature_exit_attempt": premature_exit_attempt,
         }
         info.update(detector_info)
@@ -559,6 +576,61 @@ class GameEnv:
         self._current_state = current_state
         self._step_index += 1
         return (current_state, reward_value, done, info)
+
+    def _read_state_after_action(
+        self,
+        *,
+        action: str,
+        previous_state: GameStateSnapshot,
+    ) -> tuple[GameStateSnapshot, bool, str, int]:
+        current_state = self._read_state_once_for_step()
+        polls = 1
+        acknowledged, reason = self._is_action_acknowledged(
+            action=action,
+            previous_state=previous_state,
+            current_state=current_state,
+        )
+        if acknowledged:
+            return (current_state, True, reason, polls)
+
+        if action == "wait" or not bool(self._config.wait_for_action_processing):
+            return (current_state, True, "action_ack_disabled", polls)
+
+        timeout_seconds = max(float(self._config.action_ack_timeout_seconds), 0.0)
+        if timeout_seconds <= 0:
+            return (current_state, False, "action_ack_timeout", polls)
+
+        poll_interval = max(float(self._config.action_ack_poll_interval_seconds), 0.0)
+        deadline = self._monotonic_fn() + timeout_seconds
+        while self._monotonic_fn() <= deadline:
+            if poll_interval > 0:
+                self._sleep_fn(poll_interval)
+            current_state = self._read_state_once_for_step()
+            polls += 1
+            acknowledged, reason = self._is_action_acknowledged(
+                action=action,
+                previous_state=previous_state,
+                current_state=current_state,
+            )
+            if acknowledged:
+                return (current_state, True, reason, polls)
+
+        return (current_state, False, "action_ack_timeout", polls)
+
+    def _is_action_acknowledged(
+        self,
+        *,
+        action: str,
+        previous_state: GameStateSnapshot,
+        current_state: GameStateSnapshot,
+    ) -> tuple[bool, str]:
+        if action == "wait":
+            return (True, "wait_action")
+        if _state_is_terminal(current_state):
+            return (True, "terminal_state")
+        if self._transition_has_effect(previous_state=previous_state, current_state=current_state):
+            return (True, "state_changed")
+        return (False, "no_observed_effect")
 
     def _space_action_allowed(self, snapshot: GameStateSnapshot | None) -> bool:
         if snapshot is None:

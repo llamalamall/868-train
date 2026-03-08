@@ -21,6 +21,10 @@ def test_heuristic_runner_parser_defaults() -> None:
     assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
+    assert args.post_action_delay == 0.2
+    assert args.wait_for_action_processing is True
+    assert args.action_ack_timeout == 0.35
+    assert args.action_ack_poll_interval == 0.05
     assert args.reset_sequence == "confirm"
     assert args.verbose_actions is False
 
@@ -41,6 +45,13 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
             "--step-through",
             "--no-require-non-terminal-reset",
             "--no-tui",
+            "--post-action-delay",
+            "0.45",
+            "--no-wait-for-action-processing",
+            "--action-ack-timeout",
+            "1.4",
+            "--action-ack-poll-interval",
+            "0.3",
             "--low-health-threshold",
             "2",
             "--enemy-prediction-horizon-steps",
@@ -62,6 +73,10 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
     assert args.step_through is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False
+    assert args.post_action_delay == 0.45
+    assert args.wait_for_action_processing is False
+    assert args.action_ack_timeout == 1.4
+    assert args.action_ack_poll_interval == 0.3
     assert args.low_health_threshold == 2
     assert args.enemy_prediction_horizon_steps == 5
     assert args.verbose_actions is True

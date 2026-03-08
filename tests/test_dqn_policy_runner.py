@@ -33,6 +33,10 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
+    assert args.post_action_delay == 0.2
+    assert args.wait_for_action_processing is True
+    assert args.action_ack_timeout == 0.35
+    assert args.action_ack_poll_interval == 0.05
     assert args.gamma == 0.99
     assert args.learning_rate == 0.005
     assert args.min_replay_size == 256
@@ -66,6 +70,13 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
             "--step-through",
             "--no-require-non-terminal-reset",
             "--no-tui",
+            "--post-action-delay",
+            "0.4",
+            "--no-wait-for-action-processing",
+            "--action-ack-timeout",
+            "1.5",
+            "--action-ack-poll-interval",
+            "0.2",
             "--gamma",
             "0.9",
             "--learning-rate",
@@ -86,6 +97,10 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
     assert args.step_through is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False
+    assert args.post_action_delay == 0.4
+    assert args.wait_for_action_processing is False
+    assert args.action_ack_timeout == 1.5
+    assert args.action_ack_poll_interval == 0.2
     assert args.gamma == 0.9
     assert args.learning_rate == 0.02
     assert args.target_sync_interval == 50
