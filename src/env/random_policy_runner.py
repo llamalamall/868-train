@@ -89,10 +89,26 @@ def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
     return RewardConfig(
         weights=RewardWeights(
             survival=float(args.reward_survival),
+            step_penalty=float(args.reward_step_penalty),
             health_delta=float(args.reward_health_delta),
             currency_delta=float(args.reward_currency_delta),
+            energy_delta=float(args.reward_energy_delta),
+            score_delta=float(args.reward_score_delta),
+            siphon_collected=float(args.reward_siphon_collected),
+            enemy_cleared=float(args.reward_enemy_cleared),
+            phase_progress=float(args.reward_phase_progress),
+            map_clear_bonus=float(args.reward_map_clear_bonus),
+            premature_exit_penalty=float(args.reward_premature_exit_penalty),
+            invalid_action_penalty=float(args.reward_invalid_action_penalty),
             fail_penalty=float(args.reward_fail_penalty),
-        )
+            safe_tile_bonus=float(args.reward_safe_tile_bonus),
+            danger_tile_penalty=float(args.reward_danger_tile_penalty),
+            resource_proximity=float(args.reward_resource_proximity),
+            prog_collected_base=float(args.reward_prog_collected_base),
+            points_collected=float(args.reward_points_collected),
+            damage_taken_penalty=float(args.reward_damage_taken_penalty),
+        ),
+        reward_clip_abs=float(args.reward_clip_abs),
     )
 
 
@@ -112,25 +128,59 @@ def _build_reward_fn(
             current_state=current_state,
             done=done,
             config=reward_config,
+            info=info,
         )
         info["reward_breakdown"] = {
             "survival": result.breakdown.survival,
+            "step_penalty": result.breakdown.step_penalty,
             "health_change": result.breakdown.health_change,
             "currency_change": result.breakdown.currency_change,
+            "energy_change": result.breakdown.energy_change,
+            "score_change": result.breakdown.score_change,
+            "siphon_collected": result.breakdown.siphon_collected,
+            "enemy_cleared": result.breakdown.enemy_cleared,
+            "phase_progress": result.breakdown.phase_progress,
+            "map_clear_bonus": result.breakdown.map_clear_bonus,
+            "premature_exit_penalty": result.breakdown.premature_exit_penalty,
+            "invalid_action_penalty": result.breakdown.invalid_action_penalty,
             "fail_penalty": result.breakdown.fail_penalty,
+            "safe_tile_bonus": result.breakdown.safe_tile_bonus,
+            "danger_tile_penalty": result.breakdown.danger_tile_penalty,
+            "resource_proximity": result.breakdown.resource_proximity,
+            "prog_collected": result.breakdown.prog_collected,
+            "points_collected": result.breakdown.points_collected,
+            "damage_taken_penalty": result.breakdown.damage_taken_penalty,
             "total": result.total,
         }
         if print_breakdown:
             print(
                 "reward step={step} action={action} total={total:.3f} "
-                "survival={survival:.3f} health={health:.3f} "
-                "currency={currency:.3f} fail_penalty={fail_penalty:.3f} done={done}".format(
+                "survival={survival:.3f} step_penalty={step_penalty:.3f} health={health:.3f} "
+                "currency={currency:.3f} energy={energy:.3f} score={score:.3f} "
+                "siphon={siphon:.3f} enemy={enemy:.3f} "
+                "safe={safe:.3f} danger={danger:.3f} proximity={proximity:.3f} "
+                "prog={prog:.3f} points={points:.3f} damage_taken={damage:.3f} "
+                "premature_exit={premature:.3f} invalid={invalid:.3f} "
+                "fail_penalty={fail_penalty:.3f} done={done}".format(
                     step=info.get("step_index"),
                     action=info.get("action"),
                     total=result.total,
                     survival=result.breakdown.survival,
+                    step_penalty=result.breakdown.step_penalty,
                     health=result.breakdown.health_change,
                     currency=result.breakdown.currency_change,
+                    energy=result.breakdown.energy_change,
+                    score=result.breakdown.score_change,
+                    siphon=result.breakdown.siphon_collected,
+                    enemy=result.breakdown.enemy_cleared,
+                    safe=result.breakdown.safe_tile_bonus,
+                    danger=result.breakdown.danger_tile_penalty,
+                    proximity=result.breakdown.resource_proximity,
+                    prog=result.breakdown.prog_collected,
+                    points=result.breakdown.points_collected,
+                    damage=result.breakdown.damage_taken_penalty,
+                    premature=result.breakdown.premature_exit_penalty,
+                    invalid=result.breakdown.invalid_action_penalty,
                     fail_penalty=result.breakdown.fail_penalty,
                     done=done,
                 )
@@ -214,6 +264,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reset watchdog timeout in seconds.",
     )
     parser.add_argument(
+        "--prog-backoff-steps",
+        type=int,
+        default=3,
+        help="Fallback prog-slot backoff steps after ineffective attempts.",
+    )
+    parser.add_argument(
         "--require-non-terminal-reset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -224,6 +280,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=default_weights.survival,
         help="Survival reward applied for non-terminal steps.",
+    )
+    parser.add_argument(
+        "--reward-step-penalty",
+        type=float,
+        default=default_weights.step_penalty,
+        help="Per-step penalty magnitude applied each transition.",
     )
     parser.add_argument(
         "--reward-health-delta",
@@ -238,10 +300,100 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Weight multiplied by (current_currency - previous_currency).",
     )
     parser.add_argument(
+        "--reward-energy-delta",
+        type=float,
+        default=default_weights.energy_delta,
+        help="Weight multiplied by (current_energy - previous_energy).",
+    )
+    parser.add_argument(
+        "--reward-score-delta",
+        type=float,
+        default=default_weights.score_delta,
+        help="Weight multiplied by (current_score - previous_score) when score is available.",
+    )
+    parser.add_argument(
+        "--reward-siphon-collected",
+        type=float,
+        default=default_weights.siphon_collected,
+        help="Reward per siphon removed from map.",
+    )
+    parser.add_argument(
+        "--reward-enemy-cleared",
+        type=float,
+        default=default_weights.enemy_cleared,
+        help="Reward per live enemy removed from map.",
+    )
+    parser.add_argument(
+        "--reward-phase-progress",
+        type=float,
+        default=default_weights.phase_progress,
+        help="Weight for progress toward active objective (siphon->enemy->exit).",
+    )
+    parser.add_argument(
+        "--reward-map-clear-bonus",
+        type=float,
+        default=default_weights.map_clear_bonus,
+        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+    )
+    parser.add_argument(
+        "--reward-premature-exit-penalty",
+        type=float,
+        default=default_weights.premature_exit_penalty,
+        help="Penalty when stepping onto exit before objectives are complete.",
+    )
+    parser.add_argument(
+        "--reward-invalid-action-penalty",
+        type=float,
+        default=default_weights.invalid_action_penalty,
+        help="Penalty when action appears ineffective/invalid.",
+    )
+    parser.add_argument(
         "--reward-fail-penalty",
         type=float,
         default=default_weights.fail_penalty,
         help="Terminal fail penalty magnitude (applied as negative).",
+    )
+    parser.add_argument(
+        "--reward-safe-tile-bonus",
+        type=float,
+        default=default_weights.safe_tile_bonus,
+        help="Bonus on steps where the current tile is not threatened by enemies.",
+    )
+    parser.add_argument(
+        "--reward-danger-tile-penalty",
+        type=float,
+        default=default_weights.danger_tile_penalty,
+        help="Penalty on steps where the current tile is threatened by enemies.",
+    )
+    parser.add_argument(
+        "--reward-resource-proximity",
+        type=float,
+        default=default_weights.resource_proximity,
+        help="Reward per tile of progress toward nearest harvest target.",
+    )
+    parser.add_argument(
+        "--reward-prog-collected-base",
+        type=float,
+        default=default_weights.prog_collected_base,
+        help="Base reward for each newly collected prog before priority bonus.",
+    )
+    parser.add_argument(
+        "--reward-points-collected",
+        type=float,
+        default=default_weights.points_collected,
+        help="Reward per map-point unit removed from available board points.",
+    )
+    parser.add_argument(
+        "--reward-damage-taken-penalty",
+        type=float,
+        default=default_weights.damage_taken_penalty,
+        help="Penalty multiplier applied to negative health deltas.",
+    )
+    parser.add_argument(
+        "--reward-clip-abs",
+        type=float,
+        default=5.0,
+        help="Absolute value used to clip final reward per step.",
     )
     parser.add_argument(
         "--print-reward-breakdown",
@@ -274,6 +426,7 @@ def main() -> None:
     config = GameEnvConfig(
         step_timeout_seconds=args.step_timeout,
         reset_timeout_seconds=args.reset_timeout,
+        prog_slot_backoff_steps=max(int(args.prog_backoff_steps), 0),
         require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
     )
     action_config = _build_action_config(

@@ -97,6 +97,34 @@ def test_extract_state_returns_normalized_snapshot_for_core_fields() -> None:
     assert snapshot.fail_state.value is False
 
 
+def test_extract_state_decodes_optional_action_availability_fields() -> None:
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x200000),
+            _entry("player_energy", "int32", 0x200004),
+            _entry("player_credits", "int32", 0x200008),
+            _entry("can_siphon_now", "bool", 0x20000C),
+            _entry("prog_slots_available_mask", "uint32", 0x200010),
+        ),
+    )
+    backend = FakeMemoryBackend(
+        memory_by_address={
+            0x200000: struct.pack("<i", 12),
+            0x200004: struct.pack("<i", 5),
+            0x200008: struct.pack("<i", 41),
+            0x20000C: b"\x01",
+            0x200010: struct.pack("<I", 0b101),
+        }
+    )
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    snapshot = extract_state(reader=reader, registry=registry)
+
+    assert snapshot.can_siphon_now is True
+    assert snapshot.prog_slots_available_mask == 0b101
+
+
 def test_extract_state_marks_missing_core_field_with_explicit_metadata() -> None:
     registry = OffsetRegistry(
         version=1,

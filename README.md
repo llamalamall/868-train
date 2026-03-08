@@ -95,6 +95,12 @@ python -m src.cli evaluate compare --checkpoint-a artifacts/checkpoints/dqn-a.js
 
 `evaluate compare` launches the monitor TUI by default and defaults to `--window-input --no-focus-window` so compare runs can continue while keeping terminal focus.
 
+`dqn-gui` quality-of-life updates:
+- `exe` and `checkpoint` are pinned as the first controls in the first row.
+- Checkpoint/file browse dialogs default to `artifacts/checkpoints/`.
+- The `DQN Run (train/eval)` tab includes a preset dropdown (`defaults`, `reward survival`, `reward exploration`) to pre-populate common reward configurations.
+- Hovering over an argument name now shows that argument help text.
+
 When `--tui` or `--step-through` is enabled, runners automatically use window-targeted input so actions still dispatch to the game while the TUI has focus.
 
 ## Control Smoke Test

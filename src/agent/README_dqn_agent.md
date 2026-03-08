@@ -2,9 +2,11 @@
 
 ## File
 - `src/agent/dqn_agent.py`
+- ELI5 guide: `src/agent/README_dqn_agent_eli5.md`
 
 ## Implemented Scope
-- Compact state featurizer for `GameStateSnapshot` (`state_to_feature_vector`).
+- Objective-aware compact state featurizer for `GameStateSnapshot` (`state_to_feature_vector`).
+  - Uses wall-aware shortest-path distance features (BFS) for siphon/enemy/exit progress.
 - Linear DQN-style Q approximator with:
   - replay buffer sampling,
   - target-network sync,
@@ -30,4 +32,5 @@
 
 ## Notes
 - This first version intentionally keeps the function approximator simple for stability and deterministic tests.
+- Default feature vector length is `22` and includes objective-phase and action-availability signals.
 - The checkpoint format is JSON and versioned (`CHECKPOINT_VERSION`), with validation on load.

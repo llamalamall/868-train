@@ -86,6 +86,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reset watchdog timeout in seconds.",
     )
     parser.add_argument(
+        "--prog-backoff-steps",
+        type=int,
+        default=3,
+        help="Fallback prog-slot backoff steps after ineffective attempts.",
+    )
+    parser.add_argument(
         "--require-non-terminal-reset",
         action=argparse.BooleanOptionalAction,
         default=True,
@@ -111,6 +117,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Survival reward applied for non-terminal steps.",
     )
     parser.add_argument(
+        "--reward-step-penalty",
+        type=float,
+        default=default_weights.step_penalty,
+        help="Per-step penalty magnitude applied each transition.",
+    )
+    parser.add_argument(
         "--reward-health-delta",
         type=float,
         default=default_weights.health_delta,
@@ -123,10 +135,100 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Weight multiplied by (current_currency - previous_currency).",
     )
     parser.add_argument(
+        "--reward-energy-delta",
+        type=float,
+        default=default_weights.energy_delta,
+        help="Weight multiplied by (current_energy - previous_energy).",
+    )
+    parser.add_argument(
+        "--reward-score-delta",
+        type=float,
+        default=default_weights.score_delta,
+        help="Weight multiplied by (current_score - previous_score) when score is available.",
+    )
+    parser.add_argument(
+        "--reward-siphon-collected",
+        type=float,
+        default=default_weights.siphon_collected,
+        help="Reward per siphon removed from map.",
+    )
+    parser.add_argument(
+        "--reward-enemy-cleared",
+        type=float,
+        default=default_weights.enemy_cleared,
+        help="Reward per live enemy removed from map.",
+    )
+    parser.add_argument(
+        "--reward-phase-progress",
+        type=float,
+        default=default_weights.phase_progress,
+        help="Weight for progress toward active objective (siphon->enemy->exit).",
+    )
+    parser.add_argument(
+        "--reward-map-clear-bonus",
+        type=float,
+        default=default_weights.map_clear_bonus,
+        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+    )
+    parser.add_argument(
+        "--reward-premature-exit-penalty",
+        type=float,
+        default=default_weights.premature_exit_penalty,
+        help="Penalty when stepping onto exit before objectives are complete.",
+    )
+    parser.add_argument(
+        "--reward-invalid-action-penalty",
+        type=float,
+        default=default_weights.invalid_action_penalty,
+        help="Penalty when action appears ineffective/invalid.",
+    )
+    parser.add_argument(
         "--reward-fail-penalty",
         type=float,
         default=default_weights.fail_penalty,
         help="Terminal fail penalty magnitude (applied as negative).",
+    )
+    parser.add_argument(
+        "--reward-safe-tile-bonus",
+        type=float,
+        default=default_weights.safe_tile_bonus,
+        help="Bonus on steps where the current tile is not threatened by enemies.",
+    )
+    parser.add_argument(
+        "--reward-danger-tile-penalty",
+        type=float,
+        default=default_weights.danger_tile_penalty,
+        help="Penalty on steps where the current tile is threatened by enemies.",
+    )
+    parser.add_argument(
+        "--reward-resource-proximity",
+        type=float,
+        default=default_weights.resource_proximity,
+        help="Reward per tile of progress toward nearest harvest target.",
+    )
+    parser.add_argument(
+        "--reward-prog-collected-base",
+        type=float,
+        default=default_weights.prog_collected_base,
+        help="Base reward for each newly collected prog before priority bonus.",
+    )
+    parser.add_argument(
+        "--reward-points-collected",
+        type=float,
+        default=default_weights.points_collected,
+        help="Reward per map-point unit removed from available board points.",
+    )
+    parser.add_argument(
+        "--reward-damage-taken-penalty",
+        type=float,
+        default=default_weights.damage_taken_penalty,
+        help="Penalty multiplier applied to negative health deltas.",
+    )
+    parser.add_argument(
+        "--reward-clip-abs",
+        type=float,
+        default=5.0,
+        help="Absolute value used to clip final reward per step.",
     )
     parser.add_argument(
         "--print-reward-breakdown",
@@ -179,6 +281,7 @@ def main() -> None:
             config=GameEnvConfig(
                 step_timeout_seconds=args.step_timeout,
                 reset_timeout_seconds=args.reset_timeout,
+                prog_slot_backoff_steps=max(int(args.prog_backoff_steps), 0),
                 require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
             ),
             reset_sequence=reset_sequence if reset_sequence else None,

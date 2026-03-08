@@ -138,4 +138,6 @@ class GameStateSnapshot:
     fail_state: FieldState
     inventory: InventoryState = field(default_factory=lambda: InventoryState(status="missing"))
     map: MapState = field(default_factory=lambda: MapState(status="missing"))
+    can_siphon_now: bool | None = None
+    prog_slots_available_mask: int | None = None
     extra_fields: dict[str, FieldState] = field(default_factory=dict)

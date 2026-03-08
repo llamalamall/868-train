@@ -101,9 +101,25 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
 def test_build_reward_fn_applies_configured_components_and_writes_breakdown() -> None:
     args = argparse.Namespace(
         reward_survival=0.2,
+        reward_step_penalty=0.0,
         reward_health_delta=1.0,
         reward_currency_delta=0.5,
+        reward_energy_delta=0.0,
+        reward_score_delta=0.0,
+        reward_siphon_collected=0.0,
+        reward_enemy_cleared=0.0,
+        reward_phase_progress=0.0,
+        reward_map_clear_bonus=0.0,
+        reward_premature_exit_penalty=0.0,
+        reward_invalid_action_penalty=0.0,
         reward_fail_penalty=9.0,
+        reward_safe_tile_bonus=0.0,
+        reward_danger_tile_penalty=0.0,
+        reward_resource_proximity=0.0,
+        reward_prog_collected_base=0.0,
+        reward_points_collected=0.0,
+        reward_damage_taken_penalty=0.0,
+        reward_clip_abs=5.0,
     )
     reward_config = _build_reward_config(args)
     reward_fn = _build_reward_fn(reward_config=reward_config, print_breakdown=False)
@@ -118,7 +134,14 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
     breakdown = info["reward_breakdown"]
     assert isinstance(breakdown, dict)
     assert breakdown["survival"] == 0.2
+    assert breakdown["step_penalty"] == 0.0
     assert breakdown["health_change"] == -2.0
     assert breakdown["currency_change"] == 1.5
+    assert breakdown["energy_change"] == 0.0
+    assert breakdown["score_change"] == 0.0
+    assert breakdown["siphon_collected"] == 0.0
+    assert breakdown["enemy_cleared"] == 0.0
+    assert breakdown["prog_collected"] == 0.0
+    assert breakdown["resource_proximity"] == 0.0
     assert breakdown["fail_penalty"] == 0.0
     assert breakdown["total"] == pytest.approx(-0.3)

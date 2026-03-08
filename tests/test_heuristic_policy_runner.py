@@ -42,6 +42,8 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
             "--enemy-prediction-horizon-steps",
             "5",
             "--verbose-actions",
+            "--reward-score-delta",
+            "0.2",
             "--reward-fail-penalty",
             "18.5",
         ]
@@ -57,4 +59,5 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
     assert args.low_health_threshold == 2
     assert args.enemy_prediction_horizon_steps == 5
     assert args.verbose_actions is True
+    assert args.reward_score_delta == 0.2
     assert args.reward_fail_penalty == 18.5

@@ -5,8 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
-from src.agent.dqn_agent import DQNAgent, DQNConfig
-from src.state.schema import FieldState, GameStateSnapshot, GridPosition, MapState
+from src.agent.dqn_agent import DQNAgent, DQNConfig, state_to_feature_vector
+from src.state.schema import FieldState, GameStateSnapshot, GridPosition, MapCellState, MapState
 from src.training.train import run_dqn_training
 
 
@@ -224,3 +224,35 @@ def test_dqn_training_before_step_callback_reports_pending_action() -> None:
     assert isinstance(first["action"], str)
     assert first["action_reason"] in {"epsilon_explore", "greedy_q", "dqn_select_action"}
     assert isinstance(first["epsilon"], float)
+
+
+def test_dqn_feature_vector_uses_wall_aware_shortest_path_distances() -> None:
+    wall_cell = MapCellState(
+        position=GridPosition(1, 0),
+        cell_type=1,
+        tile_variant=0,
+        wall_state=0,
+        is_wall=True,
+    )
+    state = GameStateSnapshot(
+        timestamp_utc="2026-03-08T00:00:00+00:00",
+        health=_field(10),
+        energy=_field(5),
+        currency=_field(0),
+        fail_state=_field(False),
+        map=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(2, 0),
+            siphons=(GridPosition(2, 0),),
+            cells=(wall_cell,),
+        ),
+    )
+
+    features = state_to_feature_vector(state)
+
+    # Shortest path detours around the wall: distance is 4 on a map with max_distance=3.
+    assert features[11] == 4.0 / 3.0  # exit_distance
+    assert features[14] == 4.0 / 3.0  # nearest_siphon
