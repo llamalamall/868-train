@@ -90,6 +90,14 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Polling interval for the live TUI (seconds).",
     )
     parser.add_argument(
+        "--external-status-file",
+        default=None,
+        help=(
+            "Optional JSON file path to receive live training/action status lines. "
+            "Useful for GUI monitoring without launching the external TUI."
+        ),
+    )
+    parser.add_argument(
         "--step-through",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -388,6 +396,7 @@ def main() -> None:
     _validate_args(parser, args)
     if bool(args.step_through) and not bool(args.tui):
         parser.error("--step-through requires --tui.")
+    monitor_enabled = bool(args.tui) or bool(args.external_status_file)
     effective_window_input = bool(args.window_input) or bool(args.step_through) or bool(args.tui)
     if effective_window_input and not bool(args.window_input):
         mode = "step-through" if bool(args.step_through) else "tui"
@@ -407,9 +416,11 @@ def main() -> None:
     env: GameEnv | None = None
     tui = RunnerTuiSession(
         executable_name=str(args.exe),
-        enabled=bool(args.tui),
+        enabled=monitor_enabled,
         interval_seconds=float(args.tui_interval),
         step_through=bool(args.step_through),
+        launch_monitor=bool(args.tui),
+        external_status_file=(str(args.external_status_file) if args.external_status_file else None),
     )
 
     checkpoint_path = _resolve_checkpoint_path(args)
@@ -511,7 +522,7 @@ def main() -> None:
                     explore=True,
                     learn=True,
                     before_step_callback=_on_before_step if bool(args.step_through) else None,
-                    step_callback=_on_step if bool(args.tui) else None,
+                    step_callback=_on_step if monitor_enabled else None,
                 )[0]
                 results.append(episode_result)
 
@@ -548,7 +559,7 @@ def main() -> None:
                     explore=False,
                     learn=False,
                     before_step_callback=_on_before_step if bool(args.step_through) else None,
-                    step_callback=_on_step if bool(args.tui) else None,
+                    step_callback=_on_step if monitor_enabled else None,
                 )
             )
     finally:

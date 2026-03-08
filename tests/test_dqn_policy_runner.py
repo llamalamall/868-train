@@ -22,10 +22,10 @@ def test_dqn_runner_parser_defaults() -> None:
 
     assert args.mode == "train"
     assert args.exe == "868-HACK.exe"
-    assert args.episodes == 10
-    assert args.max_steps == 200
+    assert args.episodes == 20
+    assert args.max_steps == 500
     assert args.checkpoint is None
-    assert args.checkpoint_every == 0
+    assert args.checkpoint_every == 1
     assert args.movement_keys == "arrows"
     assert args.prog_actions is True
     assert args.step_through is False

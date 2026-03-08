@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import queue
+import re
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -19,8 +23,31 @@ from src.training import evaluate
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PATH_LIKE_DESTS = {"exe", "checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}
+_HIDDEN_GUI_DESTS = {"external_status_file"}
 _MAX_FORM_COLUMNS = 5
 _CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
+_STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
+_EPSILON_HISTORY_LIMIT = 240
+_PALETTE = {
+    "bg": "#0b0f14",
+    "surface": "#121922",
+    "surface_alt": "#1a2533",
+    "text": "#e6edf6",
+    "muted": "#94a7bb",
+    "accent": "#31c6b2",
+    "accent_alt": "#ffb703",
+    "accent_soft": "#162433",
+    "danger": "#ff6b7a",
+    "terminal_bg": "#070b11",
+    "terminal_fg": "#d7e0ea",
+}
+_FONTS = {
+    "title": ("Bahnschrift SemiBold", 19),
+    "subtitle": ("Segoe UI", 9),
+    "body": ("Segoe UI", 9),
+    "mono": ("Consolas", 9),
+    "small": ("Segoe UI", 8),
+}
 
 
 def _iter_parser_actions(parser: argparse.ArgumentParser) -> tuple[argparse.Action, ...]:
@@ -31,6 +58,8 @@ def _iter_parser_actions(parser: argparse.ArgumentParser) -> tuple[argparse.Acti
         if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
             continue
         if not action.option_strings:
+            continue
+        if action.dest in _HIDDEN_GUI_DESTS:
             continue
         actions.append(action)
     return tuple(actions)
@@ -140,13 +169,13 @@ def _field_column_span(action: argparse.Action, *, max_columns: int) -> int:
 
 def _widget_width_for_action(action: argparse.Action) -> int:
     if action.dest in _PATH_LIKE_DESTS:
-        return 30
+        return 24
     if _is_numeric_action(action):
-        return 8
+        return 7
     if action.choices is not None:
         longest_choice = max(len(str(choice)) for choice in action.choices)
-        return max(10, min(longest_choice + 3, 18))
-    return 16
+        return max(9, min(longest_choice + 2, 14))
+    return 13
 
 
 def _initial_browse_dir(*, dest: str, current_value: str) -> Path:
@@ -202,6 +231,10 @@ def _format_command(command: list[str]) -> str:
     return subprocess.list2cmdline(command)
 
 
+def _parse_status_values(line: str) -> dict[str, str]:
+    return {key: value for key, value in _STATUS_KV_PATTERN.findall(line)}
+
+
 @dataclass
 class _FormField:
     action: argparse.Action
@@ -219,7 +252,7 @@ class _ArgForm(ttk.Frame):
         presets: dict[str, dict[str, object]] | None = None,
         on_change: Callable[[], None] | None = None,
     ) -> None:
-        super().__init__(master, padding=(4, 4, 4, 2))
+        super().__init__(master, padding=(6, 6, 6, 4), style="Surface.TFrame")
         self._profile_id = profile_id
         self._module_args = module_args
         self._fields: list[_FormField] = []
@@ -231,14 +264,17 @@ class _ArgForm(ttk.Frame):
         self._selected_preset = tk.StringVar()
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(1, weight=1)
 
         body_row = 0
         if self._presets:
-            preset_row = ttk.Frame(self, padding=(8, 2, 8, 2))
+            preset_row = ttk.Frame(self, padding=(8, 4, 8, 6), style="Surface.TFrame")
             preset_row.grid(row=0, column=0, sticky="ew")
             preset_row.columnconfigure(2, weight=1)
-            ttk.Label(preset_row, text="Preset").grid(row=0, column=0, sticky="w")
+            ttk.Label(preset_row, text="Preset", style="FormLabel.TLabel").grid(
+                row=0,
+                column=0,
+                sticky="w",
+            )
             preset_names = tuple(self._presets.keys())
             self._selected_preset.set(preset_names[0])
             preset_combo = ttk.Combobox(
@@ -260,9 +296,37 @@ class _ArgForm(ttk.Frame):
                 "Load selected preset values into the form fields.",
             )
             body_row = 1
+        self.rowconfigure(body_row, weight=1)
 
-        body = ttk.Frame(self, padding=(4, 2, 4, 0))
-        body.grid(row=body_row, column=0, sticky="nsew")
+        body_shell = ttk.Frame(self, style="Surface.TFrame")
+        body_shell.grid(row=body_row, column=0, sticky="nsew")
+        body_shell.columnconfigure(0, weight=1)
+        body_shell.rowconfigure(0, weight=1)
+
+        body_canvas = tk.Canvas(
+            body_shell,
+            background=_PALETTE["surface"],
+            highlightthickness=0,
+            bd=0,
+        )
+        body_canvas.grid(row=0, column=0, sticky="nsew")
+        body_vscroll = ttk.Scrollbar(body_shell, orient="vertical", command=body_canvas.yview)
+        body_vscroll.grid(row=0, column=1, sticky="ns")
+        body_hscroll = ttk.Scrollbar(body_shell, orient="horizontal", command=body_canvas.xview)
+        body_hscroll.grid(row=1, column=0, sticky="ew")
+        body_canvas.configure(yscrollcommand=body_vscroll.set, xscrollcommand=body_hscroll.set)
+
+        body = ttk.Frame(body_canvas, padding=(4, 2, 4, 2), style="Surface.TFrame")
+        body_window = body_canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def _on_body_resize(_: tk.Event[tk.Misc]) -> None:
+            body_canvas.configure(scrollregion=body_canvas.bbox("all"))
+
+        def _on_canvas_resize(event: tk.Event[tk.Misc]) -> None:
+            body_canvas.itemconfigure(body_window, width=event.width)
+
+        body.bind("<Configure>", _on_body_resize)
+        body_canvas.bind("<Configure>", _on_canvas_resize)
 
         actions = _sort_form_actions(_iter_parser_actions(parser))
         max_columns = _max_form_columns(len(actions))
@@ -280,14 +344,14 @@ class _ArgForm(ttk.Frame):
                 row_index += 1
                 column_index = 0
 
-            card = ttk.Frame(body, padding=(3, 1, 3, 1))
+            card = ttk.Frame(body, padding=(6, 4, 6, 4), style="ArgCard.TFrame")
             card.grid(
                 row=row_index,
                 column=column_index,
                 columnspan=span,
                 sticky="ew",
-                padx=2,
-                pady=1,
+                padx=3,
+                pady=3,
             )
             card.columnconfigure(0, weight=1)
 
@@ -295,14 +359,19 @@ class _ArgForm(ttk.Frame):
             label_text = _display_label(action)
             if _is_boolean_optional(action):
                 variable = tk.BooleanVar(value=bool(action.default))
-                widget = ttk.Checkbutton(card, variable=variable, text=label_text)
+                widget = ttk.Checkbutton(
+                    card,
+                    variable=variable,
+                    text=label_text,
+                    style="FormCheck.TCheckbutton",
+                )
                 widget.grid(row=0, column=0, sticky="w")
                 self._bind_help(widget, help_text)
                 field = _FormField(action=action, variable=variable)
                 self._fields.append(field)
                 self._field_by_dest[action.dest] = field
             else:
-                label = ttk.Label(card, text=label_text)
+                label = ttk.Label(card, text=label_text, style="FormLabel.TLabel")
                 label.grid(row=0, column=0, sticky="w")
                 self._bind_help(label, help_text)
                 variable = tk.StringVar(value=_default_text(action))
@@ -320,7 +389,7 @@ class _ArgForm(ttk.Frame):
         help_label = ttk.Label(
             self,
             textvariable=self._help_text,
-            foreground="#555555",
+            style="FormHelp.TLabel",
             padding=(8, 4, 8, 2),
             anchor="w",
         )
@@ -414,13 +483,14 @@ class _ArgForm(ttk.Frame):
             widget = ttk.Entry(
                 row,
                 textvariable=variable,
-                width=max(_widget_width_for_action(action), 24),
+                width=max(_widget_width_for_action(action), 20),
             )
             widget.grid(row=0, column=0, sticky="ew")
             browse_button = ttk.Button(
                 row,
-                text="...",
-                width=3,
+                text="Browse",
+                style="Secondary.TButton",
+                width=7,
                 command=lambda var=variable, dest=action.dest: self._browse_path(var, dest),
             )
             browse_button.grid(row=0, column=1, sticky="e", padx=(4, 0))
@@ -511,62 +581,212 @@ class DqnRunnerGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("868 DQN Launcher")
-        self.geometry("1240x860")
-        self.minsize(1040, 700)
+        self.geometry("1210x830")
+        self.minsize(980, 680)
+        self.configure(background=_PALETTE["bg"])
+        self._setup_styles()
 
         self._event_queue: queue.Queue[tuple[str, str | int]] = queue.Queue()
         self._process: subprocess.Popen[str] | None = None
         self._reader_thread: threading.Thread | None = None
         self._forms: dict[str, _ArgForm] = {}
+        self._status_text = tk.StringVar(value="READY")
+        self._status_phase = 0
+        self._last_form: _ArgForm | None = None
+        self._external_status_file: Path | None = None
+        self._status_snapshot: tuple[str, str] = ("", "")
+        self._monitor_training_line = tk.StringVar(value="training=idle")
+        self._monitor_action_line = tk.StringVar(value="action=idle")
+        self._monitor_metric_vars: dict[str, tk.StringVar] = {}
+        self._epsilon_history: list[float] = []
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=4)
         self.rowconfigure(3, weight=1)
 
-        header = ttk.Label(
-            self,
-            text="Run DQN training/eval and KPI evaluations from one GUI (all CLI flags exposed).",
-            padding=(10, 8),
+        hero = ttk.Frame(self, padding=(14, 12, 14, 10), style="Hero.TFrame")
+        hero.grid(row=0, column=0, sticky="ew", padx=10, pady=(10, 8))
+        hero.columnconfigure(0, weight=1)
+        hero.columnconfigure(1, weight=0)
+
+        title = ttk.Label(
+            hero,
+            text="868 Runner Control Deck",
+            style="HeroTitle.TLabel",
         )
-        header.grid(row=0, column=0, sticky="w")
+        title.grid(row=0, column=0, sticky="w")
+        subtitle = ttk.Label(
+            hero,
+            text="Train, evaluate, compare, and launch from one surface with every CLI flag exposed.",
+            style="HeroSubtitle.TLabel",
+        )
+        subtitle.grid(row=1, column=0, sticky="w", pady=(2, 0))
+        self._status_label = ttk.Label(
+            hero,
+            textvariable=self._status_text,
+            style="StatusReady.TLabel",
+            anchor="center",
+            padding=(14, 6),
+        )
+        self._status_label.grid(row=0, column=1, rowspan=2, sticky="e")
 
         self._notebook = ttk.Notebook(self)
         self._notebook.grid(row=1, column=0, sticky="nsew", padx=10, pady=(0, 8))
-        self._notebook.bind("<<NotebookTabChanged>>", lambda _: self._refresh_preview())
+        self._notebook.bind("<<NotebookTabChanged>>", lambda _: self._on_tab_changed())
 
         self._build_profiles()
 
-        controls = ttk.Frame(self, padding=(10, 0, 10, 8))
+        controls = ttk.Frame(self, padding=(10, 8, 10, 8), style="Surface.TFrame")
         controls.grid(row=2, column=0, sticky="ew")
         controls.columnconfigure(0, weight=1)
         controls.columnconfigure(1, weight=1)
         controls.columnconfigure(2, weight=1)
+        controls.columnconfigure(3, weight=0)
 
         self._command_preview = tk.StringVar(value="")
-        preview_entry = ttk.Entry(controls, textvariable=self._command_preview)
-        preview_entry.grid(row=0, column=0, columnspan=3, sticky="ew", pady=(0, 8))
+        ttk.Label(controls, text="Command Preview", style="SectionLabel.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=(0, 4),
+        )
+        preview_entry = ttk.Entry(
+            controls,
+            textvariable=self._command_preview,
+            font=_FONTS["mono"],
+        )
+        preview_entry.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
 
-        self._preview_button = ttk.Button(controls, text="Preview Command", command=self._refresh_preview)
-        self._preview_button.grid(row=1, column=0, sticky="w")
-        self._run_button = ttk.Button(controls, text="Run", command=self._run_selected)
-        self._run_button.grid(row=1, column=1)
-        self._stop_button = ttk.Button(controls, text="Stop", command=self._stop_process, state="disabled")
-        self._stop_button.grid(row=1, column=2, sticky="e")
+        self._preview_button = ttk.Button(
+            controls,
+            text="Preview Command",
+            command=self._refresh_preview,
+            style="Secondary.TButton",
+        )
+        self._preview_button.grid(row=2, column=0, sticky="w")
+        self._run_button = ttk.Button(
+            controls,
+            text="Launch",
+            command=self._run_selected,
+            style="Primary.TButton",
+        )
+        self._run_button.grid(row=2, column=1)
+        self._stop_button = ttk.Button(
+            controls,
+            text="Stop",
+            command=self._stop_process,
+            state="disabled",
+            style="Danger.TButton",
+        )
+        self._stop_button.grid(row=2, column=2, sticky="e")
 
-        output_frame = ttk.Frame(self, padding=(10, 0, 10, 10))
+        output_frame = ttk.Frame(self, padding=(10, 0, 10, 10), style="Surface.TFrame")
         output_frame.grid(row=3, column=0, sticky="nsew")
         output_frame.columnconfigure(0, weight=1)
-        output_frame.rowconfigure(0, weight=1)
+        output_frame.rowconfigure(1, weight=1)
 
-        self._output = tk.Text(output_frame, wrap="none", height=10)
-        self._output.grid(row=0, column=0, sticky="nsew")
+        ttk.Label(output_frame, text="Live Output", style="SectionLabel.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=(0, 4),
+        )
+        self._output = tk.Text(
+            output_frame,
+            wrap="none",
+            height=10,
+            bg=_PALETTE["terminal_bg"],
+            fg=_PALETTE["terminal_fg"],
+            insertbackground=_PALETTE["terminal_fg"],
+            relief="flat",
+            padx=8,
+            pady=8,
+            font=_FONTS["mono"],
+        )
+        self._output.grid(row=1, column=0, sticky="nsew")
         output_scroll = ttk.Scrollbar(output_frame, orient="vertical", command=self._output.yview)
-        output_scroll.grid(row=0, column=1, sticky="ns")
-        self._output.configure(yscrollcommand=output_scroll.set)
+        output_scroll.grid(row=1, column=1, sticky="ns")
+        output_scroll_x = ttk.Scrollbar(output_frame, orient="horizontal", command=self._output.xview)
+        output_scroll_x.grid(row=2, column=0, sticky="ew")
+        self._output.configure(yscrollcommand=output_scroll.set, xscrollcommand=output_scroll_x.set)
+        self._output.tag_configure("command", foreground="#7fdbff")
+        self._output.tag_configure("system", foreground="#f8c537")
+        self._output.tag_configure("error", foreground="#ff7a8a")
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        self.after(120, self._animate_status)
         self.after(100, self._drain_event_queue)
+        self.after(200, self._poll_external_status)
+        self._refresh_tab_visuals()
         self._refresh_preview()
+
+    def _setup_styles(self) -> None:
+        style = ttk.Style(self)
+        style.theme_use("clam")
+
+        style.configure(".", background=_PALETTE["bg"], foreground=_PALETTE["text"], font=_FONTS["body"])
+        style.configure("Surface.TFrame", background=_PALETTE["surface"])
+        style.configure("Hero.TFrame", background=_PALETTE["accent_soft"])
+
+        style.configure(
+            "HeroTitle.TLabel",
+            background=_PALETTE["accent_soft"],
+            foreground=_PALETTE["text"],
+            font=_FONTS["title"],
+        )
+        style.configure(
+            "HeroSubtitle.TLabel",
+            background=_PALETTE["accent_soft"],
+            foreground=_PALETTE["muted"],
+            font=_FONTS["subtitle"],
+        )
+        style.configure("SectionLabel.TLabel", background=_PALETTE["surface"], font=("Segoe UI Semibold", 10))
+        style.configure("FormLabel.TLabel", background=_PALETTE["surface"], foreground=_PALETTE["muted"])
+        style.configure("FormHelp.TLabel", background=_PALETTE["surface"], foreground=_PALETTE["muted"], font=_FONTS["small"])
+        style.configure("ArgCard.TFrame", background=_PALETTE["surface_alt"])
+        style.configure("FormCheck.TCheckbutton", background=_PALETTE["surface_alt"])
+        style.configure("MetricCard.TFrame", background="#15212e")
+        style.configure(
+            "MetricName.TLabel",
+            background="#15212e",
+            foreground=_PALETTE["muted"],
+            font=("Segoe UI", 8),
+        )
+        style.configure(
+            "MetricValue.TLabel",
+            background="#15212e",
+            foreground=_PALETTE["text"],
+            font=("Consolas", 11, "bold"),
+        )
+
+        style.configure("StatusReady.TLabel", background=_PALETTE["surface"], foreground=_PALETTE["accent"])
+        style.configure("StatusRun.TLabel", background="#2a3522", foreground=_PALETTE["accent_alt"])
+        style.configure("StatusStop.TLabel", background="#3d2026", foreground=_PALETTE["danger"])
+
+        style.configure("TNotebook", background=_PALETTE["bg"], borderwidth=0)
+        style.configure(
+            "TNotebook.Tab",
+            background=_PALETTE["surface_alt"],
+            foreground=_PALETTE["muted"],
+            padding=(10, 5),
+            font=("Segoe UI Semibold", 9),
+        )
+        style.map(
+            "TNotebook.Tab",
+            background=[("selected", _PALETTE["surface"])],
+            foreground=[("selected", _PALETTE["accent"])],
+        )
+
+        style.configure("TEntry", fieldbackground="#0f1620", foreground=_PALETTE["text"], borderwidth=1)
+        style.configure("TCombobox", fieldbackground="#0f1620", foreground=_PALETTE["text"])
+        style.configure("TSpinbox", fieldbackground="#0f1620", foreground=_PALETTE["text"])
+
+        style.configure("Primary.TButton", background="#1f8f81", foreground="#ffffff", borderwidth=0, padding=(10, 5))
+        style.map("Primary.TButton", background=[("active", "#28a594"), ("disabled", "#345955")])
+        style.configure("Secondary.TButton", background="#2a3a4d", foreground=_PALETTE["text"], borderwidth=0, padding=(8, 5))
+        style.map("Secondary.TButton", background=[("active", "#35485f")])
+        style.configure("Danger.TButton", background="#5a2630", foreground="#ffdce1", borderwidth=0, padding=(8, 5))
+        style.map("Danger.TButton", background=[("active", "#70313d"), ("disabled", "#3f2730")])
 
     def _build_profiles(self) -> None:
         run_parser = dqn_policy_runner._build_parser()
@@ -609,13 +829,101 @@ class DqnRunnerGui(tk.Tk):
             )
             self._forms[profile_id] = form
             self._notebook.add(form, text=title)
+            if self._last_form is None:
+                self._last_form = form
+        self._build_monitor_tab()
+        self._refresh_tab_visuals()
+
+    def _build_monitor_tab(self) -> None:
+        monitor = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
+        monitor.columnconfigure(0, weight=1)
+        monitor.rowconfigure(1, weight=0)
+        monitor.rowconfigure(3, weight=1)
+
+        ttk.Label(
+            monitor,
+            text="Run Monitor",
+            style="SectionLabel.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+
+        metric_grid = ttk.Frame(monitor, style="Surface.TFrame")
+        metric_grid.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+        for col in range(4):
+            metric_grid.columnconfigure(col, weight=1, uniform="metric-cols")
+
+        metric_keys = (
+            ("Episode", "episode"),
+            ("Step", "step"),
+            ("Reward", "reward"),
+            ("Total", "total"),
+            ("Epsilon", "epsilon"),
+            ("Updates", "updates"),
+            ("Done", "done"),
+            ("Terminal", "terminal"),
+        )
+        for idx, (label, key) in enumerate(metric_keys):
+            row = idx // 4
+            col = idx % 4
+            card = ttk.Frame(metric_grid, style="MetricCard.TFrame", padding=(8, 6, 8, 6))
+            card.grid(row=row, column=col, sticky="ew", padx=3, pady=3)
+            self._monitor_metric_vars[key] = tk.StringVar(value="-")
+            ttk.Label(card, text=label, style="MetricName.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(card, textvariable=self._monitor_metric_vars[key], style="MetricValue.TLabel").grid(
+                row=1,
+                column=0,
+                sticky="w",
+            )
+
+        ttk.Label(monitor, text="training_line", style="FormLabel.TLabel").grid(row=2, column=0, sticky="w")
+        ttk.Label(
+            monitor,
+            textvariable=self._monitor_training_line,
+            style="FormHelp.TLabel",
+        ).grid(row=2, column=0, sticky="e", padx=(120, 0))
+
+        graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
+        graph_shell.grid(row=3, column=0, sticky="nsew", pady=(20, 0))
+        graph_shell.columnconfigure(0, weight=1)
+        graph_shell.rowconfigure(1, weight=1)
+        ttk.Label(graph_shell, textvariable=self._monitor_action_line, style="FormHelp.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=(0, 4),
+        )
+        self._epsilon_canvas = tk.Canvas(
+            graph_shell,
+            height=180,
+            bg="#0d141d",
+            highlightthickness=1,
+            highlightbackground="#243244",
+        )
+        self._epsilon_canvas.grid(row=1, column=0, sticky="nsew")
+        self._epsilon_canvas.bind("<Configure>", lambda _: self._draw_epsilon_graph())
+
+        self._notebook.add(monitor, text="Live Monitor")
+
+    def _refresh_tab_visuals(self) -> None:
+        selected = self._notebook.select()
+        for tab_id in self._notebook.tabs():
+            self._notebook.tab(tab_id, padding=(18, 10) if tab_id == selected else (10, 5))
+
+    def _on_tab_changed(self) -> None:
+        self._refresh_tab_visuals()
+        self._refresh_preview()
 
     def _current_form(self) -> _ArgForm:
         selected_tab = self._notebook.select()
         current_widget = self.nametowidget(selected_tab)
-        if not isinstance(current_widget, _ArgForm):
-            raise RuntimeError("Selected tab is not a valid form.")
-        return current_widget
+        if isinstance(current_widget, _ArgForm):
+            self._last_form = current_widget
+            return current_widget
+        if self._last_form is not None:
+            return self._last_form
+        if self._forms:
+            self._last_form = next(iter(self._forms.values()))
+            return self._last_form
+        raise RuntimeError("No runnable profile form is available.")
 
     def _refresh_preview(self) -> None:
         try:
@@ -633,12 +941,14 @@ class DqnRunnerGui(tk.Tk):
         except ValueError as error:
             messagebox.showerror("Invalid Settings", str(error))
             return
+        command = self._prepare_command_for_monitor(command)
 
-        self._output.insert("end", f">>> {_format_command(command)}\n")
-        self._output.see("end")
+        self._append_output(f">>> {_format_command(command)}", tag="command")
         self._run_button.configure(state="disabled")
         self._stop_button.configure(state="normal")
         self._preview_button.configure(state="disabled")
+        self._status_text.set("RUNNING")
+        self._status_label.configure(style="StatusRun.TLabel")
 
         self._reader_thread = threading.Thread(
             target=self._run_process,
@@ -646,6 +956,149 @@ class DqnRunnerGui(tk.Tk):
             daemon=True,
         )
         self._reader_thread.start()
+
+    def _prepare_command_for_monitor(self, command: list[str]) -> list[str]:
+        if len(command) < 3:
+            self._external_status_file = None
+            return command
+        is_dqn_runner = command[1:3] == ["-m", "src.env.dqn_policy_runner"]
+        is_eval_compare = command[1:4] == ["-m", "src.training.evaluate", "compare"]
+        if not is_dqn_runner and not is_eval_compare:
+            self._external_status_file = None
+            return command
+
+        previous_status_file = self._external_status_file
+        if previous_status_file is not None:
+            previous_status_file.unlink(missing_ok=True)
+        status_file = self._create_status_file()
+        self._external_status_file = status_file
+        self._status_snapshot = ("", "")
+        self._monitor_training_line.set("training=starting")
+        self._monitor_action_line.set("action=idle reason=launch")
+        self._epsilon_history.clear()
+        for variable in self._monitor_metric_vars.values():
+            variable.set("-")
+
+        filtered: list[str] = []
+        skip_next = False
+        for index, token in enumerate(command):
+            if skip_next:
+                skip_next = False
+                continue
+            if token == "--external-status-file":
+                skip_next = index + 1 < len(command)
+                continue
+            if token in {"--tui", "--no-tui"}:
+                continue
+            filtered.append(token)
+
+        if is_dqn_runner or is_eval_compare:
+            filtered.append("--no-tui")
+        filtered.extend(["--external-status-file", str(status_file)])
+        return filtered
+
+    def _create_status_file(self) -> Path:
+        handle, file_path = tempfile.mkstemp(prefix="868-gui-status-", suffix=".json")
+        os.close(handle)
+        return Path(file_path)
+
+    def _poll_external_status(self) -> None:
+        status_file = self._external_status_file
+        if status_file is not None and status_file.exists():
+            try:
+                payload = json.loads(status_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                training_line = str(payload.get("training_line", ""))
+                action_line = str(payload.get("action_line", ""))
+                snapshot = (training_line, action_line)
+                if snapshot != self._status_snapshot:
+                    self._status_snapshot = snapshot
+                    self._monitor_training_line.set(training_line or "training=idle")
+                    self._monitor_action_line.set(action_line or "action=idle")
+                    self._update_monitor_metrics(training_line)
+        self.after(200, self._poll_external_status)
+
+    def _update_monitor_metrics(self, training_line: str) -> None:
+        status_values = _parse_status_values(training_line)
+        mapped_values = {
+            "episode": status_values.get("episode", "-"),
+            "step": status_values.get("step", "-"),
+            "reward": status_values.get("reward", "-"),
+            "total": status_values.get("total", "-"),
+            "epsilon": status_values.get("epsilon", "-"),
+            "updates": status_values.get("updates", "-"),
+            "done": status_values.get("done", "-"),
+            "terminal": status_values.get("terminal", "-"),
+        }
+        for key, value in mapped_values.items():
+            variable = self._monitor_metric_vars.get(key)
+            if variable is not None:
+                variable.set(value)
+
+        epsilon_text = mapped_values["epsilon"]
+        try:
+            epsilon_value = float(epsilon_text)
+        except (TypeError, ValueError):
+            return
+        epsilon_value = max(0.0, min(1.0, epsilon_value))
+        self._epsilon_history.append(epsilon_value)
+        if len(self._epsilon_history) > _EPSILON_HISTORY_LIMIT:
+            self._epsilon_history = self._epsilon_history[-_EPSILON_HISTORY_LIMIT:]
+        self._draw_epsilon_graph()
+
+    def _draw_epsilon_graph(self) -> None:
+        canvas = self._epsilon_canvas
+        width = max(canvas.winfo_width(), 2)
+        height = max(canvas.winfo_height(), 2)
+        canvas.delete("all")
+
+        left = 28
+        right = width - 10
+        top = 10
+        bottom = height - 18
+        canvas.create_rectangle(left, top, right, bottom, outline="#263546")
+        for ratio in (0.25, 0.5, 0.75):
+            y = top + int((bottom - top) * ratio)
+            canvas.create_line(left, y, right, y, fill="#1a2432")
+
+        canvas.create_text(left - 8, top, text="1.0", fill=_PALETTE["muted"], anchor="e", font=_FONTS["small"])
+        canvas.create_text(
+            left - 8,
+            bottom,
+            text="0.0",
+            fill=_PALETTE["muted"],
+            anchor="e",
+            font=_FONTS["small"],
+        )
+        canvas.create_text(
+            left,
+            top - 2,
+            text="epsilon",
+            fill=_PALETTE["accent"],
+            anchor="sw",
+            font=("Segoe UI", 8, "bold"),
+        )
+
+        points = self._epsilon_history
+        if len(points) < 2:
+            return
+        span = len(points) - 1
+        line_points: list[float] = []
+        for index, value in enumerate(points):
+            x = left + ((right - left) * index / span)
+            y = top + ((bottom - top) * (1.0 - value))
+            line_points.extend((x, y))
+        canvas.create_line(*line_points, fill=_PALETTE["accent"], width=2, smooth=True)
+        canvas.create_oval(
+            line_points[-2] - 3,
+            line_points[-1] - 3,
+            line_points[-2] + 3,
+            line_points[-1] + 3,
+            fill=_PALETTE["accent_alt"],
+            outline="",
+        )
 
     def _run_process(self, command: list[str]) -> None:
         try:
@@ -673,6 +1126,25 @@ class DqnRunnerGui(tk.Tk):
             return
         process.terminate()
         self._event_queue.put(("line", "Process termination requested."))
+        self._status_text.set("STOPPING")
+        self._status_label.configure(style="StatusStop.TLabel")
+
+    def _append_output(self, text: str, *, tag: str | None = None) -> None:
+        if tag is None:
+            self._output.insert("end", f"{text}\n")
+        else:
+            self._output.insert("end", f"{text}\n", tag)
+        self._output.see("end")
+
+    def _animate_status(self) -> None:
+        if self._process is not None:
+            running_suffix = "." * ((self._status_phase % 3) + 1)
+            self._status_text.set(f"RUNNING{running_suffix}")
+            self._status_phase += 1
+        elif self._status_text.get().startswith("RUNNING"):
+            self._status_text.set("READY")
+            self._status_label.configure(style="StatusReady.TLabel")
+        self.after(250, self._animate_status)
 
     def _drain_event_queue(self) -> None:
         while True:
@@ -681,21 +1153,31 @@ class DqnRunnerGui(tk.Tk):
             except queue.Empty:
                 break
             if kind == "line":
-                self._output.insert("end", f"{payload}\n")
-                self._output.see("end")
+                line = str(payload)
+                tag = "error" if "error" in line.lower() or "failed" in line.lower() else None
+                self._append_output(line, tag=tag)
             elif kind == "done":
                 code = int(payload)
-                self._output.insert("end", f"[process exited with code {code}]\n")
-                self._output.see("end")
+                self._append_output(f"[process exited with code {code}]", tag="system")
                 self._run_button.configure(state="normal")
                 self._stop_button.configure(state="disabled")
                 self._preview_button.configure(state="normal")
+                self._status_text.set("READY" if code == 0 else "FAILED")
+                self._status_label.configure(
+                    style="StatusReady.TLabel" if code == 0 else "StatusStop.TLabel"
+                )
+                if self._external_status_file is not None:
+                    self._external_status_file.unlink(missing_ok=True)
+                    self._external_status_file = None
                 self._refresh_preview()
         self.after(100, self._drain_event_queue)
 
     def _on_close(self) -> None:
         if self._process is not None:
             self._stop_process()
+        if self._external_status_file is not None:
+            self._external_status_file.unlink(missing_ok=True)
+            self._external_status_file = None
         self.destroy()
 
 
