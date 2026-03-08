@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
@@ -235,6 +236,103 @@ def _parse_status_values(line: str) -> dict[str, str]:
     return {key: value for key, value in _STATUS_KV_PATTERN.findall(line)}
 
 
+def _parse_episode_progress(
+    raw_episode: str,
+    *,
+    fallback_total: int | None = None,
+) -> tuple[int | None, int | None]:
+    text = str(raw_episode).strip()
+    if not text:
+        return None, fallback_total
+
+    if "/" in text:
+        current_text, _, total_text = text.partition("/")
+        try:
+            current = int(current_text)
+            total = int(total_text)
+        except ValueError:
+            return None, fallback_total
+        return current if current >= 1 else None, total if total >= 1 else fallback_total
+
+    try:
+        episode_number = int(text)
+        return episode_number if episode_number >= 1 else None, fallback_total
+    except ValueError:
+        pass
+
+    match = re.search(r"(\d+)$", text)
+    if match is None:
+        return None, fallback_total
+    episode_number = int(match.group(1))
+    return episode_number if episode_number >= 1 else None, fallback_total
+
+
+def _parse_step_value(raw_step: str) -> int | None:
+    text = str(raw_step).strip()
+    if not text:
+        return None
+    if "/" in text:
+        text, _, _ = text.partition("/")
+    try:
+        step = int(text)
+    except ValueError:
+        return None
+    return step if step >= 1 else None
+
+
+def _parse_bool_value(raw_value: str) -> bool | None:
+    text = str(raw_value).strip().lower()
+    if text in {"true", "1", "yes"}:
+        return True
+    if text in {"false", "0", "no"}:
+        return False
+    return None
+
+
+def _format_duration_seconds(total_seconds: float | None) -> str:
+    if total_seconds is None or total_seconds < 0:
+        return "-"
+
+    rounded = int(round(total_seconds))
+    if rounded <= 0:
+        return "0s"
+    hours, remainder = divmod(rounded, 3600)
+    minutes, seconds = divmod(remainder, 60)
+    if hours > 0:
+        return f"{hours}h {minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes}m {seconds:02d}s"
+    return f"{seconds}s"
+
+
+def _estimate_epsilon_eta_seconds(
+    *,
+    current_epsilon: float | None,
+    epsilon_start: float | None,
+    epsilon_end: float | None,
+    epsilon_decay_steps: int | None,
+    seconds_per_step: float | None,
+) -> float | None:
+    if (
+        current_epsilon is None
+        or epsilon_start is None
+        or epsilon_end is None
+        or epsilon_decay_steps is None
+        or epsilon_decay_steps <= 0
+        or seconds_per_step is None
+        or seconds_per_step <= 0
+    ):
+        return None
+
+    if epsilon_start <= epsilon_end:
+        return 0.0 if current_epsilon <= epsilon_end else None
+
+    clamped = max(epsilon_end, min(epsilon_start, current_epsilon))
+    remaining_fraction = (clamped - epsilon_end) / (epsilon_start - epsilon_end)
+    remaining_steps = max(0.0, float(epsilon_decay_steps) * remaining_fraction)
+    return remaining_steps * seconds_per_step
+
+
 @dataclass
 class _FormField:
     action: argparse.Action
@@ -394,6 +492,18 @@ class _ArgForm(ttk.Frame):
             anchor="w",
         )
         help_label.grid(row=body_row + 1, column=0, sticky="ew")
+
+    @property
+    def profile_id(self) -> str:
+        return self._profile_id
+
+    def value_for_dest(self, dest: str) -> str | bool | None:
+        field = self._field_by_dest.get(dest)
+        if field is None:
+            return None
+        if isinstance(field.variable, tk.BooleanVar):
+            return bool(field.variable.get())
+        return str(field.variable.get()).strip()
 
     def _apply_selected_preset(self) -> None:
         preset_name = self._selected_preset.get()
@@ -599,6 +709,18 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_action_line = tk.StringVar(value="action=idle")
         self._monitor_metric_vars: dict[str, tk.StringVar] = {}
         self._epsilon_history: list[float] = []
+        self._monitor_total_episodes: int | None = None
+        self._monitor_epsilon_start: float | None = None
+        self._monitor_epsilon_end: float | None = None
+        self._monitor_epsilon_decay_steps: int | None = None
+        self._monitor_track_epsilon_eta = False
+        self._monitor_first_step_time: float | None = None
+        self._monitor_step_events = 0
+        self._monitor_last_step_key: tuple[int, int] | None = None
+        self._monitor_episode_start_times: dict[int, float] = {}
+        self._monitor_completed_episode_ids: set[int] = set()
+        self._monitor_episode_duration_sum = 0.0
+        self._monitor_episode_duration_count = 0
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=4)
@@ -860,6 +982,8 @@ class DqnRunnerGui(tk.Tk):
             ("Updates", "updates"),
             ("Done", "done"),
             ("Terminal", "terminal"),
+            ("ETA Epsilon", "eta_epsilon"),
+            ("ETA Session", "eta_session"),
         )
         for idx, (label, key) in enumerate(metric_keys):
             row = idx // 4
@@ -932,15 +1056,79 @@ class DqnRunnerGui(tk.Tk):
         except ValueError as error:
             self._command_preview.set(f"Invalid settings: {error}")
 
+    @staticmethod
+    def _parse_int_or_none(value: str | bool | None) -> int | None:
+        if value is None or isinstance(value, bool):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return int(text)
+        except ValueError:
+            return None
+
+    @staticmethod
+    def _parse_float_or_none(value: str | bool | None) -> float | None:
+        if value is None or isinstance(value, bool):
+            return None
+        text = str(value).strip()
+        if not text:
+            return None
+        try:
+            return float(text)
+        except ValueError:
+            return None
+
+    def _reset_monitor_estimates(self) -> None:
+        self._monitor_total_episodes = None
+        self._monitor_epsilon_start = None
+        self._monitor_epsilon_end = None
+        self._monitor_epsilon_decay_steps = None
+        self._monitor_track_epsilon_eta = False
+        self._monitor_first_step_time = None
+        self._monitor_step_events = 0
+        self._monitor_last_step_key = None
+        self._monitor_episode_start_times.clear()
+        self._monitor_completed_episode_ids.clear()
+        self._monitor_episode_duration_sum = 0.0
+        self._monitor_episode_duration_count = 0
+
+    def _configure_monitor_estimates(self, *, form: _ArgForm) -> None:
+        self._reset_monitor_estimates()
+
+        total_episodes = self._parse_int_or_none(form.value_for_dest("episodes"))
+        if total_episodes is not None and total_episodes >= 1:
+            self._monitor_total_episodes = total_episodes
+
+        is_train_mode = str(form.value_for_dest("mode") or "train").strip().lower() == "train"
+        if form.profile_id != "run-dqn" or not is_train_mode:
+            return
+
+        epsilon_start = self._parse_float_or_none(form.value_for_dest("epsilon_start"))
+        epsilon_end = self._parse_float_or_none(form.value_for_dest("epsilon_end"))
+        epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("epsilon_decay_steps"))
+        if epsilon_start is None or epsilon_end is None or epsilon_decay_steps is None:
+            return
+        if epsilon_decay_steps <= 0:
+            return
+
+        self._monitor_epsilon_start = epsilon_start
+        self._monitor_epsilon_end = epsilon_end
+        self._monitor_epsilon_decay_steps = epsilon_decay_steps
+        self._monitor_track_epsilon_eta = True
+
     def _run_selected(self) -> None:
         if self._process is not None:
             messagebox.showerror("Process Running", "A command is already running.")
             return
         try:
-            command = self._current_form().build_command()
+            form = self._current_form()
+            command = form.build_command()
         except ValueError as error:
             messagebox.showerror("Invalid Settings", str(error))
             return
+        self._configure_monitor_estimates(form=form)
         command = self._prepare_command_for_monitor(command)
 
         self._append_output(f">>> {_format_command(command)}", tag="command")
@@ -960,11 +1148,13 @@ class DqnRunnerGui(tk.Tk):
     def _prepare_command_for_monitor(self, command: list[str]) -> list[str]:
         if len(command) < 3:
             self._external_status_file = None
+            self._reset_monitor_estimates()
             return command
         is_dqn_runner = command[1:3] == ["-m", "src.env.dqn_policy_runner"]
         is_eval_compare = command[1:4] == ["-m", "src.training.evaluate", "compare"]
         if not is_dqn_runner and not is_eval_compare:
             self._external_status_file = None
+            self._reset_monitor_estimates()
             return command
 
         previous_status_file = self._external_status_file
@@ -1022,6 +1212,74 @@ class DqnRunnerGui(tk.Tk):
 
     def _update_monitor_metrics(self, training_line: str) -> None:
         status_values = _parse_status_values(training_line)
+        now = time.monotonic()
+
+        current_episode, reported_total_episodes = _parse_episode_progress(
+            status_values.get("episode", ""),
+            fallback_total=self._monitor_total_episodes,
+        )
+        if reported_total_episodes is not None and reported_total_episodes >= 1:
+            self._monitor_total_episodes = reported_total_episodes
+        current_step = _parse_step_value(status_values.get("step", ""))
+        is_done = _parse_bool_value(status_values.get("done", ""))
+
+        if current_episode is not None and current_step is not None:
+            step_key = (current_episode, current_step)
+            if step_key != self._monitor_last_step_key:
+                if self._monitor_first_step_time is None:
+                    self._monitor_first_step_time = now
+                self._monitor_step_events += 1
+                self._monitor_last_step_key = step_key
+            self._monitor_episode_start_times.setdefault(current_episode, now)
+
+        if (
+            is_done is True
+            and current_episode is not None
+            and current_episode not in self._monitor_completed_episode_ids
+        ):
+            start_time = self._monitor_episode_start_times.pop(current_episode, None)
+            if start_time is not None:
+                duration_seconds = max(0.0, now - start_time)
+                self._monitor_episode_duration_sum += duration_seconds
+                self._monitor_episode_duration_count += 1
+            self._monitor_completed_episode_ids.add(current_episode)
+
+        seconds_per_step: float | None = None
+        if self._monitor_first_step_time is not None and self._monitor_step_events > 0:
+            elapsed = max(0.0, now - self._monitor_first_step_time)
+            if elapsed > 0.0:
+                seconds_per_step = elapsed / float(self._monitor_step_events)
+
+        epsilon_value: float | None = None
+        epsilon_text = status_values.get("epsilon")
+        if epsilon_text is not None:
+            try:
+                epsilon_value = float(epsilon_text)
+            except (TypeError, ValueError):
+                epsilon_value = None
+        eta_epsilon_seconds = (
+            _estimate_epsilon_eta_seconds(
+                current_epsilon=epsilon_value,
+                epsilon_start=self._monitor_epsilon_start,
+                epsilon_end=self._monitor_epsilon_end,
+                epsilon_decay_steps=self._monitor_epsilon_decay_steps,
+                seconds_per_step=seconds_per_step,
+            )
+            if self._monitor_track_epsilon_eta
+            else None
+        )
+
+        eta_session_seconds: float | None = None
+        if self._monitor_episode_duration_count > 0 and self._monitor_total_episodes is not None:
+            average_episode_seconds = (
+                self._monitor_episode_duration_sum / float(self._monitor_episode_duration_count)
+            )
+            remaining_episodes = max(
+                self._monitor_total_episodes - len(self._monitor_completed_episode_ids),
+                0,
+            )
+            eta_session_seconds = average_episode_seconds * float(remaining_episodes)
+
         mapped_values = {
             "episode": status_values.get("episode", "-"),
             "step": status_values.get("step", "-"),
@@ -1031,19 +1289,21 @@ class DqnRunnerGui(tk.Tk):
             "updates": status_values.get("updates", "-"),
             "done": status_values.get("done", "-"),
             "terminal": status_values.get("terminal", "-"),
+            "eta_epsilon": _format_duration_seconds(eta_epsilon_seconds),
+            "eta_session": _format_duration_seconds(eta_session_seconds),
         }
         for key, value in mapped_values.items():
             variable = self._monitor_metric_vars.get(key)
             if variable is not None:
                 variable.set(value)
 
-        epsilon_text = mapped_values["epsilon"]
+        epsilon_graph_text = mapped_values["epsilon"]
         try:
-            epsilon_value = float(epsilon_text)
+            graph_epsilon = float(epsilon_graph_text)
         except (TypeError, ValueError):
             return
-        epsilon_value = max(0.0, min(1.0, epsilon_value))
-        self._epsilon_history.append(epsilon_value)
+        graph_epsilon = max(0.0, min(1.0, graph_epsilon))
+        self._epsilon_history.append(graph_epsilon)
         if len(self._epsilon_history) > _EPSILON_HISTORY_LIMIT:
             self._epsilon_history = self._epsilon_history[-_EPSILON_HISTORY_LIMIT:]
         self._draw_epsilon_graph()
