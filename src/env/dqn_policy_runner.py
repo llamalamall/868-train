@@ -490,6 +490,15 @@ def main() -> None:
                         else "-"
                     ),
                 ),
+                after_action_line="action={action} reason={reason} loss={loss}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "dqn_select_action",
+                    loss=(
+                        "{0:.6f}".format(float(event.get("last_loss")))
+                        if event.get("last_loss") is not None
+                        else "-"
+                    ),
+                ),
                 reward_line=(format_reward_breakdown_line(event) if should_emit_reward_dump else ""),
             )
 
@@ -506,6 +515,10 @@ def main() -> None:
                     )
                 ),
                 action_line="action={action} reason={reason}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "dqn_select_action",
+                ),
+                before_action_line="action={action} reason={reason}".format(
                     action=event.get("action"),
                     reason=event.get("action_reason") or "dqn_select_action",
                 ),
