@@ -285,6 +285,35 @@ def _parse_status_values(line: str) -> dict[str, str]:
     return {key: value for key, value in _STATUS_KV_PATTERN.findall(line)}
 
 
+def _select_live_monitor_output_line(
+    *,
+    action_line: str,
+    reward_line: str,
+    session_mode: str | None,
+) -> str:
+    mode_text = str(session_mode or "").strip().lower()
+    if mode_text == CONTROL_MODE_PAUSED and reward_line.strip():
+        return reward_line
+    return action_line
+
+
+def _resolve_reward_metric_value(
+    *,
+    training_line: str,
+    reward_line: str,
+    previous_value: str = "-",
+) -> str:
+    status_values = _parse_status_values(training_line)
+    reward_value = status_values.get("reward")
+    if reward_value:
+        return reward_value
+    reward_values = _parse_status_values(reward_line)
+    reward_total = reward_values.get("total")
+    if reward_total:
+        return reward_total
+    return previous_value
+
+
 def _parse_episode_progress(
     raw_episode: str,
     *,
@@ -755,7 +784,7 @@ class DqnRunnerGui(tk.Tk):
         self._last_form: _ArgForm | None = None
         self._external_status_file: Path | None = None
         self._external_control_file: Path | None = None
-        self._status_snapshot: tuple[str, str] = ("", "")
+        self._status_snapshot: tuple[str, str, str] = ("", "", "")
         self._monitor_training_line = tk.StringVar(value="training=idle")
         self._monitor_action_line = tk.StringVar(value="action=idle")
         self._monitor_control_state = tk.StringVar(value="session=idle")
@@ -1256,7 +1285,7 @@ class DqnRunnerGui(tk.Tk):
         self._external_status_file = status_file
         control_file = self._create_control_file() if is_dqn_runner else None
         self._external_control_file = control_file
-        self._status_snapshot = ("", "")
+        self._status_snapshot = ("", "", "")
         self._monitor_training_line.set("training=starting")
         self._monitor_action_line.set("action=idle reason=launch")
         if control_file is not None:
@@ -1325,12 +1354,19 @@ class DqnRunnerGui(tk.Tk):
             if isinstance(payload, dict):
                 training_line = str(payload.get("training_line", ""))
                 action_line = str(payload.get("action_line", ""))
-                snapshot = (training_line, action_line)
+                reward_line = str(payload.get("reward_line", ""))
+                snapshot = (training_line, action_line, reward_line)
                 if snapshot != self._status_snapshot:
                     self._status_snapshot = snapshot
+                    control_snapshot = load_external_control_snapshot(self._external_control_file)
                     self._monitor_training_line.set(training_line or "training=idle")
-                    self._monitor_action_line.set(action_line or "action=idle")
-                    self._update_monitor_metrics(training_line)
+                    live_output_line = _select_live_monitor_output_line(
+                        action_line=action_line,
+                        reward_line=reward_line,
+                        session_mode=control_snapshot.mode,
+                    )
+                    self._monitor_action_line.set(live_output_line or "action=idle")
+                    self._update_monitor_metrics(training_line, reward_line=reward_line)
         self._refresh_monitor_control_state()
         self.after(200, self._poll_external_status)
 
@@ -1380,7 +1416,7 @@ class DqnRunnerGui(tk.Tk):
             f"session={snapshot.mode} advance={snapshot.advance_counter}"
         )
 
-    def _update_monitor_metrics(self, training_line: str) -> None:
+    def _update_monitor_metrics(self, training_line: str, *, reward_line: str = "") -> None:
         status_values = _parse_status_values(training_line)
         now = time.monotonic()
 
@@ -1450,10 +1486,18 @@ class DqnRunnerGui(tk.Tk):
             )
             eta_session_seconds = average_episode_seconds * float(remaining_episodes)
 
+        previous_reward_value = self._monitor_metric_vars.get("reward")
+        reward_value = _resolve_reward_metric_value(
+            training_line=training_line,
+            reward_line=reward_line,
+            previous_value=(
+                previous_reward_value.get() if previous_reward_value is not None else "-"
+            ),
+        )
         mapped_values = {
             "episode": status_values.get("episode", "-"),
             "step": status_values.get("step", "-"),
-            "reward": status_values.get("reward", "-"),
+            "reward": reward_value,
             "total": status_values.get("total", "-"),
             "epsilon": status_values.get("epsilon", "-"),
             "updates": status_values.get("updates", "-"),

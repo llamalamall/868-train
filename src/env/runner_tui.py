@@ -39,6 +39,7 @@ class RunnerTuiSession:
     _process: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
     _last_advance_counter: int = field(default=0, init=False, repr=False)
     _last_step_was_manual: bool = field(default=False, init=False, repr=False)
+    _last_reward_line: str = field(default="", init=False, repr=False)
 
     def start(self) -> None:
         if not self.enabled or self._process is not None:
@@ -75,6 +76,7 @@ class RunnerTuiSession:
         )
         self._last_advance_counter = 0
         self._last_step_was_manual = False
+        self._last_reward_line = ""
         self.update(
             training_line="training=initializing",
             action_line="action=idle reason=initializing",
@@ -99,16 +101,27 @@ class RunnerTuiSession:
             creationflags = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
             self._process = subprocess.Popen(command, creationflags=creationflags)
 
-    def update(self, *, training_line: str, action_line: str, reward_line: str = "") -> None:
+    def update(
+        self,
+        *,
+        training_line: str,
+        action_line: str,
+        reward_line: str | None = None,
+    ) -> None:
         if not self.enabled or self._status_file_path is None:
             return
+        if reward_line is None:
+            reward_text = self._last_reward_line
+        else:
+            reward_text = str(reward_line)
+            self._last_reward_line = reward_text
 
         self._write_json_payload(
             path=self._status_file_path,
             payload={
                 "training_line": str(training_line),
                 "action_line": str(action_line),
-                "reward_line": str(reward_line),
+                "reward_line": reward_text,
             },
         )
 
