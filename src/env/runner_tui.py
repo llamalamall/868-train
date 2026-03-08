@@ -132,9 +132,34 @@ class RunnerTuiSession:
 
     @staticmethod
     def _write_json_payload(*, path: Path, payload: dict[str, object]) -> None:
+        json_text = json.dumps(payload)
         staging_path = path.with_suffix(".tmp")
-        staging_path.write_text(json.dumps(payload), encoding="utf-8")
-        staging_path.replace(path)
+        retry_delays = (0.005, 0.01, 0.02, 0.04, 0.08)
+
+        # Prefer atomic replace, but Windows can transiently deny replacement while
+        # another process is reading the destination file.
+        for delay_seconds in retry_delays:
+            try:
+                staging_path.write_text(json_text, encoding="utf-8")
+                staging_path.replace(path)
+                return
+            except PermissionError:
+                time.sleep(delay_seconds)
+
+        # Fallback path: direct write with retries. Readers tolerate invalid JSON
+        # by skipping and polling again on the next tick.
+        for delay_seconds in retry_delays:
+            try:
+                path.write_text(json_text, encoding="utf-8")
+                return
+            except PermissionError:
+                time.sleep(delay_seconds)
+
+        # Final attempt, surfacing any remaining error.
+        try:
+            path.write_text(json_text, encoding="utf-8")
+        finally:
+            staging_path.unlink(missing_ok=True)
 
     def close(self) -> None:
         if self._process is not None and self._process.poll() is None:
