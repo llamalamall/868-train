@@ -12,6 +12,7 @@ import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Callable
 
 from src.env import dqn_policy_runner
 from src.training import evaluate
@@ -19,6 +20,7 @@ from src.training import evaluate
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PATH_LIKE_DESTS = {"exe", "checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}
 _MAX_FORM_COLUMNS = 5
+_CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
 
 
 def _iter_parser_actions(parser: argparse.ArgumentParser) -> tuple[argparse.Action, ...]:
@@ -32,6 +34,16 @@ def _iter_parser_actions(parser: argparse.ArgumentParser) -> tuple[argparse.Acti
             continue
         actions.append(action)
     return tuple(actions)
+
+
+def _sort_form_actions(actions: tuple[argparse.Action, ...]) -> tuple[argparse.Action, ...]:
+    priority = {
+        "exe": 0,
+        "checkpoint": 1,
+    }
+    indexed_actions = list(enumerate(actions))
+    indexed_actions.sort(key=lambda item: (priority.get(item[1].dest, 999), item[0]))
+    return tuple(action for _, action in indexed_actions)
 
 
 def _get_subparser(parser: argparse.ArgumentParser, *, command_name: str) -> argparse.ArgumentParser:
@@ -137,6 +149,39 @@ def _widget_width_for_action(action: argparse.Action) -> int:
     return 16
 
 
+def _initial_browse_dir(*, dest: str, current_value: str) -> Path:
+    if current_value:
+        current_path = Path(current_value)
+        if current_path.suffix:
+            return current_path.parent
+        return current_path
+    if dest in {"checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}:
+        return _CHECKPOINT_DIR
+    return _REPO_ROOT
+
+
+def _run_dqn_preset_overrides() -> dict[str, dict[str, object]]:
+    return {
+        "defaults": {},
+        "reward survival": {
+            "reward_survival": 0.25,
+            "reward_step_penalty": 0.005,
+            "reward_fail_penalty": 3.0,
+            "reward_danger_tile_penalty": 0.15,
+            "reward_safe_tile_bonus": 0.05,
+        },
+        "reward exploration": {
+            "reward_survival": 0.05,
+            "reward_step_penalty": 0.003,
+            "reward_currency_delta": 0.03,
+            "reward_score_delta": 0.003,
+            "reward_resource_proximity": 0.08,
+            "reward_points_collected": 0.004,
+            "reward_phase_progress": 0.2,
+        },
+    }
+
+
 def _validate_text_input(action: argparse.Action, *, value: str, field_name: str) -> None:
     if action.type is not None:
         try:
@@ -171,22 +216,59 @@ class _ArgForm(ttk.Frame):
         profile_id: str,
         parser: argparse.ArgumentParser,
         module_args: tuple[str, ...],
+        presets: dict[str, dict[str, object]] | None = None,
+        on_change: Callable[[], None] | None = None,
     ) -> None:
         super().__init__(master, padding=(4, 4, 4, 2))
         self._profile_id = profile_id
         self._module_args = module_args
         self._fields: list[_FormField] = []
-        self._default_help = "Focus a field to show option help."
+        self._field_by_dest: dict[str, _FormField] = {}
+        self._presets = presets or {}
+        self._on_change = on_change
+        self._default_help = "Hover or focus a field to show option help."
         self._help_text = tk.StringVar(value=self._default_help)
+        self._selected_preset = tk.StringVar()
 
         self.columnconfigure(0, weight=1)
-        self.rowconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
+
+        body_row = 0
+        if self._presets:
+            preset_row = ttk.Frame(self, padding=(8, 2, 8, 2))
+            preset_row.grid(row=0, column=0, sticky="ew")
+            preset_row.columnconfigure(2, weight=1)
+            ttk.Label(preset_row, text="Preset").grid(row=0, column=0, sticky="w")
+            preset_names = tuple(self._presets.keys())
+            self._selected_preset.set(preset_names[0])
+            preset_combo = ttk.Combobox(
+                preset_row,
+                textvariable=self._selected_preset,
+                values=preset_names,
+                state="readonly",
+                width=24,
+            )
+            preset_combo.grid(row=0, column=1, sticky="w", padx=(6, 6))
+            apply_preset = ttk.Button(preset_row, text="Apply", command=self._apply_selected_preset)
+            apply_preset.grid(row=0, column=2, sticky="w")
+            self._bind_help(
+                preset_combo,
+                "Apply a pre-populated settings profile for common reward configurations.",
+            )
+            self._bind_help(
+                apply_preset,
+                "Load selected preset values into the form fields.",
+            )
+            body_row = 1
 
         body = ttk.Frame(self, padding=(4, 2, 4, 0))
-        body.grid(row=0, column=0, sticky="nsew")
+        body.grid(row=body_row, column=0, sticky="nsew")
 
-        actions = _iter_parser_actions(parser)
+        actions = _sort_form_actions(_iter_parser_actions(parser))
         max_columns = _max_form_columns(len(actions))
+        action_dests = {action.dest for action in actions}
+        if "exe" in action_dests and "checkpoint" in action_dests:
+            max_columns = max(4, max_columns)
         for column_index in range(max_columns):
             body.columnconfigure(column_index, weight=1, uniform="arg-columns")
 
@@ -216,13 +298,19 @@ class _ArgForm(ttk.Frame):
                 widget = ttk.Checkbutton(card, variable=variable, text=label_text)
                 widget.grid(row=0, column=0, sticky="w")
                 self._bind_help(widget, help_text)
-                self._fields.append(_FormField(action=action, variable=variable))
+                field = _FormField(action=action, variable=variable)
+                self._fields.append(field)
+                self._field_by_dest[action.dest] = field
             else:
-                ttk.Label(card, text=label_text).grid(row=0, column=0, sticky="w")
+                label = ttk.Label(card, text=label_text)
+                label.grid(row=0, column=0, sticky="w")
+                self._bind_help(label, help_text)
                 variable = tk.StringVar(value=_default_text(action))
                 widget = self._build_value_widget(card, action=action, variable=variable)
                 self._bind_help(widget, help_text)
-                self._fields.append(_FormField(action=action, variable=variable))
+                field = _FormField(action=action, variable=variable)
+                self._fields.append(field)
+                self._field_by_dest[action.dest] = field
 
             column_index += span
             if column_index >= max_columns:
@@ -236,20 +324,54 @@ class _ArgForm(ttk.Frame):
             padding=(8, 4, 8, 2),
             anchor="w",
         )
-        help_label.grid(row=1, column=0, sticky="ew")
+        help_label.grid(row=body_row + 1, column=0, sticky="ew")
+
+    def _apply_selected_preset(self) -> None:
+        preset_name = self._selected_preset.get()
+        overrides = self._presets.get(preset_name)
+        if overrides is None:
+            return
+
+        for field in self._fields:
+            action = field.action
+            default = action.default
+            if isinstance(field.variable, tk.BooleanVar):
+                field.variable.set(bool(default))
+                continue
+            if default is None:
+                field.variable.set("")
+            else:
+                field.variable.set(str(default))
+
+        for dest, value in overrides.items():
+            field = self._field_by_dest.get(dest)
+            if field is None:
+                continue
+            if isinstance(field.variable, tk.BooleanVar):
+                field.variable.set(bool(value))
+            else:
+                if value is None:
+                    field.variable.set("")
+                else:
+                    field.variable.set(str(value))
+
+        if callable(self._on_change):
+            self._on_change()
 
     def _bind_help(self, widget: tk.Misc, help_text: str) -> None:
         if not help_text:
             return
 
-        def _on_focus_in(_: tk.Event[tk.Misc]) -> None:
+        def _show_help(_: tk.Event[tk.Misc]) -> None:
             self._help_text.set(help_text)
 
-        def _on_focus_out(_: tk.Event[tk.Misc]) -> None:
+        def _restore_help(_: tk.Event[tk.Misc]) -> None:
             self._help_text.set(self._default_help)
 
-        widget.bind("<FocusIn>", _on_focus_in)
-        widget.bind("<FocusOut>", _on_focus_out)
+        widget.bind("<FocusIn>", _show_help)
+        widget.bind("<FocusOut>", _restore_help)
+        widget.bind("<Enter>", _show_help)
+        widget.bind("<Leave>", _restore_help)
 
     def _build_value_widget(
         self,
@@ -311,7 +433,7 @@ class _ArgForm(ttk.Frame):
 
     def _browse_path(self, variable: tk.StringVar, dest: str) -> None:
         current_value = variable.get().strip()
-        initial_dir = str(Path(current_value).parent) if current_value else str(_REPO_ROOT)
+        initial_dir = str(_initial_browse_dir(dest=dest, current_value=current_value))
         if dest == "exe":
             path = filedialog.askopenfilename(
                 parent=self,
@@ -453,27 +575,37 @@ class DqnRunnerGui(tk.Tk):
         eval_compare_parser = _get_subparser(evaluate_parser, command_name="compare")
 
         profiles = (
-            ("run-dqn", "DQN Run (train/eval)", run_parser, ("-m", "src.env.dqn_policy_runner")),
+            (
+                "run-dqn",
+                "DQN Run (train/eval)",
+                run_parser,
+                ("-m", "src.env.dqn_policy_runner"),
+                _run_dqn_preset_overrides(),
+            ),
             (
                 "eval-run",
                 "Evaluate Run",
                 eval_run_parser,
                 ("-m", "src.training.evaluate", "run"),
+                None,
             ),
             (
                 "eval-compare",
                 "Evaluate Compare",
                 eval_compare_parser,
                 ("-m", "src.training.evaluate", "compare"),
+                None,
             ),
         )
 
-        for profile_id, title, parser, module_args in profiles:
+        for profile_id, title, parser, module_args, presets in profiles:
             form = _ArgForm(
                 self._notebook,
                 profile_id=profile_id,
                 parser=parser,
                 module_args=module_args,
+                presets=presets,
+                on_change=self._refresh_preview,
             )
             self._forms[profile_id] = form
             self._notebook.add(form, text=title)
