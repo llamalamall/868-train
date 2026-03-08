@@ -9,7 +9,9 @@ Controls:
     z: pause/resume polling
     r: refresh now
     p: toggle resolve-each-poll
-    enter: advance one paused runner step (when runner step-through is enabled)
+    f6: pause runner session (step-by-step mode)
+    enter / f7: execute one runner step while paused
+    f8: resume runner full-auto session
     arrows / 0-9 / escape / space: pass key input through to the game window
 """
 
@@ -23,6 +25,7 @@ import datetime as dt
 import json
 import os
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -75,6 +78,8 @@ PASSTHROUGH_KEY_MAP = {
     "escape": "ESCAPE",
     "space": "SPACE",
 }
+CONTROL_MODE_AUTO = "auto"
+CONTROL_MODE_PAUSED = "paused"
 
 
 class StateMonitorError(RuntimeError):
@@ -126,6 +131,15 @@ class ExternalStatusSnapshot:
 
     training_line: str = ""
     action_line: str = ""
+    reward_line: str = ""
+
+
+@dataclass(frozen=True)
+class ExternalControlSnapshot:
+    """Optional runner control payload shared between runner and monitor."""
+
+    mode: str = CONTROL_MODE_AUTO
+    advance_counter: int = 0
 
 
 def load_external_status_snapshot(status_file: Path | None) -> ExternalStatusSnapshot:
@@ -144,42 +158,104 @@ def load_external_status_snapshot(status_file: Path | None) -> ExternalStatusSna
         return ExternalStatusSnapshot()
     training_line = payload.get("training_line", "")
     action_line = payload.get("action_line", "")
+    reward_line = payload.get("reward_line", "")
     return ExternalStatusSnapshot(
         training_line=str(training_line),
         action_line=str(action_line),
+        reward_line=str(reward_line),
     )
+
+
+def load_external_control_snapshot(control_file: Path | None) -> ExternalControlSnapshot:
+    """Read optional runner control payload with execution mode and advance counter."""
+    if control_file is None:
+        return ExternalControlSnapshot()
+    if not control_file.exists():
+        return ExternalControlSnapshot()
+    try:
+        payload = json.loads(control_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return ExternalControlSnapshot()
+    if not isinstance(payload, dict):
+        return ExternalControlSnapshot()
+
+    mode_raw = str(payload.get("mode", CONTROL_MODE_AUTO)).strip().lower()
+    mode = CONTROL_MODE_PAUSED if mode_raw == CONTROL_MODE_PAUSED else CONTROL_MODE_AUTO
+    try:
+        advance_counter = int(payload.get("advance_counter", 0))
+    except (TypeError, ValueError):
+        advance_counter = 0
+    return ExternalControlSnapshot(mode=mode, advance_counter=max(0, advance_counter))
+
+
+def _write_external_control_snapshot(
+    control_file: Path,
+    snapshot: ExternalControlSnapshot,
+) -> None:
+    payload = {
+        "mode": snapshot.mode,
+        "advance_counter": int(snapshot.advance_counter),
+    }
+    json_text = json.dumps(payload)
+    staging_path = control_file.with_suffix(".tmp")
+    retry_delays = (0.005, 0.01, 0.02, 0.04, 0.08)
+
+    for delay_seconds in retry_delays:
+        try:
+            staging_path.write_text(json_text, encoding="utf-8")
+            staging_path.replace(control_file)
+            return
+        except PermissionError:
+            time.sleep(delay_seconds)
+
+    for delay_seconds in retry_delays:
+        try:
+            control_file.write_text(json_text, encoding="utf-8")
+            return
+        except PermissionError:
+            time.sleep(delay_seconds)
+
+    try:
+        control_file.write_text(json_text, encoding="utf-8")
+    finally:
+        staging_path.unlink(missing_ok=True)
+
+
+def set_external_control_mode(control_file: Path | None, mode: str) -> ExternalControlSnapshot:
+    """Set runner execution mode to auto or paused while preserving advance counter."""
+    if control_file is None:
+        return ExternalControlSnapshot()
+    snapshot = load_external_control_snapshot(control_file)
+    normalized_mode = CONTROL_MODE_PAUSED if mode == CONTROL_MODE_PAUSED else CONTROL_MODE_AUTO
+    updated = ExternalControlSnapshot(
+        mode=normalized_mode,
+        advance_counter=snapshot.advance_counter,
+    )
+    _write_external_control_snapshot(control_file, updated)
+    return updated
+
+
+def step_external_control(control_file: Path | None) -> ExternalControlSnapshot:
+    """Emit one manual-step token and force paused mode for step-by-step execution."""
+    if control_file is None:
+        return ExternalControlSnapshot()
+    snapshot = load_external_control_snapshot(control_file)
+    updated = ExternalControlSnapshot(
+        mode=CONTROL_MODE_PAUSED,
+        advance_counter=snapshot.advance_counter + 1,
+    )
+    _write_external_control_snapshot(control_file, updated)
+    return updated
 
 
 def load_external_advance_counter(control_file: Path | None) -> int:
     """Read optional runner control payload and return current Enter-press counter."""
-    if control_file is None:
-        return 0
-    if not control_file.exists():
-        return 0
-    try:
-        payload = json.loads(control_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return 0
-    if not isinstance(payload, dict):
-        return 0
-    try:
-        return int(payload.get("advance_counter", 0))
-    except (TypeError, ValueError):
-        return 0
+    return load_external_control_snapshot(control_file).advance_counter
 
 
 def increment_external_advance_counter(control_file: Path | None) -> int:
     """Increment and persist runner control Enter-press counter."""
-    if control_file is None:
-        return 0
-    counter = load_external_advance_counter(control_file) + 1
-    staging_path = control_file.with_suffix(".tmp")
-    staging_path.write_text(
-        json.dumps({"advance_counter": counter}),
-        encoding="utf-8",
-    )
-    staging_path.replace(control_file)
-    return counter
+    return step_external_control(control_file).advance_counter
 
 
 def map_tui_key_to_passthrough_key(key: str) -> str | None:
@@ -808,7 +884,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--external-control-file",
         type=Path,
         default=None,
-        help="Optional JSON file used for runner step-through Enter handshakes.",
+        help="Optional JSON file for runner session pause/step/resume controls.",
     )
     return parser
 
@@ -824,7 +900,8 @@ def _run_tui(
         from textual import events
         from textual.app import App, ComposeResult
         from textual.binding import Binding
-        from textual.widgets import DataTable, Footer, Header, Static
+        from textual.containers import Horizontal
+        from textual.widgets import Button, DataTable, Footer, Header, Static
     except ModuleNotFoundError as import_error:  # pragma: no cover - dependency guard path
         raise StateMonitorError(
             "Missing dependency 'textual'. Install dependencies with `pip install -e .[dev]`."
@@ -836,6 +913,9 @@ def _run_tui(
             Binding("z", "toggle_pause", "Pause/Resume"),
             Binding("r", "refresh_now", "Refresh"),
             Binding("p", "toggle_resolve_mode", "Resolve/Cache"),
+            Binding("f6", "session_pause", "SessionPause"),
+            Binding("f7", "session_step", "SessionStep"),
+            Binding("f8", "session_resume", "SessionAuto"),
             Binding("up", "passthrough_up", show=False, priority=True),
             Binding("down", "passthrough_down", show=False, priority=True),
             Binding("left", "passthrough_left", show=False, priority=True),
@@ -862,6 +942,7 @@ def _run_tui(
             self._board_widget: Static | None = None
             self._training_widget: Static | None = None
             self._action_widget: Static | None = None
+            self._reward_widget: Static | None = None
             self._table: DataTable | None = None
             self._last_snapshot: PollSnapshot | None = None
             self._controls = ActionAPI(input_driver=InputDriver())
@@ -872,11 +953,18 @@ def _run_tui(
         def compose(self) -> ComposeResult:
             yield Header(show_clock=True)
             yield DataTable(id="state_table")
+            yield Horizontal(
+                Button("Pause Session", id="session_pause_button", variant="warning"),
+                Button("Step Once", id="session_step_button", variant="primary"),
+                Button("Resume Auto", id="session_resume_button", variant="success"),
+                id="session_controls",
+            )
             yield Static("", id="status_line")
             yield Static("", id="progs_line")
             yield Static("", id="board_line")
             yield Static("", id="training_line")
             yield Static("", id="action_line")
+            yield Static("", id="reward_line")
             yield Footer()
 
         def on_mount(self) -> None:
@@ -886,6 +974,7 @@ def _run_tui(
             self._board_widget = self.query_one("#board_line", Static)
             self._training_widget = self.query_one("#training_line", Static)
             self._action_widget = self.query_one("#action_line", Static)
+            self._reward_widget = self.query_one("#reward_line", Static)
 
             self._table.cursor_type = "none"
             self._table.zebra_stripes = True
@@ -950,16 +1039,18 @@ def _run_tui(
                 or self._board_widget is None
                 or self._training_widget is None
                 or self._action_widget is None
+                or self._reward_widget is None
                 or self._last_snapshot is None
             ):
                 return
 
             snapshot = self._last_snapshot
+            external_control = load_external_control_snapshot(self._external_control_file)
             mode = "resolve-each-poll" if self._engine.resolve_each_poll else "cached-addresses"
             paused_flag = "paused" if self.paused else "running"
             command = f" | command={self._last_command}" if self._last_command else ""
-            advance_counter = (
-                f" | advance={load_external_advance_counter(self._external_control_file)}"
+            session_state = (
+                f" | session={external_control.mode} | advance={external_control.advance_counter}"
                 if self._external_control_file is not None
                 else ""
             )
@@ -969,13 +1060,14 @@ def _run_tui(
             self._status_widget.update(
                 f"{snapshot.timestamp} | pid={self._engine.attached.pid} | {paused_flag} | "
                 f"mode={mode} | interval={self._poll_interval:.2f}s | {self._control_state}{command}"
-                f"{advance_counter}{fail_message}"
+                f"{session_state}{fail_message}"
             )
             self._progs_widget.update(progs_message)
             self._board_widget.update(board_message)
             external_status = load_external_status_snapshot(self._external_status_file)
             self._training_widget.update(external_status.training_line)
             self._action_widget.update(external_status.action_line)
+            self._reward_widget.update(external_status.reward_line)
 
         def action_toggle_pause(self) -> None:
             self.paused = not self.paused
@@ -987,6 +1079,15 @@ def _run_tui(
         def action_toggle_resolve_mode(self) -> None:
             self._engine.resolve_each_poll = not self._engine.resolve_each_poll
             self._refresh_once()
+
+        def action_session_pause(self) -> None:
+            self._set_session_mode(CONTROL_MODE_PAUSED)
+
+        def action_session_resume(self) -> None:
+            self._set_session_mode(CONTROL_MODE_AUTO)
+
+        def action_session_step(self) -> None:
+            self._signal_step_advance()
 
         def action_passthrough_up(self) -> None:
             self._send_passthrough_key("UP")
@@ -1005,13 +1106,24 @@ def _run_tui(
                 return
             if event.key == "enter":
                 event.stop()
-                self._signal_step_advance()
+                self.action_session_step()
                 return
             passthrough_key = map_tui_key_to_passthrough_key(event.key)
             if passthrough_key is None:
                 return
             event.stop()
             self._send_passthrough_key(passthrough_key)
+
+        def on_button_pressed(self, event: Button.Pressed) -> None:
+            if event.button.id == "session_pause_button":
+                self.action_session_pause()
+                return
+            if event.button.id == "session_step_button":
+                self.action_session_step()
+                return
+            if event.button.id == "session_resume_button":
+                self.action_session_resume()
+                return
 
         def _send_passthrough_key(self, key_name: str) -> None:
             try:
@@ -1039,10 +1151,19 @@ def _run_tui(
 
         def _signal_step_advance(self) -> None:
             try:
-                counter = increment_external_advance_counter(self._external_control_file)
-                self._last_command = f"advance:{counter}"
+                snapshot = step_external_control(self._external_control_file)
+                self._last_command = f"session:step:{snapshot.advance_counter}"
             except OSError as error:
-                self._last_command = "advance:failed"
+                self._last_command = "session:step:failed"
+                self._control_state = f"controls=error ({error})"
+            self._update_status_line()
+
+        def _set_session_mode(self, mode: str) -> None:
+            try:
+                snapshot = set_external_control_mode(self._external_control_file, mode=mode)
+                self._last_command = f"session:{snapshot.mode}"
+            except OSError as error:
+                self._last_command = f"session:{mode}:failed"
                 self._control_state = f"controls=error ({error})"
             self._update_status_line()
 

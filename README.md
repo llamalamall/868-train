@@ -267,9 +267,167 @@ Available subcommands:
 To forward native command help through the master CLI:
 
 ```powershell
-python -m src.cli run-dqn -- --help
-python -m src.cli evaluate -- compare --help
+python -m src.cli run-heuristic -- --help
 ```
+
+Examples:
+
+```powershell
+# Startup validation checks
+python -m src.cli bootstrap
+
+# Print binary SHA256
+python -m src.cli fingerprint --print-sha256 "C:\path\to\868-hack.exe"
+
+# Run random baseline episodes
+python -m src.cli run-random --episodes 5 --max-steps 200
+
+# Run heuristic baseline episodes
+python -m src.cli run-heuristic --episodes 5 --max-steps 200 --movement-keys wasd
+
+# Run heuristic with deeper enemy lookahead
+python -m src.cli run-heuristic --episodes 5 --enemy-prediction-horizon-steps 4
+
+# Step through actions manually (press Enter in TUI before each move)
+python -m src.cli run-dqn --episodes 1 --step-through
+
+# Train DQN and auto-save checkpoint (path auto-generated under artifacts/checkpoints)
+python -m src.cli run-dqn --episodes 20 --max-steps 200
+
+# Evaluate from a saved DQN checkpoint
+python -m src.cli run-dqn --mode eval --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 5
+
+# Launch GUI to run DQN/evaluate with all available flags
+python -m src.cli dqn-gui
+
+# Task-15 KPI evaluation for one checkpoint
+python -m src.cli evaluate run --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 10 --seed 42
+
+# Task-15 checkpoint-vs-checkpoint KPI comparison
+python -m src.cli evaluate compare --checkpoint-a artifacts/checkpoints/dqn-a.json --checkpoint-b artifacts/checkpoints/dqn-b.json --episodes 10 --seed 42
+```
+
+`evaluate compare` launches the monitor TUI by default and defaults to `--window-input --no-focus-window` so compare runs can continue while keeping terminal focus.
+
+`dqn-gui` quality-of-life updates:
+- `exe` and `checkpoint` are pinned as the first controls in the first row.
+- Checkpoint/file browse dialogs default to `artifacts/checkpoints/`.
+- The `DQN Run (train/eval)` tab includes a preset dropdown (`defaults`, `reward survival`, `reward exploration`) to pre-populate common reward configurations.
+- Hovering over an argument name now shows that argument help text.
+
+When `--tui` or `--step-through` is enabled, runners automatically use window-targeted input so actions still dispatch to the game while the TUI has focus.
+
+## Control Smoke Test
+
+Task 04 adds a deterministic action API in `src/controller/action_api.py` and low-level key
+input retries in `src/controller/input_driver.py`.
+
+- Action methods: `move_up`, `move_down`, `move_left`, `move_right`, `confirm`, `cancel`, `wait`
+- Fixed smoke sequence helper: `run_smoke_test_sequence(action_api)`
+- Tunables: `ActionConfig` + `ActionTimings` (key map, press duration, inter-action delay, retries)
+
+## Binary Fingerprinting
+
+The app validates the game binary hash at startup using `src/config/binary_fingerprint.json`.
+
+1. Set `enabled` to `true`.
+2. Set `binary_path` to your pinned executable.
+3. Compute SHA256:
+
+```powershell
+python -m src.config.fingerprint --print-sha256 "C:\path\to\868-hack.exe"
+```
+
+4. Paste the value into `expected_sha256`.
+
+The app exits on hash mismatch with an actionable error. To intentionally bypass the check,
+set `enabled` to `false` explicitly.
+
+## Offsets Registry
+
+Offsets discovered from Ghidra are tracked in `src/config/offsets.json`.
+Startup validates schema and fails fast when required fields are missing or malformed.
+
+Each entry requires:
+- `name`
+- `data_type`
+- `base` (`kind` + `value`)
+- `pointer_chain`
+- `confidence` (`low`, `medium`, `high`)
+- `notes`
+
+Use `notes/ghidra_findings.md` as the worksheet before updating offsets.
+
+## Memory Monitor (Interactive TUI)
+
+Use the interactive monitor to watch all configured offset fields live:
+
+```powershell
+python -m src.memory.state_monitor_tui
+```
+
+Common options:
+
+```powershell
+# Monitor selected fields only
+python -m src.memory.state_monitor_tui --fields player_energy,player_credits
+
+# Faster polling + re-resolve pointer chains every tick
+python -m src.memory.state_monitor_tui --interval 0.25 --resolve-each-poll
+```
+
+TUI controls:
+- `q`: quit
+- `z`: pause/resume polling
+- `r`: refresh immediately
+- `p`: toggle pointer mode (`cached-addresses` vs `resolve-each-poll`)
+- `f6` or `Pause Session` button: pause runner session (step-by-step mode)
+- `enter` / `f7` or `Step Once` button: execute one runner step while paused
+- `f8` or `Resume Auto` button: resume runner full-auto execution
+- `up/down/left/right`, `1` through `0`, `escape`, `space`: pass controls to the game window
+
+When session mode is paused, each manual step publishes a human-readable reward breakdown line in the monitor footer. In auto mode, reward dump visibility follows `--print-reward-breakdown`.
+
+## Telemetry Logging (Task 10)
+
+Structured telemetry writes JSONL event streams under a namespaced run directory in `logs/`.
+
+- Core writer: `src/telemetry/logger.py` (`JsonlTelemetryLogger`)
+- Replay + summaries: `src/telemetry/metrics.py`
+
+Typical events:
+- `episode_start`
+- `step` (action, pre/post state, reward, done, episode_id, step_index, timestamp)
+- `terminal`
+
+Example usage:
+
+```python
+from src.telemetry.logger import JsonlTelemetryLogger, TelemetryLoggerConfig
+
+logger = JsonlTelemetryLogger(TelemetryLoggerConfig(run_name="train"))
+episode_id = logger.start_episode()
+logger.log_step(
+    episode_id=episode_id,
+    action="move_up",
+    pre_state={"health": 10},
+    post_state={"health": 9},
+    reward=-1.0,
+    done=False,
+)
+logger.log_terminal(episode_id=episode_id, reason="fail_state")
+logger.close()
+```
+
+## Baseline Runners (Task 13)
+
+Two baseline policy runners are available:
+- Random baseline: `python -m src.cli run-random ...`
+- Heuristic baseline: `python -m src.cli run-heuristic ...`
+
+Both support reward shaping flags (`--reward-*`) and print per-episode + summary metrics for quick comparison.
+All policy runners (`run-random`, `run-heuristic`, `run-dqn`) now launch the live state-monitor TUI by
+default in a separate window; disable with `--no-tui` and tune polling with `--tui-interval`.
 
 ## Project Structure
 

@@ -1322,6 +1322,7 @@ def run_random_policy(
                         "total_reward": total_reward,
                         "done": done,
                         "terminal_reason": terminal_reason,
+                        "reward_breakdown": info.get("reward_breakdown"),
                     }
                 )
 

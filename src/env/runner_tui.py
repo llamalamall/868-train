@@ -12,6 +12,14 @@ import time
 from dataclasses import dataclass, field
 
 
+@dataclass(frozen=True)
+class RunnerControlState:
+    """Shared runner-control state exchanged with the monitor process."""
+
+    mode: str = "auto"
+    advance_counter: int = 0
+
+
 @dataclass
 class RunnerTuiSession:
     """Manage one external monitor-TUI process and a shared status payload file."""
@@ -29,6 +37,8 @@ class RunnerTuiSession:
     _owns_status_file: bool = field(default=False, init=False, repr=False)
     _owns_control_file: bool = field(default=False, init=False, repr=False)
     _process: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
+    _last_advance_counter: int = field(default=0, init=False, repr=False)
+    _last_step_was_manual: bool = field(default=False, init=False, repr=False)
 
     def start(self) -> None:
         if not self.enabled or self._process is not None:
@@ -52,10 +62,19 @@ class RunnerTuiSession:
             os.close(handle)
             self._control_file_path = Path(control_file)
             self._owns_control_file = True
+        initial_control_state = RunnerControlState(
+            mode="paused" if self.step_through else "auto",
+            advance_counter=0,
+        )
         self._write_json_payload(
             path=self._control_file_path,
-            payload={"advance_counter": 0},
+            payload={
+                "mode": initial_control_state.mode,
+                "advance_counter": initial_control_state.advance_counter,
+            },
         )
+        self._last_advance_counter = 0
+        self._last_step_was_manual = False
         self.update(
             training_line="training=initializing",
             action_line="action=idle reason=initializing",
@@ -80,7 +99,7 @@ class RunnerTuiSession:
             creationflags = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
             self._process = subprocess.Popen(command, creationflags=creationflags)
 
-    def update(self, *, training_line: str, action_line: str) -> None:
+    def update(self, *, training_line: str, action_line: str, reward_line: str = "") -> None:
         if not self.enabled or self._status_file_path is None:
             return
 
@@ -89,8 +108,50 @@ class RunnerTuiSession:
             payload={
                 "training_line": str(training_line),
                 "action_line": str(action_line),
+                "reward_line": str(reward_line),
             },
         )
+
+    def wait_for_step_gate(
+        self,
+        *,
+        training_line: str,
+        action_line: str,
+    ) -> None:
+        if not self.enabled:
+            self._last_step_was_manual = False
+            return
+        if self._control_file_path is None:
+            self._last_step_was_manual = False
+            return
+
+        control_state = self._read_control_state()
+        if control_state.mode == "auto":
+            self._last_advance_counter = control_state.advance_counter
+            self._last_step_was_manual = False
+            return
+        if control_state.advance_counter > self._last_advance_counter:
+            self._last_advance_counter = control_state.advance_counter
+            self._last_step_was_manual = True
+            return
+
+        self.update(
+            training_line=training_line,
+            action_line=f"{action_line} status=waiting_for_step",
+        )
+        while True:
+            control_state = self._read_control_state()
+            if control_state.mode == "auto":
+                self._last_advance_counter = control_state.advance_counter
+                self._last_step_was_manual = False
+                return
+            if control_state.advance_counter > self._last_advance_counter:
+                self._last_advance_counter = control_state.advance_counter
+                self._last_step_was_manual = True
+                return
+            if self._process is not None and self._process.poll() is not None:
+                raise RuntimeError("TUI closed while waiting for step advance.")
+            time.sleep(0.05)
 
     def wait_for_step_advance(
         self,
@@ -98,37 +159,37 @@ class RunnerTuiSession:
         training_line: str,
         action_line: str,
     ) -> None:
-        if not self.enabled or not self.step_through:
-            return
-        if self._control_file_path is None:
-            return
+        """Backward-compatible alias for the older step-through-only API."""
+        self.wait_for_step_gate(training_line=training_line, action_line=action_line)
 
-        self.update(
-            training_line=training_line,
-            action_line=f"{action_line} status=waiting_for_enter",
-        )
-        baseline_counter = self._read_advance_counter()
-        while True:
-            current_counter = self._read_advance_counter()
-            if current_counter > baseline_counter:
-                return
-            if self._process is not None and self._process.poll() is not None:
-                raise RuntimeError("TUI closed while waiting for Enter to advance.")
-            time.sleep(0.05)
+    def consume_manual_step_flag(self) -> bool:
+        """Return and clear whether the most recent step gate used a manual step token."""
+        was_manual = self._last_step_was_manual
+        self._last_step_was_manual = False
+        return was_manual
 
-    def _read_advance_counter(self) -> int:
+    def _read_control_state(self) -> RunnerControlState:
         if self._control_file_path is None or not self._control_file_path.exists():
-            return 0
+            return RunnerControlState()
         try:
             payload = json.loads(self._control_file_path.read_text(encoding="utf-8"))
         except (OSError, ValueError, json.JSONDecodeError):
-            return 0
+            return RunnerControlState()
         if not isinstance(payload, dict):
-            return 0
+            return RunnerControlState()
+        mode = self._normalize_control_mode(payload.get("mode"))
         try:
-            return int(payload.get("advance_counter", 0))
+            advance_counter = int(payload.get("advance_counter", 0))
         except (TypeError, ValueError):
-            return 0
+            advance_counter = 0
+        return RunnerControlState(mode=mode, advance_counter=max(0, advance_counter))
+
+    @staticmethod
+    def _normalize_control_mode(raw_mode: object) -> str:
+        mode_text = str(raw_mode).strip().lower()
+        if mode_text == "paused":
+            return "paused"
+        return "auto"
 
     @staticmethod
     def _write_json_payload(*, path: Path, payload: dict[str, object]) -> None:

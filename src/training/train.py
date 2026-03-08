@@ -143,6 +143,7 @@ def run_agent_policy(
                         "total_reward": total_reward,
                         "done": done,
                         "terminal_reason": terminal_reason,
+                        "reward_breakdown": info.get("reward_breakdown"),
                     }
                 )
 
@@ -267,6 +268,7 @@ def run_dqn_training(
                         "updates_applied": updates_applied,
                         "last_loss": last_loss,
                         "epsilon": agent.epsilon,
+                        "reward_breakdown": info.get("reward_breakdown"),
                     }
                 )
 

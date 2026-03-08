@@ -10,7 +10,12 @@ from typing import Any
 
 from src.agent.dqn_agent import DQNAgent, DQNConfig
 from src.env.game_env import GameEnv, GameEnvConfig
-from src.env.random_policy_runner import _build_action_config, _build_reward_config, _build_reward_fn
+from src.env.random_policy_runner import (
+    _build_action_config,
+    _build_reward_config,
+    _build_reward_fn,
+    format_reward_breakdown_line,
+)
 from src.env.runner_tui import RunnerTuiSession
 from src.training.rewards import RewardWeights
 from src.training.train import LearningEpisodeRolloutResult, run_dqn_training
@@ -100,6 +105,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help=(
             "Optional JSON file path to receive live training/action status lines. "
+            "Useful for GUI monitoring without launching the external TUI."
+        ),
+    )
+    parser.add_argument(
+        "--external-control-file",
+        default=None,
+        help=(
+            "Optional JSON file path for external pause/step/resume session controls. "
             "Useful for GUI monitoring without launching the external TUI."
         ),
     )
@@ -427,6 +440,7 @@ def main() -> None:
         step_through=bool(args.step_through),
         launch_monitor=bool(args.tui),
         external_status_file=(str(args.external_status_file) if args.external_status_file else None),
+        external_control_file=(str(args.external_control_file) if args.external_control_file else None),
     )
 
     checkpoint_path = _resolve_checkpoint_path(args)
@@ -452,6 +466,7 @@ def main() -> None:
         tui.start()
 
         def _on_step(event: dict[str, Any]) -> None:
+            should_emit_reward_dump = bool(args.print_reward_breakdown) or tui.consume_manual_step_flag()
             tui.update(
                 training_line=(
                     "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
@@ -475,13 +490,14 @@ def main() -> None:
                         else "-"
                     ),
                 ),
+                reward_line=(format_reward_breakdown_line(event) if should_emit_reward_dump else ""),
             )
 
         def _on_before_step(event: dict[str, Any]) -> None:
-            tui.wait_for_step_advance(
+            tui.wait_for_step_gate(
                 training_line=(
                     "episode={episode} step={step} total={total:.3f} "
-                    "epsilon={epsilon:.4f} updates={updates} waiting=enter".format(
+                    "epsilon={epsilon:.4f} updates={updates} waiting=step".format(
                         episode=event.get("episode_id"),
                         step=int(event.get("step_index", 0)) + 1,
                         total=float(event.get("total_reward", 0.0)),
@@ -528,7 +544,7 @@ def main() -> None:
                     max_steps_per_episode=int(args.max_steps),
                     explore=True,
                     learn=True,
-                    before_step_callback=_on_before_step if bool(args.step_through) else None,
+                    before_step_callback=_on_before_step if monitor_enabled else None,
                     step_callback=_on_step if monitor_enabled else None,
                 )[0]
                 results.append(episode_result)
@@ -565,7 +581,7 @@ def main() -> None:
                     max_steps_per_episode=int(args.max_steps),
                     explore=False,
                     learn=False,
-                    before_step_callback=_on_before_step if bool(args.step_through) else None,
+                    before_step_callback=_on_before_step if monitor_enabled else None,
                     step_callback=_on_step if monitor_enabled else None,
                 )
             )
