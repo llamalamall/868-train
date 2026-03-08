@@ -1089,6 +1089,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default=0.5,
         help="Polling interval for compare TUI state monitor (seconds).",
     )
+    compare_parser.add_argument(
+        "--external-status-file",
+        default=None,
+        help=(
+            "Optional JSON file path to receive compare status updates for GUI monitoring "
+            "without opening the external TUI."
+        ),
+    )
     return parser
 
 
@@ -1165,10 +1173,13 @@ def main() -> None:
     if args.command == "compare":
         label_a = args.label_a or Path(str(args.checkpoint_a)).name
         label_b = args.label_b or Path(str(args.checkpoint_b)).name
+        monitor_enabled = bool(args.tui) or bool(args.external_status_file)
         tui = RunnerTuiSession(
             executable_name=str(args.exe),
-            enabled=bool(args.tui),
+            enabled=monitor_enabled,
             interval_seconds=float(args.tui_interval),
+            launch_monitor=bool(args.tui),
+            external_status_file=(str(args.external_status_file) if args.external_status_file else None),
         )
 
         def _on_step(event: dict[str, Any]) -> None:
@@ -1240,8 +1251,8 @@ def main() -> None:
                 max_steps_per_episode=int(args.max_steps),
                 seed=args.seed,
                 label=label_a,
-                step_callback=_on_step if bool(args.tui) else None,
-                episode_callback=_on_episode if bool(args.tui) else None,
+                step_callback=_on_step if monitor_enabled else None,
+                episode_callback=_on_episode if monitor_enabled else None,
             )
             tui.update(
                 training_line="compare checkpoint={label} status=complete".format(label=label_a),
@@ -1258,8 +1269,8 @@ def main() -> None:
                 max_steps_per_episode=int(args.max_steps),
                 seed=args.seed,
                 label=label_b,
-                step_callback=_on_step if bool(args.tui) else None,
-                episode_callback=_on_episode if bool(args.tui) else None,
+                step_callback=_on_step if monitor_enabled else None,
+                episode_callback=_on_episode if monitor_enabled else None,
             )
             tui.update(
                 training_line="compare status=complete checkpoint_a={a} checkpoint_b={b}".format(

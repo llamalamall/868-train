@@ -21,20 +21,37 @@ class RunnerTuiSession:
     interval_seconds: float = 0.5
     fields_filter: str = "player_health,player_energy,player_credits,collected_progs"
     step_through: bool = False
+    launch_monitor: bool = True
+    external_status_file: str | None = None
+    external_control_file: str | None = None
     _status_file_path: Path | None = field(default=None, init=False, repr=False)
     _control_file_path: Path | None = field(default=None, init=False, repr=False)
+    _owns_status_file: bool = field(default=False, init=False, repr=False)
+    _owns_control_file: bool = field(default=False, init=False, repr=False)
     _process: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
 
     def start(self) -> None:
         if not self.enabled or self._process is not None:
             return
 
-        handle, status_file = tempfile.mkstemp(prefix="868-runner-status-", suffix=".json")
-        os.close(handle)
-        self._status_file_path = Path(status_file)
-        handle, control_file = tempfile.mkstemp(prefix="868-runner-control-", suffix=".json")
-        os.close(handle)
-        self._control_file_path = Path(control_file)
+        if self.external_status_file:
+            self._status_file_path = Path(self.external_status_file)
+            self._status_file_path.parent.mkdir(parents=True, exist_ok=True)
+            self._owns_status_file = False
+        else:
+            handle, status_file = tempfile.mkstemp(prefix="868-runner-status-", suffix=".json")
+            os.close(handle)
+            self._status_file_path = Path(status_file)
+            self._owns_status_file = True
+        if self.external_control_file:
+            self._control_file_path = Path(self.external_control_file)
+            self._control_file_path.parent.mkdir(parents=True, exist_ok=True)
+            self._owns_control_file = False
+        else:
+            handle, control_file = tempfile.mkstemp(prefix="868-runner-control-", suffix=".json")
+            os.close(handle)
+            self._control_file_path = Path(control_file)
+            self._owns_control_file = True
         self._write_json_payload(
             path=self._control_file_path,
             payload={"advance_counter": 0},
@@ -44,23 +61,24 @@ class RunnerTuiSession:
             action_line="action=idle reason=initializing",
         )
 
-        command = [
-            sys.executable,
-            "-m",
-            "src.memory.state_monitor_tui",
-            "--exe",
-            self.executable_name,
-            "--interval",
-            str(self.interval_seconds),
-            "--fields",
-            self.fields_filter,
-            "--external-status-file",
-            str(self._status_file_path),
-            "--external-control-file",
-            str(self._control_file_path),
-        ]
-        creationflags = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-        self._process = subprocess.Popen(command, creationflags=creationflags)
+        if self.launch_monitor:
+            command = [
+                sys.executable,
+                "-m",
+                "src.memory.state_monitor_tui",
+                "--exe",
+                self.executable_name,
+                "--interval",
+                str(self.interval_seconds),
+                "--fields",
+                self.fields_filter,
+                "--external-status-file",
+                str(self._status_file_path),
+                "--external-control-file",
+                str(self._control_file_path),
+            ]
+            creationflags = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
+            self._process = subprocess.Popen(command, creationflags=creationflags)
 
     def update(self, *, training_line: str, action_line: str) -> None:
         if not self.enabled or self._status_file_path is None:
@@ -128,13 +146,17 @@ class RunnerTuiSession:
                 self._process.wait(timeout=2.0)
         self._process = None
 
-        if self._status_file_path is not None:
+        if self._status_file_path is not None and self._owns_status_file:
             try:
                 self._status_file_path.unlink(missing_ok=True)
             finally:
                 self._status_file_path = None
-        if self._control_file_path is not None:
+        else:
+            self._status_file_path = None
+        if self._control_file_path is not None and self._owns_control_file:
             try:
                 self._control_file_path.unlink(missing_ok=True)
             finally:
                 self._control_file_path = None
+        else:
+            self._control_file_path = None

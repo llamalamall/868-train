@@ -3,10 +3,14 @@
 from __future__ import annotations
 
 import argparse
+import json
 import math
+import os
 import queue
+import re
 import subprocess
 import sys
+import tempfile
 import threading
 import tkinter as tk
 from dataclasses import dataclass
@@ -19,8 +23,11 @@ from src.training import evaluate
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _PATH_LIKE_DESTS = {"exe", "checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}
+_HIDDEN_GUI_DESTS = {"external_status_file"}
 _MAX_FORM_COLUMNS = 5
 _CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
+_STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
+_EPSILON_HISTORY_LIMIT = 240
 _PALETTE = {
     "bg": "#0b0f14",
     "surface": "#121922",
@@ -51,6 +58,8 @@ def _iter_parser_actions(parser: argparse.ArgumentParser) -> tuple[argparse.Acti
         if isinstance(action, argparse._SubParsersAction):  # noqa: SLF001
             continue
         if not action.option_strings:
+            continue
+        if action.dest in _HIDDEN_GUI_DESTS:
             continue
         actions.append(action)
     return tuple(actions)
@@ -220,6 +229,10 @@ def _format_command(command: list[str]) -> str:
     if not command:
         return ""
     return subprocess.list2cmdline(command)
+
+
+def _parse_status_values(line: str) -> dict[str, str]:
+    return {key: value for key, value in _STATUS_KV_PATTERN.findall(line)}
 
 
 @dataclass
@@ -579,6 +592,13 @@ class DqnRunnerGui(tk.Tk):
         self._forms: dict[str, _ArgForm] = {}
         self._status_text = tk.StringVar(value="READY")
         self._status_phase = 0
+        self._last_form: _ArgForm | None = None
+        self._external_status_file: Path | None = None
+        self._status_snapshot: tuple[str, str] = ("", "")
+        self._monitor_training_line = tk.StringVar(value="training=idle")
+        self._monitor_action_line = tk.StringVar(value="action=idle")
+        self._monitor_metric_vars: dict[str, tk.StringVar] = {}
+        self._epsilon_history: list[float] = []
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=4)
@@ -696,6 +716,7 @@ class DqnRunnerGui(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
         self.after(120, self._animate_status)
         self.after(100, self._drain_event_queue)
+        self.after(200, self._poll_external_status)
         self._refresh_tab_visuals()
         self._refresh_preview()
 
@@ -724,6 +745,19 @@ class DqnRunnerGui(tk.Tk):
         style.configure("FormHelp.TLabel", background=_PALETTE["surface"], foreground=_PALETTE["muted"], font=_FONTS["small"])
         style.configure("ArgCard.TFrame", background=_PALETTE["surface_alt"])
         style.configure("FormCheck.TCheckbutton", background=_PALETTE["surface_alt"])
+        style.configure("MetricCard.TFrame", background="#15212e")
+        style.configure(
+            "MetricName.TLabel",
+            background="#15212e",
+            foreground=_PALETTE["muted"],
+            font=("Segoe UI", 8),
+        )
+        style.configure(
+            "MetricValue.TLabel",
+            background="#15212e",
+            foreground=_PALETTE["text"],
+            font=("Consolas", 11, "bold"),
+        )
 
         style.configure("StatusReady.TLabel", background=_PALETTE["surface"], foreground=_PALETTE["accent"])
         style.configure("StatusRun.TLabel", background="#2a3522", foreground=_PALETTE["accent_alt"])
@@ -795,7 +829,79 @@ class DqnRunnerGui(tk.Tk):
             )
             self._forms[profile_id] = form
             self._notebook.add(form, text=title)
+            if self._last_form is None:
+                self._last_form = form
+        self._build_monitor_tab()
         self._refresh_tab_visuals()
+
+    def _build_monitor_tab(self) -> None:
+        monitor = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
+        monitor.columnconfigure(0, weight=1)
+        monitor.rowconfigure(1, weight=0)
+        monitor.rowconfigure(3, weight=1)
+
+        ttk.Label(
+            monitor,
+            text="Run Monitor",
+            style="SectionLabel.TLabel",
+        ).grid(row=0, column=0, sticky="w")
+
+        metric_grid = ttk.Frame(monitor, style="Surface.TFrame")
+        metric_grid.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+        for col in range(4):
+            metric_grid.columnconfigure(col, weight=1, uniform="metric-cols")
+
+        metric_keys = (
+            ("Episode", "episode"),
+            ("Step", "step"),
+            ("Reward", "reward"),
+            ("Total", "total"),
+            ("Epsilon", "epsilon"),
+            ("Updates", "updates"),
+            ("Done", "done"),
+            ("Terminal", "terminal"),
+        )
+        for idx, (label, key) in enumerate(metric_keys):
+            row = idx // 4
+            col = idx % 4
+            card = ttk.Frame(metric_grid, style="MetricCard.TFrame", padding=(8, 6, 8, 6))
+            card.grid(row=row, column=col, sticky="ew", padx=3, pady=3)
+            self._monitor_metric_vars[key] = tk.StringVar(value="-")
+            ttk.Label(card, text=label, style="MetricName.TLabel").grid(row=0, column=0, sticky="w")
+            ttk.Label(card, textvariable=self._monitor_metric_vars[key], style="MetricValue.TLabel").grid(
+                row=1,
+                column=0,
+                sticky="w",
+            )
+
+        ttk.Label(monitor, text="training_line", style="FormLabel.TLabel").grid(row=2, column=0, sticky="w")
+        ttk.Label(
+            monitor,
+            textvariable=self._monitor_training_line,
+            style="FormHelp.TLabel",
+        ).grid(row=2, column=0, sticky="e", padx=(120, 0))
+
+        graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
+        graph_shell.grid(row=3, column=0, sticky="nsew", pady=(20, 0))
+        graph_shell.columnconfigure(0, weight=1)
+        graph_shell.rowconfigure(1, weight=1)
+        ttk.Label(graph_shell, textvariable=self._monitor_action_line, style="FormHelp.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+            pady=(0, 4),
+        )
+        self._epsilon_canvas = tk.Canvas(
+            graph_shell,
+            height=180,
+            bg="#0d141d",
+            highlightthickness=1,
+            highlightbackground="#243244",
+        )
+        self._epsilon_canvas.grid(row=1, column=0, sticky="nsew")
+        self._epsilon_canvas.bind("<Configure>", lambda _: self._draw_epsilon_graph())
+
+        self._notebook.add(monitor, text="Live Monitor")
 
     def _refresh_tab_visuals(self) -> None:
         selected = self._notebook.select()
@@ -809,9 +915,15 @@ class DqnRunnerGui(tk.Tk):
     def _current_form(self) -> _ArgForm:
         selected_tab = self._notebook.select()
         current_widget = self.nametowidget(selected_tab)
-        if not isinstance(current_widget, _ArgForm):
-            raise RuntimeError("Selected tab is not a valid form.")
-        return current_widget
+        if isinstance(current_widget, _ArgForm):
+            self._last_form = current_widget
+            return current_widget
+        if self._last_form is not None:
+            return self._last_form
+        if self._forms:
+            self._last_form = next(iter(self._forms.values()))
+            return self._last_form
+        raise RuntimeError("No runnable profile form is available.")
 
     def _refresh_preview(self) -> None:
         try:
@@ -829,6 +941,7 @@ class DqnRunnerGui(tk.Tk):
         except ValueError as error:
             messagebox.showerror("Invalid Settings", str(error))
             return
+        command = self._prepare_command_for_monitor(command)
 
         self._append_output(f">>> {_format_command(command)}", tag="command")
         self._run_button.configure(state="disabled")
@@ -843,6 +956,149 @@ class DqnRunnerGui(tk.Tk):
             daemon=True,
         )
         self._reader_thread.start()
+
+    def _prepare_command_for_monitor(self, command: list[str]) -> list[str]:
+        if len(command) < 3:
+            self._external_status_file = None
+            return command
+        is_dqn_runner = command[1:3] == ["-m", "src.env.dqn_policy_runner"]
+        is_eval_compare = command[1:4] == ["-m", "src.training.evaluate", "compare"]
+        if not is_dqn_runner and not is_eval_compare:
+            self._external_status_file = None
+            return command
+
+        previous_status_file = self._external_status_file
+        if previous_status_file is not None:
+            previous_status_file.unlink(missing_ok=True)
+        status_file = self._create_status_file()
+        self._external_status_file = status_file
+        self._status_snapshot = ("", "")
+        self._monitor_training_line.set("training=starting")
+        self._monitor_action_line.set("action=idle reason=launch")
+        self._epsilon_history.clear()
+        for variable in self._monitor_metric_vars.values():
+            variable.set("-")
+
+        filtered: list[str] = []
+        skip_next = False
+        for index, token in enumerate(command):
+            if skip_next:
+                skip_next = False
+                continue
+            if token == "--external-status-file":
+                skip_next = index + 1 < len(command)
+                continue
+            if token in {"--tui", "--no-tui"}:
+                continue
+            filtered.append(token)
+
+        if is_dqn_runner or is_eval_compare:
+            filtered.append("--no-tui")
+        filtered.extend(["--external-status-file", str(status_file)])
+        return filtered
+
+    def _create_status_file(self) -> Path:
+        handle, file_path = tempfile.mkstemp(prefix="868-gui-status-", suffix=".json")
+        os.close(handle)
+        return Path(file_path)
+
+    def _poll_external_status(self) -> None:
+        status_file = self._external_status_file
+        if status_file is not None and status_file.exists():
+            try:
+                payload = json.loads(status_file.read_text(encoding="utf-8"))
+            except (OSError, ValueError, json.JSONDecodeError):
+                payload = None
+            if isinstance(payload, dict):
+                training_line = str(payload.get("training_line", ""))
+                action_line = str(payload.get("action_line", ""))
+                snapshot = (training_line, action_line)
+                if snapshot != self._status_snapshot:
+                    self._status_snapshot = snapshot
+                    self._monitor_training_line.set(training_line or "training=idle")
+                    self._monitor_action_line.set(action_line or "action=idle")
+                    self._update_monitor_metrics(training_line)
+        self.after(200, self._poll_external_status)
+
+    def _update_monitor_metrics(self, training_line: str) -> None:
+        status_values = _parse_status_values(training_line)
+        mapped_values = {
+            "episode": status_values.get("episode", "-"),
+            "step": status_values.get("step", "-"),
+            "reward": status_values.get("reward", "-"),
+            "total": status_values.get("total", "-"),
+            "epsilon": status_values.get("epsilon", "-"),
+            "updates": status_values.get("updates", "-"),
+            "done": status_values.get("done", "-"),
+            "terminal": status_values.get("terminal", "-"),
+        }
+        for key, value in mapped_values.items():
+            variable = self._monitor_metric_vars.get(key)
+            if variable is not None:
+                variable.set(value)
+
+        epsilon_text = mapped_values["epsilon"]
+        try:
+            epsilon_value = float(epsilon_text)
+        except (TypeError, ValueError):
+            return
+        epsilon_value = max(0.0, min(1.0, epsilon_value))
+        self._epsilon_history.append(epsilon_value)
+        if len(self._epsilon_history) > _EPSILON_HISTORY_LIMIT:
+            self._epsilon_history = self._epsilon_history[-_EPSILON_HISTORY_LIMIT:]
+        self._draw_epsilon_graph()
+
+    def _draw_epsilon_graph(self) -> None:
+        canvas = self._epsilon_canvas
+        width = max(canvas.winfo_width(), 2)
+        height = max(canvas.winfo_height(), 2)
+        canvas.delete("all")
+
+        left = 28
+        right = width - 10
+        top = 10
+        bottom = height - 18
+        canvas.create_rectangle(left, top, right, bottom, outline="#263546")
+        for ratio in (0.25, 0.5, 0.75):
+            y = top + int((bottom - top) * ratio)
+            canvas.create_line(left, y, right, y, fill="#1a2432")
+
+        canvas.create_text(left - 8, top, text="1.0", fill=_PALETTE["muted"], anchor="e", font=_FONTS["small"])
+        canvas.create_text(
+            left - 8,
+            bottom,
+            text="0.0",
+            fill=_PALETTE["muted"],
+            anchor="e",
+            font=_FONTS["small"],
+        )
+        canvas.create_text(
+            left,
+            top - 2,
+            text="epsilon",
+            fill=_PALETTE["accent"],
+            anchor="sw",
+            font=("Segoe UI", 8, "bold"),
+        )
+
+        points = self._epsilon_history
+        if len(points) < 2:
+            return
+        span = len(points) - 1
+        line_points: list[float] = []
+        for index, value in enumerate(points):
+            x = left + ((right - left) * index / span)
+            y = top + ((bottom - top) * (1.0 - value))
+            line_points.extend((x, y))
+        canvas.create_line(*line_points, fill=_PALETTE["accent"], width=2, smooth=True)
+        canvas.create_oval(
+            line_points[-2] - 3,
+            line_points[-1] - 3,
+            line_points[-2] + 3,
+            line_points[-1] + 3,
+            fill=_PALETTE["accent_alt"],
+            outline="",
+        )
 
     def _run_process(self, command: list[str]) -> None:
         try:
@@ -910,12 +1166,18 @@ class DqnRunnerGui(tk.Tk):
                 self._status_label.configure(
                     style="StatusReady.TLabel" if code == 0 else "StatusStop.TLabel"
                 )
+                if self._external_status_file is not None:
+                    self._external_status_file.unlink(missing_ok=True)
+                    self._external_status_file = None
                 self._refresh_preview()
         self.after(100, self._drain_event_queue)
 
     def _on_close(self) -> None:
         if self._process is not None:
             self._stop_process()
+        if self._external_status_file is not None:
+            self._external_status_file.unlink(missing_ok=True)
+            self._external_status_file = None
         self.destroy()
 
 
