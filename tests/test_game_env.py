@@ -142,6 +142,17 @@ class QueueStateProvider:
         return self._states[0]
 
 
+@dataclass
+class FakeClock:
+    now: float = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, duration_seconds: float) -> None:
+        self.now += max(float(duration_seconds), 0.0)
+
+
 def test_game_env_reset_and_step_contract() -> None:
     initial = _snapshot(health=10, failed=False)
     after_step = _snapshot(health=9, failed=False)
@@ -347,6 +358,88 @@ def test_game_env_step_retries_action_after_transient_input_failure() -> None:
     assert done is False
     assert actions.actions == ["wait", "wait"]
     assert recovery_reasons == ["action_dispatch_failed:wait"]
+
+
+def test_game_env_waits_for_action_processing_before_returning_step_state() -> None:
+    before = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+        ),
+    )
+    after = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(1, 0),
+            exit_position=GridPosition(1, 0),
+        ),
+    )
+    clock = FakeClock()
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_right",),
+        config=GameEnvConfig(
+            require_non_terminal_on_reset=False,
+            post_action_poll_delay_seconds=0.0,
+            wait_for_action_processing=True,
+            action_ack_timeout_seconds=0.2,
+            action_ack_poll_interval_seconds=0.05,
+        ),
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    env.reset()
+
+    state, _reward, _done, info = env.step("move_right")
+
+    assert state.map.player_position == GridPosition(1, 0)
+    assert info["action_acknowledged"] is True
+    assert info["action_ack_reason"] == "state_changed"
+    assert int(info["action_ack_checks"]) >= 2
+
+
+def test_game_env_marks_step_unacknowledged_after_action_ack_timeout() -> None:
+    stale = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+        ),
+    )
+    clock = FakeClock()
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([stale, stale]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_right",),
+        config=GameEnvConfig(
+            require_non_terminal_on_reset=False,
+            post_action_poll_delay_seconds=0.0,
+            wait_for_action_processing=True,
+            action_ack_timeout_seconds=0.12,
+            action_ack_poll_interval_seconds=0.05,
+        ),
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    env.reset()
+
+    _state, _reward, done, info = env.step("move_right")
+
+    assert done is False
+    assert info["action_acknowledged"] is False
+    assert info["action_ack_reason"] == "action_ack_timeout"
+    assert info["action_effective"] is False
+    assert info["invalid_action_reason"] == "action_not_acknowledged"
 
 
 def test_game_env_reset_retries_after_transient_reset_failure() -> None:

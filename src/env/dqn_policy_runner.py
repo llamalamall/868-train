@@ -135,6 +135,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reset watchdog timeout in seconds.",
     )
     parser.add_argument(
+        "--post-action-delay",
+        type=float,
+        default=0.2,
+        help="Fixed delay after dispatching each action before reading state.",
+    )
+    parser.add_argument(
+        "--wait-for-action-processing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Poll for state evidence that each action was processed before finalizing a step.",
+    )
+    parser.add_argument(
+        "--action-ack-timeout",
+        type=float,
+        default=0.35,
+        help="Max additional wait time (seconds) to observe post-action state change.",
+    )
+    parser.add_argument(
+        "--action-ack-poll-interval",
+        type=float,
+        default=0.05,
+        help="Polling interval (seconds) while waiting for post-action state change.",
+    )
+    parser.add_argument(
         "--prog-backoff-steps",
         type=int,
         default=3,
@@ -450,6 +474,10 @@ def main() -> None:
             config=GameEnvConfig(
                 step_timeout_seconds=args.step_timeout,
                 reset_timeout_seconds=args.reset_timeout,
+                post_action_poll_delay_seconds=max(float(args.post_action_delay), 0.0),
+                wait_for_action_processing=bool(args.wait_for_action_processing),
+                action_ack_timeout_seconds=max(float(args.action_ack_timeout), 0.0),
+                action_ack_poll_interval_seconds=max(float(args.action_ack_poll_interval), 0.0),
                 prog_slot_backoff_steps=max(int(args.prog_backoff_steps), 0),
                 require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
             ),
@@ -490,6 +518,15 @@ def main() -> None:
                         else "-"
                     ),
                 ),
+                after_action_line="action={action} reason={reason} loss={loss}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "dqn_select_action",
+                    loss=(
+                        "{0:.6f}".format(float(event.get("last_loss")))
+                        if event.get("last_loss") is not None
+                        else "-"
+                    ),
+                ),
                 reward_line=(format_reward_breakdown_line(event) if should_emit_reward_dump else ""),
             )
 
@@ -506,6 +543,10 @@ def main() -> None:
                     )
                 ),
                 action_line="action={action} reason={reason}".format(
+                    action=event.get("action"),
+                    reason=event.get("action_reason") or "dqn_select_action",
+                ),
+                before_action_line="action={action} reason={reason}".format(
                     action=event.get("action"),
                     reason=event.get("action_reason") or "dqn_select_action",
                 ),
