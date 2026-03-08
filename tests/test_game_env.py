@@ -8,7 +8,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from src.env.game_env import GameEnv, GameEnvConfig, ResetTimeoutError, StepTimeoutError, run_random_policy
+from src.env.game_env import (
+    GameEnv,
+    GameEnvConfig,
+    GameEnvError,
+    ResetTimeoutError,
+    StateDesyncError,
+    StepTimeoutError,
+    run_random_policy,
+)
 from src.env.reset_manager import NoopResetManager
 from src.state.schema import FieldState, GameStateSnapshot, GridPosition, InventoryState, MapCellState, MapState
 
@@ -58,6 +66,30 @@ def _start_screen_snapshot() -> GameStateSnapshot:
     )
 
 
+def _desynced_snapshot() -> GameStateSnapshot:
+    return GameStateSnapshot(
+        timestamp_utc="2026-03-06T00:00:00+00:00",
+        health=FieldState(
+            value=None,
+            status="invalid",
+            error_code="read_failed",
+            error="ReadProcessMemory failed.",
+            source_field="player_health",
+        ),
+        energy=FieldState(
+            value=None,
+            status="invalid",
+            error_code="short_read",
+            error="Short read while extracting energy.",
+            source_field="player_energy",
+        ),
+        currency=_field(0, status="missing"),
+        fail_state=_field(False, status="missing"),
+        inventory=InventoryState(status="missing"),
+        map=MapState(status="missing"),
+    )
+
+
 @dataclass
 class FakeActionAPI:
     """Minimal fake action API for env tests."""
@@ -69,6 +101,31 @@ class FakeActionAPI:
         self.actions.append(action_name)
         if self.delay_seconds > 0:
             time.sleep(self.delay_seconds)
+
+
+@dataclass
+class FailingActionAPI(FakeActionAPI):
+    failures_remaining: int = 0
+
+    def perform_action(self, action_name: str) -> None:
+        self.actions.append(action_name)
+        if self.failures_remaining > 0:
+            self.failures_remaining -= 1
+            raise RuntimeError("transient input failure")
+        if self.delay_seconds > 0:
+            time.sleep(self.delay_seconds)
+
+
+@dataclass
+class FlakyResetStrategy:
+    failures_remaining: int = 0
+    calls: int = 0
+
+    def reset(self) -> None:
+        self.calls += 1
+        if self.failures_remaining > 0:
+            self.failures_remaining -= 1
+            raise RuntimeError("transient reset failure")
 
 
 class QueueStateProvider:
@@ -250,6 +307,101 @@ def test_game_env_step_timeout_when_action_blocks() -> None:
     env.reset()
     with pytest.raises(StepTimeoutError):
         env.step("wait")
+
+
+def test_game_env_step_retries_action_after_transient_input_failure() -> None:
+    state_provider = QueueStateProvider([_snapshot(failed=False), _snapshot(failed=False)])
+    actions = FailingActionAPI(failures_remaining=1)
+    recovery_reasons: list[str] = []
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False, action_retry_attempts=2),
+        recovery_hook=lambda reason, _error: recovery_reasons.append(reason),
+    )
+
+    env.reset()
+    _state, _reward, done, _info = env.step("wait")
+
+    assert done is False
+    assert actions.actions == ["wait", "wait"]
+    assert recovery_reasons == ["action_dispatch_failed:wait"]
+
+
+def test_game_env_reset_retries_after_transient_reset_failure() -> None:
+    strategy = FlakyResetStrategy(failures_remaining=1)
+    recovery_reasons: list[str] = []
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([_snapshot(failed=False)]),
+        reset_strategy=strategy,
+        action_space=("wait",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False, reset_retry_attempts=2),
+        recovery_hook=lambda reason, _error: recovery_reasons.append(reason),
+    )
+
+    state = env.reset()
+
+    assert state.fail_state.value is False
+    assert strategy.calls == 2
+    assert recovery_reasons == ["reset_strategy_failed"]
+
+
+def test_game_env_step_recovers_from_desynced_state_snapshot() -> None:
+    state_provider = QueueStateProvider([_snapshot(failed=False), _desynced_snapshot(), _snapshot(failed=False)])
+    recovery_reasons: list[str] = []
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False, state_read_retry_attempts=2),
+        recovery_hook=lambda reason, _error: recovery_reasons.append(reason),
+    )
+
+    env.reset()
+    _state, _reward, done, _info = env.step("wait")
+
+    assert done is False
+    assert recovery_reasons
+    assert recovery_reasons[0].startswith("state_desync:")
+
+
+def test_game_env_step_raises_state_desync_error_without_recovery_hook() -> None:
+    state_provider = QueueStateProvider([_snapshot(failed=False), _desynced_snapshot()])
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False, state_read_retry_attempts=1),
+    )
+
+    env.reset()
+    with pytest.raises(StateDesyncError):
+        env.step("wait")
+
+
+def test_game_env_reports_actionable_runtime_recovery_error() -> None:
+    def failing_recovery(_reason: str, _error: Exception | None) -> None:
+        raise RuntimeError("reattach failed")
+
+    env = GameEnv(
+        action_api=FailingActionAPI(failures_remaining=2),
+        state_provider=QueueStateProvider([_snapshot(failed=False)]),
+        reset_strategy=NoopResetManager(),
+        action_space=("wait",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False, action_retry_attempts=2),
+        recovery_hook=failing_recovery,
+    )
+
+    env.reset()
+    with pytest.raises(GameEnvError) as error:
+        env.step("wait")
+
+    assert "runtime_recovery_failed" in str(error.value)
 
 
 def test_run_random_policy_returns_episode_results() -> None:
