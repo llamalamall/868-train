@@ -89,6 +89,26 @@ def test_memory_fail_detector_uses_fallback_when_memory_unavailable() -> None:
     assert result.reason == "ui:game-over-banner"
 
 
+def test_memory_fail_detector_allows_fallback_override_when_memory_value_is_not_terminal() -> None:
+    backend = FakeMemoryBackend(memory_by_address={0x200000: b"\x00"})
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+    fallback = FixedFallbackDetector(
+        FailDetectionResult(
+            is_terminal=True,
+            reason="ui:game-over-banner",
+            source="fallback-ui",
+            timestamp_utc="2026-01-01T00:00:00+00:00",
+        )
+    )
+    detector = MemoryFailDetector(reader=reader, fail_entry=_fail_entry(), fallback_detectors=(fallback,))
+
+    result = detector.check()
+
+    assert result.is_terminal
+    assert result.source == "fallback-ui"
+    assert result.reason == "ui:game-over-banner"
+
+
 def test_memory_fail_detector_reads_non_boolean_fail_field() -> None:
     backend = FakeMemoryBackend(memory_by_address={0x200000: struct.pack("<i", 2)})
     reader = ProcessMemoryReader(process_handle=1, backend=backend)
@@ -98,6 +118,18 @@ def test_memory_fail_detector_reads_non_boolean_fail_field() -> None:
 
     assert result.is_terminal
     assert result.value == 2
+
+
+def test_memory_fail_detector_reports_unsupported_data_type_as_memory_unavailable() -> None:
+    backend = FakeMemoryBackend(memory_by_address={0x200000: b"\x01"})
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+    detector = MemoryFailDetector(reader=reader, fail_entry=_fail_entry(data_type="string"))
+
+    result = detector.check()
+
+    assert not result.is_terminal
+    assert result.reason == "memory_unavailable"
+    assert result.error == "unsupported_fail_data_type:string"
 
 
 def test_poll_for_fail_state_detects_terminal_within_interval() -> None:
