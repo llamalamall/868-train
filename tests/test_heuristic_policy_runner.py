@@ -16,6 +16,8 @@ def test_heuristic_runner_parser_defaults() -> None:
     assert args.enemy_prediction_horizon_steps == 2
     assert args.movement_keys == "arrows"
     assert args.prog_actions is True
+    assert args.launch_exe is True
+    assert args.window_input is True
     assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
@@ -34,6 +36,8 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
             "--movement-keys",
             "numpad",
             "--no-prog-actions",
+            "--no-launch-exe",
+            "--no-window-input",
             "--step-through",
             "--no-require-non-terminal-reset",
             "--no-tui",
@@ -53,6 +57,8 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
     assert args.max_steps == 321
     assert args.movement_keys == "numpad"
     assert args.prog_actions is False
+    assert args.launch_exe is False
+    assert args.window_input is False
     assert args.step_through is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False

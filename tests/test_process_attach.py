@@ -61,6 +61,48 @@ def test_attach_process_retries_then_fails() -> None:
         attach_process(executable_name="missing.exe", backend=backend, retries=2, retry_delay_seconds=0.0)
 
 
+def test_attach_process_can_launch_when_executable_missing() -> None:
+    backend = FakeProcessBackend(by_name={}, by_pid={})
+    launch_calls: list[str] = []
+
+    def launcher(executable_name: str) -> None:
+        launch_calls.append(executable_name)
+        backend.by_name[executable_name.lower()] = 88
+        backend.by_pid[88] = executable_name
+        backend.openable_pids.add(88)
+
+    attached = attach_process(
+        executable_name="868-HACK.exe",
+        backend=backend,
+        retries=3,
+        retry_delay_seconds=0.0,
+        launch_if_missing=True,
+        launcher=launcher,
+    )
+
+    assert launch_calls == ["868-HACK.exe"]
+    assert attached.pid == 88
+    assert attached.executable_name == "868-HACK.exe"
+    assert attached.handle == 1088
+
+
+def test_attach_process_surfaces_launcher_errors() -> None:
+    backend = FakeProcessBackend(by_name={}, by_pid={})
+
+    def launcher(_executable_name: str) -> None:
+        raise ProcessAttachError("launcher failed")
+
+    with pytest.raises(ProcessAttachError, match="launcher failed"):
+        attach_process(
+            executable_name="868-HACK.exe",
+            backend=backend,
+            retries=1,
+            retry_delay_seconds=0.0,
+            launch_if_missing=True,
+            launcher=launcher,
+        )
+
+
 def test_close_attached_process_calls_backend() -> None:
     backend = FakeProcessBackend()
     attached = attach_process(

@@ -205,8 +205,18 @@ def test_compare_parser_defaults_window_targeted_input_without_focus() -> None:
     parser = _build_parser()
     args = parser.parse_args(["compare", "--checkpoint-a", "a.json", "--checkpoint-b", "b.json"])
 
+    assert args.launch_exe is True
     assert args.focus_window is False
     assert args.window_input is True
     assert args.tui is True
     assert args.reward_energy_delta == 0.02
     assert args.reward_score_delta == 0.01
+
+
+def test_run_parser_defaults_window_targeted_input_and_focus() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["run", "--checkpoint", "model.json"])
+
+    assert args.launch_exe is True
+    assert args.focus_window is True
+    assert args.window_input is True
