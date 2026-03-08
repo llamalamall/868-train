@@ -104,3 +104,25 @@ def test_load_offset_registry_rejects_bad_pointer_chain_value(tmp_path: Path) ->
 
     with pytest.raises(OffsetRegistryValidationError, match="pointer_chain"):
         load_offset_registry(config_path)
+
+
+def test_load_offset_registry_rejects_version_lower_than_one(tmp_path: Path) -> None:
+    config_path = tmp_path / "offsets.json"
+    _write_config(
+        config_path,
+        {
+            "version": 0,
+            "entries": [_valid_entry("fail_state")],
+        },
+    )
+
+    with pytest.raises(OffsetRegistryValidationError, match="version must be >= 1"):
+        load_offset_registry(config_path)
+
+
+def test_load_offset_registry_rejects_empty_entries_list(tmp_path: Path) -> None:
+    config_path = tmp_path / "offsets.json"
+    _write_config(config_path, {"version": 1, "entries": []})
+
+    with pytest.raises(OffsetRegistryValidationError, match="at least one entry"):
+        load_offset_registry(config_path)

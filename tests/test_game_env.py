@@ -175,6 +175,25 @@ def test_game_env_reset_and_step_contract() -> None:
     assert actions.actions == ["move_up"]
 
 
+def test_game_env_step_performs_implicit_reset_when_episode_not_started() -> None:
+    initial = _snapshot(health=10, failed=False)
+    after_step = _snapshot(health=8, failed=False)
+    state_provider = QueueStateProvider([initial, after_step])
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+
+    _state, _reward, _done, info = env.step("wait")
+
+    assert env.current_episode_id is not None
+    assert info["reset_performed"] is True
+    assert info["step_index"] == 0
+
+
 def test_game_env_step_sets_done_from_fail_detector_result() -> None:
     state_provider = QueueStateProvider([_snapshot(failed=False), _snapshot(failed=False)])
     actions = FakeActionAPI()

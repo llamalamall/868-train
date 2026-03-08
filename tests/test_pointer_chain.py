@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 
 from src.config.offsets import OffsetBase, OffsetEntry
 from src.memory.pointer_chain import resolve_offset_entry_address, resolve_pointer_chain
-from src.memory.reader import BackendReadResponse, ProcessMemoryReader, ReadResult
+from src.memory.reader import BackendReadResponse, ProcessMemoryReader, ReadFailure, ReadResult
 
 
 @dataclass
@@ -47,6 +47,30 @@ def test_resolve_pointer_chain_success() -> None:
     assert result.traversed_pointers == (root,)
 
 
+def test_resolve_pointer_chain_success_with_multiple_hops() -> None:
+    base = 0x140000000
+    first = 0x50000000
+    second = 0x60000000
+    backend = FakeMemoryBackend(
+        memory_by_address={
+            base + 0x10: struct.pack("<Q", first),
+            first + 0x20: struct.pack("<Q", second),
+        }
+    )
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    result = resolve_pointer_chain(
+        reader=reader,
+        base_address=base,
+        pointer_chain=(0x10, 0x20),
+        final_offset=0x14,
+    )
+
+    assert result.is_ok
+    assert result.value == second + 0x14
+    assert result.traversed_pointers == (first, second)
+
+
 def test_resolve_pointer_chain_rejects_null_pointer() -> None:
     base = 0x140000000
     backend = FakeMemoryBackend(memory_by_address={base + 0x10: struct.pack("<Q", 0)})
@@ -79,6 +103,21 @@ def test_resolve_pointer_chain_wraps_reader_failure() -> None:
     assert result.error.code == "pointer_read_failed"
     assert result.error.read_failure is not None
     assert result.error.read_failure.code == "read_failed"
+
+
+def test_resolve_pointer_chain_rejects_depth_beyond_max_depth() -> None:
+    reader = ProcessMemoryReader(process_handle=1, backend=FakeMemoryBackend())
+
+    result = resolve_pointer_chain(
+        reader=reader,
+        base_address=0x140000000,
+        pointer_chain=(0x10, 0x20),
+        max_depth=1,
+    )
+
+    assert not result.is_ok
+    assert result.error is not None
+    assert result.error.code == "pointer_chain_too_deep"
 
 
 def test_resolve_offset_entry_address_uses_module_base_resolver() -> None:
@@ -127,3 +166,31 @@ def test_resolve_offset_entry_address_requires_module_resolver() -> None:
     assert not result.is_ok
     assert result.error is not None
     assert result.error.code == "module_base_resolver_missing"
+
+
+def test_resolve_offset_entry_address_wraps_module_base_resolution_failure() -> None:
+    entry = OffsetEntry(
+        name="player_credits",
+        data_type="int32",
+        base=OffsetBase(kind="module", value="868-HACK.exe"),
+        pointer_chain=(0x115808,),
+        confidence="high",
+        notes="test",
+        read_offset=0x1B5C,
+    )
+    reader = ProcessMemoryReader(process_handle=1, backend=FakeMemoryBackend())
+
+    def resolve_module_base(_module_name: str) -> ReadResult[int]:
+        return ReadResult.fail(ReadFailure(code="module_not_found", message="module not found"))
+
+    result = resolve_offset_entry_address(
+        reader=reader,
+        entry=entry,
+        module_base_resolver=resolve_module_base,
+    )
+
+    assert not result.is_ok
+    assert result.error is not None
+    assert result.error.code == "module_base_resolve_failed"
+    assert result.error.read_failure is not None
+    assert result.error.read_failure.code == "module_not_found"
