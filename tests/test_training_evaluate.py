@@ -133,6 +133,9 @@ def test_evaluate_dqn_checkpoint_is_reproducible_for_same_seed(tmp_path: Path) -
     assert report_a == report_b
     assert report_a.fail_rate <= 0.5
     assert report_a.avg_currency_gain > 0.0
+    assert report_a.avg_energy_gain == 0.0
+    assert report_a.avg_score_gain == 0.0
+    assert report_a.avg_prog_gains == 0.0
 
 
 def test_compare_dqn_checkpoints_reports_direct_kpi_deltas(tmp_path: Path) -> None:
@@ -154,6 +157,9 @@ def test_compare_dqn_checkpoints_reports_direct_kpi_deltas(tmp_path: Path) -> No
     assert comparison.avg_episode_length_delta < 0.0
     assert comparison.avg_health_delta_delta > 0.0
     assert comparison.avg_currency_gain_delta > 0.0
+    assert comparison.avg_energy_gain_delta == 0.0
+    assert comparison.avg_score_gain_delta == 0.0
+    assert comparison.avg_prog_gains_delta == 0.0
 
 
 def test_task15_outputs_include_json_and_table_formats(tmp_path: Path) -> None:
@@ -188,7 +194,11 @@ def test_task15_outputs_include_json_and_table_formats(tmp_path: Path) -> None:
     assert comparison_json["kind"] == "dqn_checkpoint_comparison"
     assert comparison_json["avg_currency_gain_delta"] == comparison.avg_currency_gain_delta
     assert "avg_currency_gain" in report_table
+    assert "avg_score_gain" in report_table
+    assert "safe_step_rate" in report_table
     assert "delta_b_minus_a" in comparison_table
+    assert "avg_prog_gains" in comparison_table
+    assert "harvest_progress_rate" in comparison_table
 
 
 def test_compare_parser_defaults_window_targeted_input_without_focus() -> None:
@@ -198,3 +208,5 @@ def test_compare_parser_defaults_window_targeted_input_without_focus() -> None:
     assert args.focus_window is False
     assert args.window_input is True
     assert args.tui is True
+    assert args.reward_energy_delta == 0.02
+    assert args.reward_score_delta == 0.01

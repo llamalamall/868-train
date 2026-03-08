@@ -135,6 +135,18 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Weight multiplied by (current_currency - previous_currency).",
     )
     parser.add_argument(
+        "--reward-energy-delta",
+        type=float,
+        default=default_weights.energy_delta,
+        help="Weight multiplied by (current_energy - previous_energy).",
+    )
+    parser.add_argument(
+        "--reward-score-delta",
+        type=float,
+        default=default_weights.score_delta,
+        help="Weight multiplied by (current_score - previous_score) when score is available.",
+    )
+    parser.add_argument(
         "--reward-siphon-collected",
         type=float,
         default=default_weights.siphon_collected,
@@ -175,6 +187,42 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=default_weights.fail_penalty,
         help="Terminal fail penalty magnitude (applied as negative).",
+    )
+    parser.add_argument(
+        "--reward-safe-tile-bonus",
+        type=float,
+        default=default_weights.safe_tile_bonus,
+        help="Bonus on steps where the current tile is not threatened by enemies.",
+    )
+    parser.add_argument(
+        "--reward-danger-tile-penalty",
+        type=float,
+        default=default_weights.danger_tile_penalty,
+        help="Penalty on steps where the current tile is threatened by enemies.",
+    )
+    parser.add_argument(
+        "--reward-resource-proximity",
+        type=float,
+        default=default_weights.resource_proximity,
+        help="Reward per tile of progress toward nearest harvest target.",
+    )
+    parser.add_argument(
+        "--reward-prog-collected-base",
+        type=float,
+        default=default_weights.prog_collected_base,
+        help="Base reward for each newly collected prog before priority bonus.",
+    )
+    parser.add_argument(
+        "--reward-points-collected",
+        type=float,
+        default=default_weights.points_collected,
+        help="Reward per map-point unit removed from available board points.",
+    )
+    parser.add_argument(
+        "--reward-damage-taken-penalty",
+        type=float,
+        default=default_weights.damage_taken_penalty,
+        help="Penalty multiplier applied to negative health deltas.",
     )
     parser.add_argument(
         "--reward-clip-abs",

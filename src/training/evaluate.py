@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import inspect
 import json
+from collections import Counter
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from statistics import mean
@@ -14,10 +15,12 @@ from src.agent.dqn_agent import DQNAgent
 from src.env.game_env import GameEnv, GameEnvConfig
 from src.env.random_policy_runner import _build_action_config, _build_reward_config, _build_reward_fn
 from src.env.runner_tui import RunnerTuiSession
-from src.state.schema import FieldState, GameStateSnapshot
+from src.state.schema import FieldState, GameStateSnapshot, GridPosition
+from src.training.rewards import RewardWeights
 from src.training.train import BaselineAgent, EpisodeEnv, EpisodeRolloutResult, run_agent_policy
 
 EvaluationEventCallback = Callable[[dict[str, Any]], None]
+_ENEMY_TYPE_VIRUS = 2
 
 
 class ClosableEpisodeEnv(EpisodeEnv, Protocol):
@@ -50,9 +53,15 @@ class DQNEpisodeKpi:
     failed: bool
     health_delta: float
     currency_gain: float
+    energy_gain: float
+    score_gain: float
+    prog_gains: int
     map_clear_count: int
     premature_exit_attempts: int
     invalid_action_count: int
+    safe_steps: int
+    threatened_steps: int
+    harvest_progress_steps: int
     siphons_collected: int
     enemies_cleared: int
 
@@ -70,9 +79,15 @@ class DQNEvaluationReport:
     avg_episode_length: float
     avg_health_delta: float
     avg_currency_gain: float
+    avg_energy_gain: float
+    avg_score_gain: float
+    avg_prog_gains: float
     map_clear_rate: float
     premature_exit_rate: float
     invalid_action_rate: float
+    safe_step_rate: float
+    threatened_step_rate: float
+    harvest_progress_rate: float
     avg_siphons_collected_per_map: float
     avg_enemies_cleared_per_map: float
     terminal_reasons: dict[str, int]
@@ -89,9 +104,15 @@ class DQNCheckpointComparison:
     avg_episode_length_delta: float
     avg_health_delta_delta: float
     avg_currency_gain_delta: float
+    avg_energy_gain_delta: float
+    avg_score_gain_delta: float
+    avg_prog_gains_delta: float
     map_clear_rate_delta: float
     premature_exit_rate_delta: float
     invalid_action_rate_delta: float
+    safe_step_rate_delta: float
+    threatened_step_rate_delta: float
+    harvest_progress_rate_delta: float
     avg_siphons_collected_per_map_delta: float
     avg_enemies_cleared_per_map_delta: float
 
@@ -207,6 +228,94 @@ def _count_live_enemies(state: GameStateSnapshot) -> int | None:
     return sum(1 for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
 
 
+def _state_extra_float(state: GameStateSnapshot, *, key: str) -> float | None:
+    field = state.extra_fields.get(key)
+    if field is None:
+        return None
+    return _field_to_float(field)
+
+
+def _inventory_counts(state: GameStateSnapshot) -> Counter[int]:
+    if state.inventory.status != "ok":
+        return Counter()
+    return Counter(int(prog_id) for prog_id in state.inventory.raw_prog_ids)
+
+
+def _prog_gain_delta(*, previous: GameStateSnapshot, current: GameStateSnapshot) -> int:
+    previous_counts = _inventory_counts(previous)
+    current_counts = _inventory_counts(current)
+    if not previous_counts and not current_counts:
+        return 0
+
+    gained = 0
+    for prog_id, current_count in current_counts.items():
+        previous_count = previous_counts.get(prog_id, 0)
+        if current_count > previous_count:
+            gained += current_count - previous_count
+    return gained
+
+
+def _manhattan(a: GridPosition, b: GridPosition) -> int:
+    return abs(a.x - b.x) + abs(a.y - b.y)
+
+
+def _chebyshev(a: GridPosition, b: GridPosition) -> int:
+    return max(abs(a.x - b.x), abs(a.y - b.y))
+
+
+def _harvest_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
+    if state.map.status != "ok":
+        return ()
+
+    targets: set[GridPosition] = set()
+    for resource in state.map.resource_cells:
+        if resource.credits > 0 or resource.energy > 0 or resource.points > 0:
+            targets.add(resource.position)
+    for wall in state.map.walls:
+        if wall.prog_id is not None or wall.points > 0:
+            targets.add(wall.position)
+    if not state.map.walls:
+        for cell in state.map.cells:
+            if not cell.is_wall:
+                continue
+            if cell.prog_id is not None or cell.points > 0:
+                targets.add(cell.position)
+    return tuple(targets)
+
+
+def _nearest_harvest_target_distance(state: GameStateSnapshot) -> int | None:
+    if state.map.status != "ok" or state.map.player_position is None:
+        return None
+    targets = _harvest_targets(state)
+    if not targets:
+        return None
+    player = state.map.player_position
+    return min(_manhattan(player, target) for target in targets)
+
+
+def _enemy_can_attack_position(*, enemy_position: GridPosition, enemy_type_id: int, player_position: GridPosition) -> bool:
+    if enemy_type_id == _ENEMY_TYPE_VIRUS:
+        return _chebyshev(enemy_position, player_position) <= 1
+    return _manhattan(enemy_position, player_position) <= 1
+
+
+def _player_tile_threatened(state: GameStateSnapshot) -> bool | None:
+    if state.map.status != "ok" or state.map.player_position is None:
+        return None
+    player = state.map.player_position
+    enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    if not enemies:
+        return False
+    return any(
+        _enemy_can_attack_position(
+            enemy_position=enemy.position,
+            enemy_type_id=enemy.type_id,
+            player_position=player,
+        )
+        for enemy in enemies
+    )
+
+
 def _player_on_exit(state: GameStateSnapshot) -> bool:
     if state.map.status != "ok":
         return False
@@ -284,6 +393,9 @@ def summarize_dqn_episodes(
     total_map_clears = sum(max(episode.map_clear_count, 0) for episode in episodes)
     total_premature_exit = sum(max(episode.premature_exit_attempts, 0) for episode in episodes)
     total_invalid_actions = sum(max(episode.invalid_action_count, 0) for episode in episodes)
+    total_safe_steps = sum(max(episode.safe_steps, 0) for episode in episodes)
+    total_threatened_steps = sum(max(episode.threatened_steps, 0) for episode in episodes)
+    total_harvest_progress_steps = sum(max(episode.harvest_progress_steps, 0) for episode in episodes)
     total_siphons_collected = sum(max(episode.siphons_collected, 0) for episode in episodes)
     total_enemies_cleared = sum(max(episode.enemies_cleared, 0) for episode in episodes)
 
@@ -297,6 +409,9 @@ def summarize_dqn_episodes(
         avg_episode_length=mean(episode.steps for episode in episodes),
         avg_health_delta=mean(episode.health_delta for episode in episodes),
         avg_currency_gain=mean(episode.currency_gain for episode in episodes),
+        avg_energy_gain=mean(episode.energy_gain for episode in episodes),
+        avg_score_gain=mean(episode.score_gain for episode in episodes),
+        avg_prog_gains=mean(float(episode.prog_gains) for episode in episodes),
         map_clear_rate=sum(1 for episode in episodes if episode.map_clear_count > 0) / len(episodes),
         premature_exit_rate=(
             float(total_premature_exit) / float(total_steps)
@@ -305,6 +420,21 @@ def summarize_dqn_episodes(
         ),
         invalid_action_rate=(
             float(total_invalid_actions) / float(total_steps)
+            if total_steps > 0
+            else 0.0
+        ),
+        safe_step_rate=(
+            float(total_safe_steps) / float(total_steps)
+            if total_steps > 0
+            else 0.0
+        ),
+        threatened_step_rate=(
+            float(total_threatened_steps) / float(total_steps)
+            if total_steps > 0
+            else 0.0
+        ),
+        harvest_progress_rate=(
+            float(total_harvest_progress_steps) / float(total_steps)
             if total_steps > 0
             else 0.0
         ),
@@ -368,6 +498,8 @@ def evaluate_dqn_checkpoint(
 
             initial_health = _field_to_float(state.health)
             initial_currency = _field_to_float(state.currency)
+            initial_energy = _field_to_float(state.energy)
+            initial_score = _state_extra_float(state, key="score")
 
             steps = 0
             done = False
@@ -375,6 +507,10 @@ def evaluate_dqn_checkpoint(
             map_clear_count = 0
             premature_exit_attempts = 0
             invalid_action_count = 0
+            safe_steps = 0
+            threatened_steps = 0
+            harvest_progress_steps = 0
+            prog_gains = 0
             siphons_collected = 0
             enemies_cleared = 0
             while steps < max_steps_per_episode and not done:
@@ -398,10 +534,27 @@ def evaluate_dqn_checkpoint(
                 if previous_enemies is not None and current_enemies is not None:
                     enemies_cleared += max(previous_enemies - current_enemies, 0)
 
+                prog_gains += _prog_gain_delta(previous=previous_state, current=state)
+
                 if bool(info.get("premature_exit_attempt", False)):
                     premature_exit_attempts += 1
                 if info.get("action_effective") is False:
                     invalid_action_count += 1
+
+                tile_threat = _player_tile_threatened(state)
+                if tile_threat is True:
+                    threatened_steps += 1
+                elif tile_threat is False:
+                    safe_steps += 1
+
+                previous_harvest_distance = _nearest_harvest_target_distance(previous_state)
+                current_harvest_distance = _nearest_harvest_target_distance(state)
+                if (
+                    previous_harvest_distance is not None
+                    and current_harvest_distance is not None
+                    and current_harvest_distance < previous_harvest_distance
+                ):
+                    harvest_progress_steps += 1
 
                 current_map_clear = (
                     _player_on_exit(state)
@@ -442,6 +595,10 @@ def evaluate_dqn_checkpoint(
                             "map_clear_count": map_clear_count,
                             "premature_exit_attempts": premature_exit_attempts,
                             "invalid_action_count": invalid_action_count,
+                            "safe_steps": safe_steps,
+                            "threatened_steps": threatened_steps,
+                            "harvest_progress_steps": harvest_progress_steps,
+                            "prog_gains": prog_gains,
                             "siphons_collected": siphons_collected,
                             "enemies_cleared": enemies_cleared,
                         }
@@ -449,6 +606,8 @@ def evaluate_dqn_checkpoint(
 
             final_health = _field_to_float(state.health)
             final_currency = _field_to_float(state.currency)
+            final_energy = _field_to_float(state.energy)
+            final_score = _state_extra_float(state, key="score")
             episode_result = DQNEpisodeKpi(
                 episode_id=episode_id,
                 steps=steps,
@@ -457,9 +616,15 @@ def evaluate_dqn_checkpoint(
                 failed=_episode_failed(final_state=state, terminal_reason=terminal_reason),
                 health_delta=_delta_or_zero(initial=initial_health, final=final_health),
                 currency_gain=_delta_or_zero(initial=initial_currency, final=final_currency),
+                energy_gain=_delta_or_zero(initial=initial_energy, final=final_energy),
+                score_gain=_delta_or_zero(initial=initial_score, final=final_score),
+                prog_gains=prog_gains,
                 map_clear_count=map_clear_count,
                 premature_exit_attempts=premature_exit_attempts,
                 invalid_action_count=invalid_action_count,
+                safe_steps=safe_steps,
+                threatened_steps=threatened_steps,
+                harvest_progress_steps=harvest_progress_steps,
                 siphons_collected=siphons_collected,
                 enemies_cleared=enemies_cleared,
             )
@@ -479,9 +644,15 @@ def evaluate_dqn_checkpoint(
                         "terminal_reason": episode_result.terminal_reason,
                         "health_delta": episode_result.health_delta,
                         "currency_gain": episode_result.currency_gain,
+                        "energy_gain": episode_result.energy_gain,
+                        "score_gain": episode_result.score_gain,
+                        "prog_gains": episode_result.prog_gains,
                         "map_clear_count": episode_result.map_clear_count,
                         "premature_exit_attempts": episode_result.premature_exit_attempts,
                         "invalid_action_count": episode_result.invalid_action_count,
+                        "safe_steps": episode_result.safe_steps,
+                        "threatened_steps": episode_result.threatened_steps,
+                        "harvest_progress_steps": episode_result.harvest_progress_steps,
                         "siphons_collected": episode_result.siphons_collected,
                         "enemies_cleared": episode_result.enemies_cleared,
                     }
@@ -542,9 +713,15 @@ def summarize_dqn_comparison(
         avg_episode_length_delta=report_b.avg_episode_length - report_a.avg_episode_length,
         avg_health_delta_delta=report_b.avg_health_delta - report_a.avg_health_delta,
         avg_currency_gain_delta=report_b.avg_currency_gain - report_a.avg_currency_gain,
+        avg_energy_gain_delta=report_b.avg_energy_gain - report_a.avg_energy_gain,
+        avg_score_gain_delta=report_b.avg_score_gain - report_a.avg_score_gain,
+        avg_prog_gains_delta=report_b.avg_prog_gains - report_a.avg_prog_gains,
         map_clear_rate_delta=report_b.map_clear_rate - report_a.map_clear_rate,
         premature_exit_rate_delta=report_b.premature_exit_rate - report_a.premature_exit_rate,
         invalid_action_rate_delta=report_b.invalid_action_rate - report_a.invalid_action_rate,
+        safe_step_rate_delta=report_b.safe_step_rate - report_a.safe_step_rate,
+        threatened_step_rate_delta=report_b.threatened_step_rate - report_a.threatened_step_rate,
+        harvest_progress_rate_delta=report_b.harvest_progress_rate - report_a.harvest_progress_rate,
         avg_siphons_collected_per_map_delta=(
             report_b.avg_siphons_collected_per_map - report_a.avg_siphons_collected_per_map
         ),
@@ -572,15 +749,20 @@ def format_evaluation_table(report: DQNEvaluationReport) -> str:
     """Render one checkpoint report as a compact human-readable table."""
     lines = [
         (
-            "label\tepisodes\tfail_rate\tavg_episode_length\tavg_health_delta\tavg_currency_gain\t"
+            "label\tepisodes\tfail_rate\tavg_episode_length\tavg_health_delta\t"
+            "avg_currency_gain\tavg_energy_gain\tavg_score_gain\tavg_prog_gains\t"
             "map_clear_rate\tpremature_exit_rate\tinvalid_action_rate\t"
+            "safe_step_rate\tthreatened_step_rate\tharvest_progress_rate\t"
             "avg_siphons_collected_per_map\tavg_enemies_cleared_per_map"
         ),
         (
             f"{report.label}\t{report.episodes}\t{report.fail_rate:.2%}\t"
             f"{report.avg_episode_length:.2f}\t{report.avg_health_delta:.3f}\t"
-            f"{report.avg_currency_gain:.3f}\t{report.map_clear_rate:.2%}\t"
-            f"{report.premature_exit_rate:.2%}\t{report.invalid_action_rate:.2%}\t"
+            f"{report.avg_currency_gain:.3f}\t{report.avg_energy_gain:.3f}\t"
+            f"{report.avg_score_gain:.3f}\t{report.avg_prog_gains:.3f}\t"
+            f"{report.map_clear_rate:.2%}\t{report.premature_exit_rate:.2%}\t"
+            f"{report.invalid_action_rate:.2%}\t{report.safe_step_rate:.2%}\t"
+            f"{report.threatened_step_rate:.2%}\t{report.harvest_progress_rate:.2%}\t"
             f"{report.avg_siphons_collected_per_map:.3f}\t"
             f"{report.avg_enemies_cleared_per_map:.3f}"
         ),
@@ -614,6 +796,18 @@ def format_comparison_table(report: DQNCheckpointComparison) -> str:
             f"{report.avg_currency_gain_delta:+.3f}"
         ),
         (
+            f"avg_energy_gain\t{a.avg_energy_gain:.3f}\t{b.avg_energy_gain:.3f}\t"
+            f"{report.avg_energy_gain_delta:+.3f}"
+        ),
+        (
+            f"avg_score_gain\t{a.avg_score_gain:.3f}\t{b.avg_score_gain:.3f}\t"
+            f"{report.avg_score_gain_delta:+.3f}"
+        ),
+        (
+            f"avg_prog_gains\t{a.avg_prog_gains:.3f}\t{b.avg_prog_gains:.3f}\t"
+            f"{report.avg_prog_gains_delta:+.3f}"
+        ),
+        (
             f"map_clear_rate\t{a.map_clear_rate:.2%}\t{b.map_clear_rate:.2%}\t"
             f"{report.map_clear_rate_delta:+.2%}"
         ),
@@ -624,6 +818,18 @@ def format_comparison_table(report: DQNCheckpointComparison) -> str:
         (
             f"invalid_action_rate\t{a.invalid_action_rate:.2%}\t{b.invalid_action_rate:.2%}\t"
             f"{report.invalid_action_rate_delta:+.2%}"
+        ),
+        (
+            f"safe_step_rate\t{a.safe_step_rate:.2%}\t{b.safe_step_rate:.2%}\t"
+            f"{report.safe_step_rate_delta:+.2%}"
+        ),
+        (
+            f"threatened_step_rate\t{a.threatened_step_rate:.2%}\t{b.threatened_step_rate:.2%}\t"
+            f"{report.threatened_step_rate_delta:+.2%}"
+        ),
+        (
+            f"harvest_progress_rate\t{a.harvest_progress_rate:.2%}\t{b.harvest_progress_rate:.2%}\t"
+            f"{report.harvest_progress_rate_delta:+.2%}"
         ),
         (
             "avg_siphons_collected_per_map\t"
@@ -645,6 +851,7 @@ def _add_shared_eval_args(
     focus_window_default: bool,
     window_input_default: bool,
 ) -> None:
+    default_weights = RewardWeights()
     parser.add_argument("--exe", default="868-HACK.exe", help="Target executable name.")
     parser.add_argument("--episodes", type=int, default=10, help="Number of fixed-seed episodes.")
     parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
@@ -707,68 +914,116 @@ def _add_shared_eval_args(
     parser.add_argument(
         "--reward-survival",
         type=float,
-        default=0.02,
+        default=default_weights.survival,
         help="Survival reward applied for non-terminal steps.",
     )
     parser.add_argument(
         "--reward-step-penalty",
         type=float,
-        default=0.01,
+        default=default_weights.step_penalty,
         help="Per-step penalty magnitude applied each transition.",
     )
     parser.add_argument(
         "--reward-health-delta",
         type=float,
-        default=0.40,
+        default=default_weights.health_delta,
         help="Weight multiplied by (current_health - previous_health).",
     )
     parser.add_argument(
         "--reward-currency-delta",
         type=float,
-        default=0.03,
+        default=default_weights.currency_delta,
         help="Weight multiplied by (current_currency - previous_currency).",
+    )
+    parser.add_argument(
+        "--reward-energy-delta",
+        type=float,
+        default=default_weights.energy_delta,
+        help="Weight multiplied by (current_energy - previous_energy).",
+    )
+    parser.add_argument(
+        "--reward-score-delta",
+        type=float,
+        default=default_weights.score_delta,
+        help="Weight multiplied by (current_score - previous_score) when score is available.",
     )
     parser.add_argument(
         "--reward-siphon-collected",
         type=float,
-        default=2.5,
+        default=default_weights.siphon_collected,
         help="Reward per siphon removed from map.",
     )
     parser.add_argument(
         "--reward-enemy-cleared",
         type=float,
-        default=1.5,
+        default=default_weights.enemy_cleared,
         help="Reward per live enemy removed from map.",
     )
     parser.add_argument(
         "--reward-phase-progress",
         type=float,
-        default=0.25,
+        default=default_weights.phase_progress,
         help="Weight for progress toward active objective (siphon->enemy->exit).",
     )
     parser.add_argument(
         "--reward-map-clear-bonus",
         type=float,
-        default=8.0,
+        default=default_weights.map_clear_bonus,
         help="Bonus when player reaches exit after all siphons/enemies are cleared.",
     )
     parser.add_argument(
         "--reward-premature-exit-penalty",
         type=float,
-        default=2.5,
+        default=default_weights.premature_exit_penalty,
         help="Penalty when stepping onto exit before objectives are complete.",
     )
     parser.add_argument(
         "--reward-invalid-action-penalty",
         type=float,
-        default=0.75,
+        default=default_weights.invalid_action_penalty,
         help="Penalty when action appears ineffective/invalid.",
     )
     parser.add_argument(
         "--reward-fail-penalty",
         type=float,
-        default=12.0,
+        default=default_weights.fail_penalty,
         help="Terminal fail penalty magnitude (applied as negative).",
+    )
+    parser.add_argument(
+        "--reward-safe-tile-bonus",
+        type=float,
+        default=default_weights.safe_tile_bonus,
+        help="Bonus on steps where the current tile is not threatened by enemies.",
+    )
+    parser.add_argument(
+        "--reward-danger-tile-penalty",
+        type=float,
+        default=default_weights.danger_tile_penalty,
+        help="Penalty on steps where the current tile is threatened by enemies.",
+    )
+    parser.add_argument(
+        "--reward-resource-proximity",
+        type=float,
+        default=default_weights.resource_proximity,
+        help="Reward per tile of progress toward nearest harvest target.",
+    )
+    parser.add_argument(
+        "--reward-prog-collected-base",
+        type=float,
+        default=default_weights.prog_collected_base,
+        help="Base reward for each newly collected prog before priority bonus.",
+    )
+    parser.add_argument(
+        "--reward-points-collected",
+        type=float,
+        default=default_weights.points_collected,
+        help="Reward per map-point unit removed from available board points.",
+    )
+    parser.add_argument(
+        "--reward-damage-taken-penalty",
+        type=float,
+        default=default_weights.damage_taken_penalty,
+        help="Penalty multiplier applied to negative health deltas.",
     )
     parser.add_argument(
         "--reward-clip-abs",

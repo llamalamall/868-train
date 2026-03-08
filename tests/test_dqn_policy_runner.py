@@ -33,6 +33,10 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.tui is True
     assert args.gamma == 0.99
     assert args.learning_rate == 0.005
+    assert args.reward_energy_delta == 0.02
+    assert args.reward_score_delta == 0.01
+    assert args.reward_safe_tile_bonus == 0.02
+    assert args.reward_danger_tile_penalty == 0.08
 
 
 def test_dqn_runner_parser_accepts_overrides() -> None:
