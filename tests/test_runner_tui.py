@@ -52,6 +52,8 @@ def test_runner_tui_update_writes_reward_line(tmp_path) -> None:
         assert payload["training_line"] == "training=ok"
         assert payload["action_line"] == "action=move_up"
         assert payload["reward_line"] == "reward total=+0.100"
+        assert "before_action_line" not in payload
+        assert "after_action_line" not in payload
     finally:
         session.close()
 
@@ -185,5 +187,48 @@ def test_wait_for_step_gate_unblocks_when_resumed_to_auto(tmp_path) -> None:
         assert done.wait(1.0)
         thread.join(timeout=1.0)
         assert session.consume_manual_step_flag() is False
+    finally:
+        session.close()
+
+
+def test_wait_for_step_gate_does_not_override_action_line_while_waiting(tmp_path) -> None:
+    status_file = tmp_path / "status.json"
+    control_file = tmp_path / "control.json"
+    session = RunnerTuiSession(
+        executable_name="868-HACK.exe",
+        enabled=True,
+        launch_monitor=False,
+        step_through=True,
+        external_status_file=str(status_file),
+        external_control_file=str(control_file),
+    )
+
+    session.start()
+    try:
+        done = threading.Event()
+
+        def _wait() -> None:
+            session.wait_for_step_gate(
+                training_line="episode=1 step=1",
+                action_line="action=move_up reason=dqn_select_action",
+            )
+            done.set()
+
+        thread = threading.Thread(target=_wait)
+        thread.start()
+        time.sleep(0.1)
+        assert not done.is_set()
+
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+        assert payload["action_line"] == "action=move_up reason=dqn_select_action"
+        assert "waiting_for_step" not in payload["action_line"]
+
+        control_file.write_text(
+            json.dumps({"mode": "paused", "advance_counter": 1}),
+            encoding="utf-8",
+        )
+
+        assert done.wait(1.0)
+        thread.join(timeout=1.0)
     finally:
         session.close()

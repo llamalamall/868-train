@@ -107,8 +107,6 @@ class RunnerTuiSession:
         training_line: str,
         action_line: str,
         reward_line: str | None = None,
-        before_action_line: str | None = None,
-        after_action_line: str | None = None,
     ) -> None:
         if not self.enabled or self._status_file_path is None:
             return
@@ -123,8 +121,6 @@ class RunnerTuiSession:
             payload={
                 "training_line": str(training_line),
                 "action_line": str(action_line),
-                "before_action_line": str(before_action_line or ""),
-                "after_action_line": str(after_action_line or ""),
                 "reward_line": reward_text,
             },
         )
@@ -154,8 +150,7 @@ class RunnerTuiSession:
 
         self.update(
             training_line=training_line,
-            action_line=f"{action_line} status=waiting_for_step",
-            before_action_line=f"{action_line} status=waiting_for_step",
+            action_line=action_line,
         )
         while True:
             control_state = self._read_control_state()

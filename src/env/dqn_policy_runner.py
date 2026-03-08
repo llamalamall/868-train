@@ -494,7 +494,7 @@ def main() -> None:
         tui.start()
 
         def _on_step(event: dict[str, Any]) -> None:
-            should_emit_reward_dump = bool(args.print_reward_breakdown) or tui.consume_manual_step_flag()
+            tui.consume_manual_step_flag()
             tui.update(
                 training_line=(
                     "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
@@ -518,16 +518,7 @@ def main() -> None:
                         else "-"
                     ),
                 ),
-                after_action_line="action={action} reason={reason} loss={loss}".format(
-                    action=event.get("action"),
-                    reason=event.get("action_reason") or "dqn_select_action",
-                    loss=(
-                        "{0:.6f}".format(float(event.get("last_loss")))
-                        if event.get("last_loss") is not None
-                        else "-"
-                    ),
-                ),
-                reward_line=(format_reward_breakdown_line(event) if should_emit_reward_dump else ""),
+                reward_line=format_reward_breakdown_line(event),
             )
 
         def _on_before_step(event: dict[str, Any]) -> None:
@@ -543,10 +534,6 @@ def main() -> None:
                     )
                 ),
                 action_line="action={action} reason={reason}".format(
-                    action=event.get("action"),
-                    reason=event.get("action_reason") or "dqn_select_action",
-                ),
-                before_action_line="action={action} reason={reason}".format(
                     action=event.get("action"),
                     reason=event.get("action_reason") or "dqn_select_action",
                 ),

@@ -13,7 +13,6 @@ from src.gui.dqn_runner_gui import (
     _initial_browse_dir,
     _iter_parser_actions,
     _parse_episode_progress,
-    _resolve_monitor_action_lines,
     _resolve_reward_metric_value,
     _run_dqn_preset_overrides,
     _sort_form_actions,
@@ -89,30 +88,6 @@ def test_estimate_epsilon_eta_seconds_computes_linear_decay_remaining_time() -> 
         seconds_per_step=0.5,
     )
     assert eta == pytest.approx(150.0)
-
-
-def test_resolve_monitor_action_lines_prefers_explicit_before_and_after_lines() -> None:
-    assert _resolve_monitor_action_lines(
-        training_line="episode=episode-00001 step=2 total=1.200 waiting=step",
-        action_line="action=move_up reason=dqn_select_action",
-        before_action_line="action=move_up reason=dqn_select_action status=waiting_for_step",
-        after_action_line="action=move_up reason=dqn_select_action loss=0.123000",
-    ) == (
-        "action=move_up reason=dqn_select_action status=waiting_for_step",
-        "action=move_up reason=dqn_select_action loss=0.123000",
-    )
-
-
-def test_resolve_monitor_action_lines_falls_back_to_legacy_action_line() -> None:
-    assert _resolve_monitor_action_lines(
-        training_line="episode=episode-00001 step=2 total=1.200 waiting=step",
-        action_line="action=move_up reason=dqn_select_action status=waiting_for_step",
-        before_action_line="",
-        after_action_line="",
-    ) == (
-        "action=move_up reason=dqn_select_action status=waiting_for_step",
-        "action=move_up reason=dqn_select_action status=waiting_for_step",
-    )
 
 
 def test_resolve_reward_metric_value_uses_reward_line_total_when_training_waits() -> None:

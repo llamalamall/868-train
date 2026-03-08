@@ -285,30 +285,6 @@ def _parse_status_values(line: str) -> dict[str, str]:
     return {key: value for key, value in _STATUS_KV_PATTERN.findall(line)}
 
 
-def _resolve_monitor_action_lines(
-    *,
-    training_line: str,
-    action_line: str,
-    before_action_line: str,
-    after_action_line: str,
-) -> tuple[str, str]:
-    before_line = before_action_line.strip()
-    after_line = after_action_line.strip()
-    legacy_action_line = action_line.strip()
-
-    if not before_line and (
-        "waiting=step" in training_line.lower() or "status=waiting_for_step" in legacy_action_line.lower()
-    ):
-        before_line = legacy_action_line
-    if not after_line:
-        after_line = legacy_action_line
-
-    return (
-        before_line or "action(before)=idle",
-        after_line or "action(after)=idle",
-    )
-
-
 def _resolve_reward_metric_value(
     *,
     training_line: str,
@@ -796,10 +772,10 @@ class DqnRunnerGui(tk.Tk):
         self._last_form: _ArgForm | None = None
         self._external_status_file: Path | None = None
         self._external_control_file: Path | None = None
-        self._status_snapshot: tuple[str, str, str, str, str] = ("", "", "", "", "")
+        self._status_snapshot: tuple[str, str, str] = ("", "", "")
         self._monitor_training_line = tk.StringVar(value="training=idle")
-        self._monitor_before_action_line = tk.StringVar(value="action(before)=idle")
-        self._monitor_after_action_line = tk.StringVar(value="action(after)=idle")
+        self._monitor_action_line = tk.StringVar(value="action=idle")
+        self._monitor_reward_line = tk.StringVar(value="reward=idle")
         self._monitor_control_state = tk.StringVar(value="session=idle")
         self._monitor_pause_button: ttk.Button | None = None
         self._monitor_step_button: ttk.Button | None = None
@@ -1144,24 +1120,24 @@ class DqnRunnerGui(tk.Tk):
         graph_shell.grid(row=4, column=0, sticky="nsew", pady=(20, 0))
         graph_shell.columnconfigure(0, weight=1)
         graph_shell.rowconfigure(2, weight=1)
-        ttk.Label(graph_shell, text="before_action_line", style="FormLabel.TLabel").grid(
+        ttk.Label(graph_shell, text="action_line", style="FormLabel.TLabel").grid(
             row=0,
             column=0,
             sticky="w",
         )
-        ttk.Label(graph_shell, textvariable=self._monitor_before_action_line, style="FormHelp.TLabel").grid(
+        ttk.Label(graph_shell, textvariable=self._monitor_action_line, style="FormHelp.TLabel").grid(
             row=0,
             column=0,
             sticky="e",
             padx=(140, 0),
             pady=(0, 4),
         )
-        ttk.Label(graph_shell, text="after_action_line", style="FormLabel.TLabel").grid(
+        ttk.Label(graph_shell, text="reward_line", style="FormLabel.TLabel").grid(
             row=1,
             column=0,
             sticky="w",
         )
-        ttk.Label(graph_shell, textvariable=self._monitor_after_action_line, style="FormHelp.TLabel").grid(
+        ttk.Label(graph_shell, textvariable=self._monitor_reward_line, style="FormHelp.TLabel").grid(
             row=1,
             column=0,
             sticky="e",
@@ -1316,10 +1292,10 @@ class DqnRunnerGui(tk.Tk):
         self._external_status_file = status_file
         control_file = self._create_control_file() if is_dqn_runner else None
         self._external_control_file = control_file
-        self._status_snapshot = ("", "", "", "", "")
+        self._status_snapshot = ("", "", "")
         self._monitor_training_line.set("training=starting")
-        self._monitor_before_action_line.set("action(before)=idle")
-        self._monitor_after_action_line.set("action(after)=idle")
+        self._monitor_action_line.set("action=idle")
+        self._monitor_reward_line.set("reward=idle")
         if control_file is not None:
             snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_AUTO)
             self._monitor_control_state.set(
@@ -1386,27 +1362,13 @@ class DqnRunnerGui(tk.Tk):
             if isinstance(payload, dict):
                 training_line = str(payload.get("training_line", ""))
                 action_line = str(payload.get("action_line", ""))
-                before_action_line = str(payload.get("before_action_line", ""))
-                after_action_line = str(payload.get("after_action_line", ""))
                 reward_line = str(payload.get("reward_line", ""))
-                snapshot = (
-                    training_line,
-                    action_line,
-                    before_action_line,
-                    after_action_line,
-                    reward_line,
-                )
+                snapshot = (training_line, action_line, reward_line)
                 if snapshot != self._status_snapshot:
                     self._status_snapshot = snapshot
                     self._monitor_training_line.set(training_line or "training=idle")
-                    monitor_before_line, monitor_after_line = _resolve_monitor_action_lines(
-                        training_line=training_line,
-                        action_line=action_line,
-                        before_action_line=before_action_line,
-                        after_action_line=after_action_line,
-                    )
-                    self._monitor_before_action_line.set(monitor_before_line)
-                    self._monitor_after_action_line.set(monitor_after_line)
+                    self._monitor_action_line.set(action_line or "action=idle")
+                    self._monitor_reward_line.set(reward_line or "reward=unavailable")
                     self._update_monitor_metrics(training_line, reward_line=reward_line)
         self._refresh_monitor_control_state()
         self.after(200, self._poll_external_status)

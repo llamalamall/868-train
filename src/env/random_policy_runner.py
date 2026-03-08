@@ -540,7 +540,7 @@ def main() -> None:
         tui.start()
 
         def _on_step(event: dict[str, Any]) -> None:
-            should_emit_reward_dump = bool(args.print_reward_breakdown) or tui.consume_manual_step_flag()
+            tui.consume_manual_step_flag()
             tui.update(
                 training_line=(
                     "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
@@ -557,7 +557,7 @@ def main() -> None:
                     action=event.get("action"),
                     reason=event.get("action_reason") or "random_policy_sample",
                 ),
-                reward_line=(format_reward_breakdown_line(event) if should_emit_reward_dump else ""),
+                reward_line=format_reward_breakdown_line(event),
             )
 
         def _on_before_step(event: dict[str, Any]) -> None:
