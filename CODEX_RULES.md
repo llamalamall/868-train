@@ -61,3 +61,4 @@
 - Failure modes are explicit and observable in logs or structured results.
 - If a change adds/removes/renames runnable tools, update both `src/cli.py` (master CLI commands/help) and `README.md` in the same change.
 - Each agent module in `src/agent` must have a corresponding agent README describing behavior/config/failure modes; create it when adding a new agent and update it whenever that agent changes.
+- If DQN runner/evaluation CLI arguments change (`src/env/dqn_policy_runner.py` or `src/training/evaluate.py`), verify [src/gui/dqn_runner_gui.py](/c:/Users/John White/868-train/src/gui/dqn_runner_gui.py) still exposes those arguments correctly (including type-appropriate widgets) and update GUI-related tests/docs in the same change.

@@ -88,3 +88,12 @@ def test_master_cli_dispatches_evaluate_with_passthrough(monkeypatch) -> None:
             ],
         )
     ]
+
+
+def test_master_cli_dispatches_dqn_gui(monkeypatch) -> None:
+    captured: list[tuple[str, list[str]]] = []
+    _install_stub(monkeypatch, "src.cli.dqn_gui_main", captured)
+
+    cli.main(["dqn-gui"])
+
+    assert captured == [("dqn_gui_main", [])]
