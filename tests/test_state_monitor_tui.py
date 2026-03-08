@@ -4,15 +4,20 @@ from __future__ import annotations
 
 from src.state.schema import EnemyState, GridPosition, MapCellState, MapState, ResourceCellState
 from src.memory.state_monitor_tui import (
+    CONTROL_MODE_AUTO,
+    CONTROL_MODE_PAUSED,
     FieldSnapshot,
     PollSnapshot,
     format_collected_progs_status,
     increment_external_advance_counter,
+    load_external_control_snapshot,
     is_fail_state_detected,
     load_external_advance_counter,
     load_external_status_snapshot,
     map_tui_key_to_passthrough_key,
     render_ascii_map,
+    set_external_control_mode,
+    step_external_control,
     summarize_board_state,
 )
 
@@ -360,13 +365,20 @@ def test_load_external_status_snapshot_returns_empty_for_missing_file(tmp_path) 
 def test_load_external_status_snapshot_reads_training_and_action_lines(tmp_path) -> None:
     status_file = tmp_path / "status.json"
     status_file.write_text(
-        '{"training_line":"episode=1 step=4 total_reward=2.100","action_line":"action=move_up reason=collect_siphon"}',
+        '{"training_line":"episode=1 step=4 total_reward=2.100","action_line":"action=move_up reason=collect_siphon","reward_line":"reward total=+0.420"}',
         encoding="utf-8",
     )
 
     status = load_external_status_snapshot(status_file)
     assert status.training_line == "episode=1 step=4 total_reward=2.100"
     assert status.action_line == "action=move_up reason=collect_siphon"
+    assert status.reward_line == "reward total=+0.420"
+
+
+def test_load_external_control_snapshot_defaults_to_auto(tmp_path) -> None:
+    snapshot = load_external_control_snapshot(tmp_path / "missing.json")
+    assert snapshot.mode == CONTROL_MODE_AUTO
+    assert snapshot.advance_counter == 0
 
 
 def test_load_external_advance_counter_returns_zero_for_missing_file(tmp_path) -> None:
@@ -380,3 +392,19 @@ def test_increment_external_advance_counter_updates_counter_file(tmp_path) -> No
     assert increment_external_advance_counter(control_file) == 1
     assert increment_external_advance_counter(control_file) == 2
     assert load_external_advance_counter(control_file) == 2
+
+
+def test_set_external_control_mode_preserves_counter_and_step_forces_paused(tmp_path) -> None:
+    control_file = tmp_path / "control.json"
+
+    first = set_external_control_mode(control_file, CONTROL_MODE_PAUSED)
+    assert first.mode == CONTROL_MODE_PAUSED
+    assert first.advance_counter == 0
+
+    stepped = step_external_control(control_file)
+    assert stepped.mode == CONTROL_MODE_PAUSED
+    assert stepped.advance_counter == 1
+
+    resumed = set_external_control_mode(control_file, CONTROL_MODE_AUTO)
+    assert resumed.mode == CONTROL_MODE_AUTO
+    assert resumed.advance_counter == 1

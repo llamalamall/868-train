@@ -190,6 +190,53 @@ def _build_reward_fn(
     return reward_fn
 
 
+def _as_float(value: object) -> float | None:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def format_reward_breakdown_line(event: dict[str, Any]) -> str:
+    """Format a compact, human-readable reward dump from callback event payload."""
+    breakdown = event.get("reward_breakdown")
+    if not isinstance(breakdown, dict):
+        return "reward unavailable"
+
+    ordered_fields = (
+        ("total", "total"),
+        ("survival", "survival"),
+        ("step_penalty", "step"),
+        ("health_change", "health"),
+        ("currency_change", "currency"),
+        ("energy_change", "energy"),
+        ("score_change", "score"),
+        ("siphon_collected", "siphon"),
+        ("enemy_cleared", "enemy"),
+        ("phase_progress", "phase"),
+        ("map_clear_bonus", "map_clear"),
+        ("safe_tile_bonus", "safe"),
+        ("danger_tile_penalty", "danger"),
+        ("resource_proximity", "proximity"),
+        ("prog_collected", "prog"),
+        ("points_collected", "points"),
+        ("damage_taken_penalty", "damage"),
+        ("premature_exit_penalty", "premature_exit"),
+        ("invalid_action_penalty", "invalid"),
+        ("fail_penalty", "fail"),
+    )
+    components: list[str] = []
+    for key, label in ordered_fields:
+        number = _as_float(breakdown.get(key))
+        if number is None:
+            continue
+        if key == "total" or abs(number) > 1e-9:
+            components.append(f"{label}={number:+.3f}")
+    if not components:
+        return "reward breakdown empty"
+    return "reward " + " ".join(components)
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run random-policy episodes against live game env.")
     default_weights = RewardWeights()
@@ -465,6 +512,7 @@ def main() -> None:
         tui.start()
 
         def _on_step(event: dict[str, Any]) -> None:
+            should_emit_reward_dump = bool(args.print_reward_breakdown) or tui.consume_manual_step_flag()
             tui.update(
                 training_line=(
                     "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
@@ -481,12 +529,13 @@ def main() -> None:
                     action=event.get("action"),
                     reason=event.get("action_reason") or "random_policy_sample",
                 ),
+                reward_line=(format_reward_breakdown_line(event) if should_emit_reward_dump else ""),
             )
 
         def _on_before_step(event: dict[str, Any]) -> None:
-            tui.wait_for_step_advance(
+            tui.wait_for_step_gate(
                 training_line=(
-                    "episode={episode} step={step} total={total:.3f} waiting=enter".format(
+                    "episode={episode} step={step} total={total:.3f} waiting=step".format(
                         episode=event.get("episode_id"),
                         step=int(event.get("step_index", 0)) + 1,
                         total=float(event.get("total_reward", 0.0)),
@@ -517,7 +566,7 @@ def main() -> None:
             max_steps_per_episode=args.max_steps,
             seed=args.seed,
             actions=policy_actions,
-            before_step_callback=_on_before_step if bool(args.step_through) else None,
+            before_step_callback=_on_before_step if bool(args.tui) else None,
             step_callback=_on_step if bool(args.tui) else None,
         )
     finally:

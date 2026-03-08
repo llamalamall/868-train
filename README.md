@@ -167,8 +167,12 @@ TUI controls:
 - `z`: pause/resume polling
 - `r`: refresh immediately
 - `p`: toggle pointer mode (`cached-addresses` vs `resolve-each-poll`)
-- `enter`: advance one pending runner step when `--step-through` is enabled
+- `f6` or `Pause Session` button: pause runner session (step-by-step mode)
+- `enter` / `f7` or `Step Once` button: execute one runner step while paused
+- `f8` or `Resume Auto` button: resume runner full-auto execution
 - `up/down/left/right`, `1` through `0`, `escape`, `space`: pass controls to the game window
+
+When session mode is paused, each manual step publishes a human-readable reward breakdown line in the monitor footer. In auto mode, reward dump visibility follows `--print-reward-breakdown`.
 
 ## Telemetry Logging (Task 10)
 

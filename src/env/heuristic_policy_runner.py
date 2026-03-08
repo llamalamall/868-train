@@ -9,7 +9,12 @@ from typing import Any
 
 from src.agent.baseline_heuristic import HeuristicBaselineAgent, HeuristicBaselineConfig
 from src.env.game_env import GameEnv, GameEnvConfig
-from src.env.random_policy_runner import _build_action_config, _build_reward_config, _build_reward_fn
+from src.env.random_policy_runner import (
+    _build_action_config,
+    _build_reward_config,
+    _build_reward_fn,
+    format_reward_breakdown_line,
+)
 from src.env.runner_tui import RunnerTuiSession
 from src.training.rewards import RewardWeights
 from src.training.train import run_agent_policy
@@ -303,6 +308,7 @@ def main() -> None:
         tui.start()
 
         def _on_step(event: dict[str, Any]) -> None:
+            should_emit_reward_dump = bool(args.print_reward_breakdown) or tui.consume_manual_step_flag()
             tui.update(
                 training_line=(
                     "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
@@ -319,12 +325,13 @@ def main() -> None:
                     action=event.get("action"),
                     reason=event.get("action_reason") or "heuristic_select",
                 ),
+                reward_line=(format_reward_breakdown_line(event) if should_emit_reward_dump else ""),
             )
 
         def _on_before_step(event: dict[str, Any]) -> None:
-            tui.wait_for_step_advance(
+            tui.wait_for_step_gate(
                 training_line=(
-                    "episode={episode} step={step} total={total:.3f} waiting=enter".format(
+                    "episode={episode} step={step} total={total:.3f} waiting=step".format(
                         episode=event.get("episode_id"),
                         step=int(event.get("step_index", 0)) + 1,
                         total=float(event.get("total_reward", 0.0)),
@@ -352,7 +359,7 @@ def main() -> None:
             episodes=args.episodes,
             max_steps_per_episode=args.max_steps,
             seed=args.seed,
-            before_step_callback=_on_before_step if bool(args.step_through) else None,
+            before_step_callback=_on_before_step if bool(args.tui) else None,
             step_callback=_on_step if bool(args.tui) else None,
         )
     finally:
