@@ -7,6 +7,7 @@ import ctypes
 import ctypes.wintypes
 import logging
 import os
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -117,6 +118,10 @@ class StepTimeoutError(GameEnvError):
     """Raised when step path exceeds watchdog timeout."""
 
 
+class StateDesyncError(GameEnvError):
+    """Raised when state snapshots look desynced/invalid after bounded retries."""
+
+
 class ActionPerformer(Protocol):
     """Subset of action API required by the environment."""
 
@@ -139,6 +144,8 @@ class FailDetector(Protocol):
 
 
 RewardFunction = Callable[[GameStateSnapshot, GameStateSnapshot, bool, dict[str, Any]], float]
+RecoveryHook = Callable[[str, Exception | None], None]
+BeforeActionHook = Callable[[str], None]
 
 
 class TelemetryLogger(Protocol):
@@ -189,6 +196,17 @@ class GameEnvConfig:
     require_non_terminal_on_reset: bool = True
     prog_slot_backoff_steps: int = 3
     prog_slot_fallback_min_energy: int = 1
+    action_retry_attempts: int = 2
+    reset_retry_attempts: int = 2
+    state_read_retry_attempts: int = 2
+    runtime_recovery_attempts: int = 2
+    runtime_recovery_delay_seconds: float = 0.5
+    attach_retry_attempts: int = 5
+    attach_retry_delay_seconds: float = 0.5
+    window_attach_retry_attempts: int = 3
+    window_attach_retry_delay_seconds: float = 0.3
+    window_focus_retry_attempts: int = 3
+    window_focus_retry_delay_seconds: float = 0.2
 
 
 @dataclass(frozen=True)
@@ -275,6 +293,8 @@ class GameEnv:
         action_space: tuple[str, ...] | None = None,
         telemetry_logger: TelemetryLogger | None = None,
         close_telemetry_on_close: bool = False,
+        recovery_hook: RecoveryHook | None = None,
+        before_action_hook: BeforeActionHook | None = None,
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
         logger: logging.Logger | None = None,
@@ -288,6 +308,8 @@ class GameEnv:
         self._action_space = action_space or _resolve_default_action_space(action_api)
         self._telemetry_logger = telemetry_logger
         self._close_telemetry_on_close = close_telemetry_on_close
+        self._recovery_hook = recovery_hook
+        self._before_action_hook = before_action_hook
         self._sleep_fn = sleep_fn
         self._monotonic_fn = monotonic_fn
         self._logger = logger or LOGGER
@@ -403,12 +425,7 @@ class GameEnv:
         """Reset environment and return initial episode state."""
         self._ensure_open()
 
-        self._run_with_timeout(
-            self._reset_strategy.reset,
-            timeout_seconds=self._config.reset_timeout_seconds,
-            error_cls=ResetTimeoutError,
-            operation_name="reset_strategy.reset",
-        )
+        self._run_reset_strategy_with_retries()
         if self._config.post_reset_grace_seconds > 0:
             self._sleep_fn(self._config.post_reset_grace_seconds)
 
@@ -449,12 +466,7 @@ class GameEnv:
         step_index = self._step_index
         self._advance_prog_action_backoff()
 
-        self._run_with_timeout(
-            lambda: self._action_api.perform_action(action),
-            timeout_seconds=self._config.step_timeout_seconds,
-            error_cls=StepTimeoutError,
-            operation_name=f"action:{action}",
-        )
+        self._perform_action_with_retries(action=action, error_cls=StepTimeoutError)
         if self._config.post_action_poll_delay_seconds > 0:
             self._sleep_fn(self._config.post_action_poll_delay_seconds)
 
@@ -650,12 +662,238 @@ class GameEnv:
             return True
         return not any(signal is not None for signal in signals)
 
+    @staticmethod
+    def _bounded_attempts(value: int) -> int:
+        return max(int(value), 1)
+
+    @staticmethod
+    def _is_read_desync_code(code: Any) -> bool:
+        if not isinstance(code, str):
+            return False
+        normalized = code.strip().lower()
+        if not normalized or normalized == "null_pointer":
+            return False
+        if normalized.startswith(
+            (
+                "read_",
+                "short_read",
+                "invalid_address",
+                "invalid_size",
+                "vector_",
+                "module_base_resolve_failed",
+                "resolve_failed",
+            )
+        ):
+            return True
+        return normalized in {
+            "pointer_chain_failed",
+            "null_pointer_chain",
+        }
+
+    def _state_desync_markers(self, state: GameStateSnapshot) -> tuple[str, ...]:
+        if _state_indicates_start_screen(state):
+            return ()
+
+        markers: list[str] = []
+        for field_name in ("health", "energy", "currency", "fail_state"):
+            field = getattr(state, field_name)
+            if getattr(field, "status", None) != "invalid":
+                continue
+            error_code = getattr(field, "error_code", None)
+            if self._is_read_desync_code(error_code):
+                markers.append(f"{field_name}:{error_code}")
+
+        for field_name in ("inventory", "map"):
+            field = getattr(state, field_name)
+            if getattr(field, "status", None) != "invalid":
+                continue
+            error_code = getattr(field, "error_code", None)
+            if self._is_read_desync_code(error_code):
+                markers.append(f"{field_name}:{error_code}")
+
+        health_marker = any(marker.startswith("health:") for marker in markers)
+        if health_marker or len(markers) >= 2:
+            return tuple(markers)
+        return ()
+
+    def _raise_actionable_reliability_error(
+        self,
+        *,
+        category: str,
+        operation: str,
+        attempts: int,
+        last_error: Exception,
+    ) -> None:
+        raise GameEnvError(
+            f"{category} operation={operation} attempts={attempts} "
+            f"last_error={type(last_error).__name__}: {last_error}"
+        ) from last_error
+
+    def _attempt_runtime_recovery(
+        self,
+        *,
+        reason: str,
+        operation: str,
+        attempt: int,
+        prior_error: Exception | None,
+    ) -> None:
+        if self._recovery_hook is None:
+            return
+        self._logger.warning(
+            "Runtime recovery requested reason=%s operation=%s attempt=%s prior_error=%s",
+            reason,
+            operation,
+            attempt,
+            repr(prior_error),
+        )
+        try:
+            self._recovery_hook(reason, prior_error)
+        except Exception as recovery_error:
+            self._raise_actionable_reliability_error(
+                category="runtime_recovery_failed",
+                operation=operation,
+                attempts=attempt,
+                last_error=recovery_error,
+            )
+
+    def _perform_action_with_retries(
+        self,
+        *,
+        action: str,
+        error_cls: type[GameEnvError],
+    ) -> None:
+        max_attempts = self._bounded_attempts(self._config.action_retry_attempts)
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                if self._before_action_hook is not None:
+                    self._run_with_timeout(
+                        lambda: self._before_action_hook(action),
+                        timeout_seconds=self._config.step_timeout_seconds,
+                        error_cls=error_cls,
+                        operation_name=f"before_action:{action}",
+                    )
+                self._run_with_timeout(
+                    lambda: self._action_api.perform_action(action),
+                    timeout_seconds=self._config.step_timeout_seconds,
+                    error_cls=error_cls,
+                    operation_name=f"action:{action}",
+                )
+                return
+            except Exception as error:
+                last_error = error
+                if attempt >= max_attempts:
+                    break
+                self._attempt_runtime_recovery(
+                    reason=f"action_dispatch_failed:{action}",
+                    operation=f"action:{action}",
+                    attempt=attempt,
+                    prior_error=error,
+                )
+
+        assert last_error is not None
+        if isinstance(last_error, (ResetTimeoutError, StepTimeoutError)):
+            raise last_error
+        self._raise_actionable_reliability_error(
+            category="action_dispatch_failed",
+            operation=f"action:{action}",
+            attempts=max_attempts,
+            last_error=last_error,
+        )
+
+    def _run_reset_strategy_with_retries(self) -> None:
+        max_attempts = self._bounded_attempts(self._config.reset_retry_attempts)
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                self._run_with_timeout(
+                    self._reset_strategy.reset,
+                    timeout_seconds=self._config.reset_timeout_seconds,
+                    error_cls=ResetTimeoutError,
+                    operation_name="reset_strategy.reset",
+                )
+                return
+            except Exception as error:
+                last_error = error
+                if attempt >= max_attempts:
+                    break
+                self._attempt_runtime_recovery(
+                    reason="reset_strategy_failed",
+                    operation="reset_strategy.reset",
+                    attempt=attempt,
+                    prior_error=error,
+                )
+
+        assert last_error is not None
+        if isinstance(last_error, ResetTimeoutError):
+            raise last_error
+        self._raise_actionable_reliability_error(
+            category="reset_strategy_failed",
+            operation="reset_strategy.reset",
+            attempts=max_attempts,
+            last_error=last_error,
+        )
+
+    def _read_state_with_retries(
+        self,
+        *,
+        timeout_seconds: float,
+        error_cls: type[GameEnvError],
+        operation_name: str,
+    ) -> GameStateSnapshot:
+        max_attempts = self._bounded_attempts(self._config.state_read_retry_attempts)
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                state = self._run_with_timeout(
+                    self._state_provider,
+                    timeout_seconds=timeout_seconds,
+                    error_cls=error_cls,
+                    operation_name=operation_name,
+                )
+            except Exception as error:
+                last_error = error
+                if attempt >= max_attempts:
+                    break
+                self._attempt_runtime_recovery(
+                    reason="state_provider_failed",
+                    operation=operation_name,
+                    attempt=attempt,
+                    prior_error=error,
+                )
+                continue
+
+            desync_markers = self._state_desync_markers(state)
+            if not desync_markers:
+                return state
+
+            last_error = StateDesyncError(
+                "Detected stale/invalid state snapshot markers: " + ", ".join(desync_markers)
+            )
+            if attempt >= max_attempts:
+                break
+            self._attempt_runtime_recovery(
+                reason=f"state_desync:{'|'.join(desync_markers)}",
+                operation=operation_name,
+                attempt=attempt,
+                prior_error=last_error,
+            )
+
+        assert last_error is not None
+        if isinstance(last_error, (ResetTimeoutError, StepTimeoutError, StateDesyncError)):
+            raise last_error
+        self._raise_actionable_reliability_error(
+            category="state_provider_failed",
+            operation=operation_name,
+            attempts=max_attempts,
+            last_error=last_error,
+        )
+
     def _read_state_once_for_step(self) -> GameStateSnapshot:
-        return self._run_with_timeout(
-            self._state_provider,
+        return self._read_state_with_retries(
             timeout_seconds=self._config.state_timeout_seconds,
-            error_cls=StepTimeoutError,
             operation_name="state_provider",
+            error_cls=StepTimeoutError,
         )
 
     def _poll_state_until_ready(
@@ -666,11 +904,10 @@ class GameEnv:
     ) -> GameStateSnapshot:
         deadline = self._monotonic_fn() + timeout_seconds
         while self._monotonic_fn() <= deadline:
-            state = self._run_with_timeout(
-                self._state_provider,
+            state = self._read_state_with_retries(
                 timeout_seconds=self._config.state_timeout_seconds,
-                error_cls=ResetTimeoutError,
                 operation_name="state_provider",
+                error_cls=ResetTimeoutError,
             )
             if _state_indicates_start_screen(state):
                 self._dispatch_reset_recovery_actions(reason="start_screen_null_pointer")
@@ -701,14 +938,17 @@ class GameEnv:
         if timeout_seconds <= 0:
             return func()
 
-        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
-            future = executor.submit(func)
-            try:
-                return future.result(timeout=timeout_seconds)
-            except concurrent.futures.TimeoutError as error:
-                raise error_cls(
-                    f"Watchdog timeout during {operation_name} after {timeout_seconds:.2f}s."
-                ) from error
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+        future = executor.submit(func)
+        try:
+            return future.result(timeout=timeout_seconds)
+        except concurrent.futures.TimeoutError as error:
+            future.cancel()
+            raise error_cls(
+                f"Watchdog timeout during {operation_name} after {timeout_seconds:.2f}s."
+            ) from error
+        finally:
+            executor.shutdown(wait=False, cancel_futures=True)
 
     def _dispatch_reset_recovery_actions(self, *, reason: str) -> None:
         recovery_actions = tuple(
@@ -727,12 +967,7 @@ class GameEnv:
             ", ".join(recovery_actions),
         )
         for action_name in recovery_actions:
-            self._run_with_timeout(
-                lambda action=action_name: self._action_api.perform_action(action),
-                timeout_seconds=self._config.step_timeout_seconds,
-                error_cls=ResetTimeoutError,
-                operation_name=f"start_screen_recovery:{action_name}",
-            )
+            self._perform_action_with_retries(action=action_name, error_cls=ResetTimeoutError)
             if self._config.post_action_poll_delay_seconds > 0:
                 self._sleep_fn(self._config.post_action_poll_delay_seconds)
 
@@ -757,17 +992,25 @@ class GameEnv:
     ) -> GameEnv:
         """Create a live environment bound to running game process/window."""
         registry = load_offset_registry(config_path=offsets_config_path)
+        runtime_lock = threading.RLock()
+        attach_retries = max(1, int(config.attach_retry_attempts))
+        attach_retry_delay = float(config.attach_retry_delay_seconds)
+        window_attach_retries = max(1, int(config.window_attach_retry_attempts))
+        window_attach_retry_delay = float(config.window_attach_retry_delay_seconds)
+        window_focus_retries = max(1, int(config.window_focus_retry_attempts))
+        window_focus_retry_delay = float(config.window_focus_retry_delay_seconds)
+
         attached_process = attach_process(
             executable_name=executable_name,
-            retries=5,
-            retry_delay_seconds=0.5,
+            retries=attach_retries,
+            retry_delay_seconds=attach_retry_delay,
             launch_if_missing=launch_process_if_missing,
         )
         try:
             attached_window = attach_window(
                 pid=attached_process.pid,
-                retries=3,
-                retry_delay_seconds=0.3,
+                retries=window_attach_retries,
+                retry_delay_seconds=window_attach_retry_delay,
             )
         except WindowAttachError:
             LOGGER.exception("Failed attaching window for pid=%s.", attached_process.pid)
@@ -777,8 +1020,8 @@ class GameEnv:
             try:
                 focus_window(
                     attached_window,
-                    retries=3,
-                    retry_delay_seconds=0.2,
+                    retries=window_focus_retries,
+                    retry_delay_seconds=window_focus_retry_delay,
                 )
             except WindowAttachError:
                 LOGGER.warning(
@@ -788,12 +1031,18 @@ class GameEnv:
                 )
 
         reader = ProcessMemoryReader(process_handle=attached_process.handle)
+        runtime: dict[str, Any] = {
+            "attached_process": attached_process,
+            "attached_window": attached_window,
+        }
         kernel32 = _get_kernel32()
 
         def module_base_resolver(module_name: str) -> ReadResult[int]:
             try:
+                with runtime_lock:
+                    pid = int(runtime["attached_process"].pid)
                 base = _find_module_base(
-                    pid=attached_process.pid,
+                    pid=pid,
                     module_name=module_name,
                     kernel32=kernel32,
                 )
@@ -829,18 +1078,109 @@ class GameEnv:
             else None
         )
 
+        action_api_holder: dict[str, ActionAPI | None] = {"value": None}
+
+        def _close_process_handle_safe(process: Any) -> None:
+            try:
+                close_attached_process(process)
+            except Exception:  # pragma: no cover - defensive cleanup path
+                LOGGER.exception(
+                    "Failed closing attached process handle pid=%s handle=%s.",
+                    getattr(process, "pid", None),
+                    getattr(process, "handle", None),
+                )
+
+        def _swap_runtime_handles(*, new_process: Any, new_window: Any) -> None:
+            with runtime_lock:
+                previous_process = runtime["attached_process"]
+                runtime["attached_process"] = new_process
+                runtime["attached_window"] = new_window
+                reader._process_handle = int(new_process.handle)  # type: ignore[attr-defined]
+                if window_targeted_input and action_api_holder["value"] is not None:
+                    action_api_holder["value"].target_hwnd = int(new_window.hwnd)
+
+            if int(previous_process.handle) != int(new_process.handle):
+                _close_process_handle_safe(previous_process)
+
+        def _recover_live_bindings(reason: str, prior_error: Exception | None = None) -> None:
+            max_attempts = max(1, int(config.runtime_recovery_attempts))
+            retry_delay = float(config.runtime_recovery_delay_seconds)
+            last_error: Exception | None = None
+
+            for attempt in range(1, max_attempts + 1):
+                new_process: Any | None = None
+                try:
+                    new_process = attach_process(
+                        executable_name=executable_name,
+                        retries=attach_retries,
+                        retry_delay_seconds=attach_retry_delay,
+                        launch_if_missing=launch_process_if_missing,
+                    )
+                    new_window = attach_window(
+                        pid=int(new_process.pid),
+                        retries=window_attach_retries,
+                        retry_delay_seconds=window_attach_retry_delay,
+                    )
+                    if focus_window_on_attach:
+                        try:
+                            focus_window(
+                                new_window,
+                                retries=window_focus_retries,
+                                retry_delay_seconds=window_focus_retry_delay,
+                            )
+                        except WindowAttachError:
+                            LOGGER.warning(
+                                "Unable to focus recovered window hwnd=%s pid=%s; proceeding.",
+                                new_window.hwnd,
+                                new_window.pid,
+                            )
+                    _swap_runtime_handles(new_process=new_process, new_window=new_window)
+                    LOGGER.warning(
+                        "Recovered live bindings reason=%s attempt=%s pid=%s hwnd=%s prior_error=%s",
+                        reason,
+                        attempt,
+                        new_window.pid,
+                        new_window.hwnd,
+                        repr(prior_error),
+                    )
+                    return
+                except Exception as recovery_error:
+                    last_error = recovery_error
+                    if new_process is not None:
+                        _close_process_handle_safe(new_process)
+                    LOGGER.warning(
+                        "Recovery attempt %s/%s failed reason=%s error=%s",
+                        attempt,
+                        max_attempts,
+                        reason,
+                        recovery_error,
+                    )
+                    if attempt < max_attempts and retry_delay > 0:
+                        time.sleep(retry_delay)
+
+            if last_error is None:
+                raise GameEnvError(
+                    f"runtime_recovery_failed reason={reason} prior_error={prior_error!r}"
+                )
+            raise GameEnvError(
+                f"runtime_recovery_failed reason={reason} attempts={max_attempts} "
+                f"last_error={type(last_error).__name__}: {last_error}"
+            ) from last_error
+
         def reacquire_window_handle() -> int:
+            with runtime_lock:
+                pid = int(runtime["attached_process"].pid)
             refreshed_window = attach_window(
-                pid=attached_process.pid,
-                retries=3,
-                retry_delay_seconds=0.3,
+                pid=pid,
+                retries=window_attach_retries,
+                retry_delay_seconds=window_attach_retry_delay,
             )
             if focus_window_on_attach:
                 try:
                     focus_window(
                         refreshed_window,
-                        retries=3,
-                        retry_delay_seconds=0.2,
+                        retries=window_focus_retries,
+                        retry_delay_seconds=window_focus_retry_delay,
                     )
                 except WindowAttachError:
                     LOGGER.warning(
@@ -848,7 +1188,23 @@ class GameEnv:
                         refreshed_window.hwnd,
                         refreshed_window.pid,
                     )
+            with runtime_lock:
+                runtime["attached_window"] = refreshed_window
             return refreshed_window.hwnd
+
+        def before_action(action_name: str) -> None:
+            if window_targeted_input or not focus_window_on_attach:
+                return
+            with runtime_lock:
+                current_window = runtime["attached_window"]
+            try:
+                focus_window(
+                    current_window,
+                    retries=window_focus_retries,
+                    retry_delay_seconds=window_focus_retry_delay,
+                )
+            except WindowAttachError as error:
+                _recover_live_bindings(f"focus_lost_before_action:{action_name}", error)
 
         action_api = ActionAPI(
             input_driver=InputDriver(),
@@ -856,6 +1212,7 @@ class GameEnv:
             target_hwnd=attached_window.hwnd if window_targeted_input else None,
             window_reacquire_hook=reacquire_window_handle if window_targeted_input else None,
         )
+        action_api_holder["value"] = action_api
         if reset_sequence:
             reset_strategy: ResetStrategy = SequenceResetManager(
                 action_api=action_api,
@@ -871,8 +1228,18 @@ class GameEnv:
             reward_fn=reward_fn,
             config=config,
             telemetry_logger=telemetry_logger,
+            recovery_hook=_recover_live_bindings,
+            before_action_hook=before_action if focus_window_on_attach else None,
         )
-        env.add_cleanup_callback(lambda: close_attached_process(attached_process))
+
+        def _cleanup_live_bindings() -> None:
+            with runtime_lock:
+                active_process = runtime.get("attached_process")
+                runtime["attached_process"] = None
+            if active_process is not None:
+                _close_process_handle_safe(active_process)
+
+        env.add_cleanup_callback(_cleanup_live_bindings)
         return env
 
 

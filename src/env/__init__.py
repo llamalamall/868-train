@@ -7,6 +7,7 @@ from src.env.game_env import (
     GameEnvError,
     RandomPolicyEpisodeResult,
     ResetTimeoutError,
+    StateDesyncError,
     StepTimeoutError,
     run_random_policy,
 )
@@ -22,6 +23,7 @@ __all__ = [
     "ResetManagerError",
     "ResetTimeoutError",
     "SequenceResetManager",
+    "StateDesyncError",
     "StepTimeoutError",
     "run_random_policy",
 ]
