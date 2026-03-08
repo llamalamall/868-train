@@ -2,9 +2,11 @@
 
 ## File
 - `src/agent/dqn_agent.py`
+- ELI5 guide: `src/agent/README_dqn_agent_eli5.md`
 
 ## Implemented Scope
 - Objective-aware compact state featurizer for `GameStateSnapshot` (`state_to_feature_vector`).
+  - Uses wall-aware shortest-path distance features (BFS) for siphon/enemy/exit progress.
 - Linear DQN-style Q approximator with:
   - replay buffer sampling,
   - target-network sync,

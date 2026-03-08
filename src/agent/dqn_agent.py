@@ -5,11 +5,19 @@ from __future__ import annotations
 import json
 import math
 import random
+from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
 from src.state.schema import GameStateSnapshot, GridPosition
+
+_MOVE_VECTORS: tuple[tuple[int, int], ...] = (
+    (0, 1),
+    (0, -1),
+    (-1, 0),
+    (1, 0),
+)
 
 
 class DQNCheckpointError(RuntimeError):
@@ -23,12 +31,12 @@ class DQNConfig:
     gamma: float = 0.99
     learning_rate: float = 0.005
     replay_capacity: int = 20_000
-    min_replay_size: int = 1_024
-    batch_size: int = 128
+    min_replay_size: int = 256
+    batch_size: int = 64
     target_sync_interval: int = 500
-    epsilon_start: float = 1.0
-    epsilon_end: float = 0.10
-    epsilon_decay_steps: int = 25_000
+    epsilon_start: float = 0.8
+    epsilon_end: float = 0.05
+    epsilon_decay_steps: int = 5_000
     feature_count: int = 22
     feature_clip_abs: float = 100.0
     max_gradient_norm: float = 10.0
@@ -594,9 +602,10 @@ def state_to_feature_vector(
     exit_x = float(exit_position.x) / float(max_x) if exit_position is not None else 0.0
     exit_y = float(exit_position.y) / float(max_y) if exit_position is not None else 0.0
 
+    exit_steps = _shortest_path_distance(state, target=exit_position) if exit_position is not None else None
     exit_distance = (
-        _manhattan(player, exit_position) / float(max_distance)
-        if player is not None and exit_position is not None
+        float(exit_steps) / float(max_distance)
+        if player is not None and exit_steps is not None
         else 1.0
     )
 
@@ -609,14 +618,16 @@ def state_to_feature_vector(
     on_siphon_tile = 1.0 if player is not None and player in siphon_positions else 0.0
     on_exit_tile = 1.0 if player is not None and exit_position is not None and player == exit_position else 0.0
 
+    nearest_siphon_steps = _nearest_path_distance_to_targets(state=state, targets=siphon_positions)
     nearest_siphon = (
-        min(_manhattan(player, target) for target in siphon_positions) / float(max_distance)
-        if player is not None and siphon_positions
+        float(nearest_siphon_steps) / float(max_distance)
+        if player is not None and nearest_siphon_steps is not None
         else 1.0
     )
+    nearest_enemy_steps = _nearest_path_distance_to_targets(state=state, targets=enemy_positions)
     nearest_enemy = (
-        min(_manhattan(player, target) for target in enemy_positions) / float(max_distance)
-        if player is not None and enemy_positions
+        float(nearest_enemy_steps) / float(max_distance)
+        if player is not None and nearest_enemy_steps is not None
         else 1.0
     )
 
@@ -733,8 +744,69 @@ def _clip_feature(value: float, *, clip_abs: float) -> float:
     return value
 
 
-def _manhattan(a: GridPosition, b: GridPosition) -> int:
-    return abs(a.x - b.x) + abs(a.y - b.y)
+def _is_in_bounds(position: GridPosition, *, width: int, height: int) -> bool:
+    return 0 <= position.x < width and 0 <= position.y < height
+
+
+def _wall_positions(state: GameStateSnapshot) -> set[GridPosition]:
+    if state.map.status != "ok":
+        return set()
+    positions = {cell.position for cell in state.map.cells if cell.is_wall}
+    if positions:
+        return positions
+    return {wall.position for wall in state.map.walls}
+
+
+def _shortest_path_distance(state: GameStateSnapshot, *, target: GridPosition | None) -> int | None:
+    if state.map.status != "ok" or state.map.player_position is None or target is None:
+        return None
+    width = int(state.map.width)
+    height = int(state.map.height)
+    if width <= 0 or height <= 0:
+        return None
+    if not _is_in_bounds(target, width=width, height=height):
+        return None
+
+    start = state.map.player_position
+    if start == target:
+        return 0
+
+    walls = _wall_positions(state)
+    if target in walls:
+        return None
+
+    queue: deque[tuple[GridPosition, int]] = deque([(start, 0)])
+    visited: set[GridPosition] = {start}
+    while queue:
+        current, distance = queue.popleft()
+        for dx, dy in _MOVE_VECTORS:
+            candidate = GridPosition(x=current.x + dx, y=current.y + dy)
+            if not _is_in_bounds(candidate, width=width, height=height):
+                continue
+            if candidate in walls or candidate in visited:
+                continue
+            if candidate == target:
+                return distance + 1
+            visited.add(candidate)
+            queue.append((candidate, distance + 1))
+    return None
+
+
+def _nearest_path_distance_to_targets(
+    *,
+    state: GameStateSnapshot,
+    targets: tuple[GridPosition, ...],
+) -> int | None:
+    if not targets:
+        return None
+    best: int | None = None
+    for target in targets:
+        distance = _shortest_path_distance(state, target=target)
+        if distance is None:
+            continue
+        if best is None or distance < best:
+            best = distance
+    return best
 
 
 def _clip_gradients(

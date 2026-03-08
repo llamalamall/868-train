@@ -33,6 +33,11 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.tui is True
     assert args.gamma == 0.99
     assert args.learning_rate == 0.005
+    assert args.min_replay_size == 256
+    assert args.batch_size == 64
+    assert args.epsilon_start == 0.8
+    assert args.epsilon_end == 0.05
+    assert args.epsilon_decay_steps == 5000
     assert args.reward_energy_delta == 0.02
     assert args.reward_score_delta == 0.01
     assert args.reward_safe_tile_bonus == 0.02

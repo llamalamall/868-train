@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -11,6 +11,12 @@ from src.state.schema import EnemyState, FieldState, GameStateSnapshot, GridPosi
 
 LOGGER = logging.getLogger(__name__)
 _ENEMY_TYPE_VIRUS = 2
+_MOVE_VECTORS: tuple[tuple[int, int], ...] = (
+    (0, 1),
+    (0, -1),
+    (-1, 0),
+    (1, 0),
+)
 
 
 @dataclass(frozen=True)
@@ -201,35 +207,104 @@ def _chebyshev(a: GridPosition, b: GridPosition) -> int:
     return max(abs(a.x - b.x), abs(a.y - b.y))
 
 
+def _is_in_bounds(position: GridPosition, *, width: int, height: int) -> bool:
+    return 0 <= position.x < width and 0 <= position.y < height
+
+
+def _wall_positions(state: GameStateSnapshot) -> set[GridPosition]:
+    if state.map.status != "ok":
+        return set()
+    positions = {cell.position for cell in state.map.cells if cell.is_wall}
+    if positions:
+        return positions
+    return {wall.position for wall in state.map.walls}
+
+
+def _shortest_path_distance(state: GameStateSnapshot, *, target: GridPosition) -> int | None:
+    if state.map.status != "ok" or state.map.player_position is None:
+        return None
+
+    width = int(state.map.width)
+    height = int(state.map.height)
+    if width <= 0 or height <= 0:
+        return None
+    if not _is_in_bounds(target, width=width, height=height):
+        return None
+
+    start = state.map.player_position
+    if start == target:
+        return 0
+
+    walls = _wall_positions(state)
+    if target in walls:
+        return None
+
+    queue: deque[tuple[GridPosition, int]] = deque([(start, 0)])
+    visited: set[GridPosition] = {start}
+    while queue:
+        current, distance = queue.popleft()
+        for dx, dy in _MOVE_VECTORS:
+            candidate = GridPosition(x=current.x + dx, y=current.y + dy)
+            if not _is_in_bounds(candidate, width=width, height=height):
+                continue
+            if candidate in walls or candidate in visited:
+                continue
+            if candidate == target:
+                return distance + 1
+            visited.add(candidate)
+            queue.append((candidate, distance + 1))
+    return None
+
+
+def _nearest_path_distance_to_targets(
+    *,
+    state: GameStateSnapshot,
+    targets: tuple[GridPosition, ...],
+) -> int | None:
+    if not targets:
+        return None
+    best_distance: int | None = None
+    for target in targets:
+        distance = _shortest_path_distance(state, target=target)
+        if distance is None:
+            continue
+        if best_distance is None or distance < best_distance:
+            best_distance = distance
+    return best_distance
+
+
 def _nearest_siphon_distance(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
-    player = state.map.player_position
-    if player is None or not state.map.siphons:
+    if state.map.player_position is None or not state.map.siphons:
         return None
-    return min(_manhattan(player, target) for target in state.map.siphons)
+    return _nearest_path_distance_to_targets(
+        state=state,
+        targets=tuple(state.map.siphons),
+    )
 
 
 def _nearest_enemy_distance(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
-    player = state.map.player_position
-    if player is None:
+    if state.map.player_position is None:
         return None
     enemies = tuple(enemy.position for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
     if not enemies:
         return None
-    return min(_manhattan(player, target) for target in enemies)
+    return _nearest_path_distance_to_targets(
+        state=state,
+        targets=enemies,
+    )
 
 
 def _exit_distance(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
-    player = state.map.player_position
     exit_position = state.map.exit_position
-    if player is None or exit_position is None:
+    if state.map.player_position is None or exit_position is None:
         return None
-    return _manhattan(player, exit_position)
+    return _shortest_path_distance(state, target=exit_position)
 
 
 def _phase_progress_delta(
@@ -310,18 +385,32 @@ def _harvest_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
         return ()
 
     targets: set[GridPosition] = set()
+    width = int(state.map.width)
+    height = int(state.map.height)
+    walls = _wall_positions(state)
+
+    def _add_adjacent_walkable_positions(position: GridPosition) -> None:
+        for dx, dy in _MOVE_VECTORS:
+            candidate = GridPosition(x=position.x + dx, y=position.y + dy)
+            if not _is_in_bounds(candidate, width=width, height=height):
+                continue
+            if candidate in walls:
+                continue
+            targets.add(candidate)
+
     for resource in state.map.resource_cells:
         if resource.credits > 0 or resource.energy > 0 or resource.points > 0:
             targets.add(resource.position)
+    for cell in state.map.cells:
+        if cell.is_wall:
+            if cell.prog_id is not None or cell.points > 0:
+                _add_adjacent_walkable_positions(cell.position)
+            continue
+        if cell.credits > 0 or cell.energy > 0 or cell.points > 0 or cell.prog_id is not None:
+            targets.add(cell.position)
     for wall in state.map.walls:
         if wall.prog_id is not None or wall.points > 0:
-            targets.add(wall.position)
-    if not state.map.walls:
-        for cell in state.map.cells:
-            if not cell.is_wall:
-                continue
-            if cell.prog_id is not None or cell.points > 0:
-                targets.add(cell.position)
+            _add_adjacent_walkable_positions(wall.position)
     return tuple(targets)
 
 
@@ -331,8 +420,7 @@ def _nearest_harvest_target_distance(state: GameStateSnapshot) -> int | None:
     targets = _harvest_targets(state)
     if not targets:
         return None
-    player = state.map.player_position
-    return min(_manhattan(player, target) for target in targets)
+    return _nearest_path_distance_to_targets(state=state, targets=targets)
 
 
 def _enemy_can_attack_position(

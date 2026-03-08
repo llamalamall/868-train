@@ -29,8 +29,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="train: update model and write checkpoint. eval: run greedy policy from a checkpoint.",
     )
     parser.add_argument("--exe", default="868-HACK.exe", help="Target executable name.")
-    parser.add_argument("--episodes", type=int, default=10, help="Number of episodes to run.")
-    parser.add_argument("--max-steps", type=int, default=200, help="Max steps per episode.")
+    parser.add_argument("--episodes", type=int, default=20, help="Number of episodes to run.")
+    parser.add_argument("--max-steps", type=int, default=500, help="Max steps per episode.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed.")
     parser.add_argument(
         "--movement-keys",
@@ -55,7 +55,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint-every",
         type=int,
-        default=0,
+        default=1,
         help="In train mode, also save periodic checkpoints every N episodes (0 disables).",
     )
     parser.add_argument(
@@ -141,13 +141,13 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--min-replay-size",
         type=int,
-        default=1024,
+        default=256,
         help="Minimum replay items before updates begin.",
     )
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=128,
+        default=64,
         help="Replay minibatch size.",
     )
     parser.add_argument(
@@ -159,19 +159,19 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--epsilon-start",
         type=float,
-        default=1.0,
+        default=0.8,
         help="Initial epsilon for exploration.",
     )
     parser.add_argument(
         "--epsilon-end",
         type=float,
-        default=0.10,
+        default=0.05,
         help="Final epsilon for exploration.",
     )
     parser.add_argument(
         "--epsilon-decay-steps",
         type=int,
-        default=25_000,
+        default=5_000,
         help="Linear epsilon decay horizon in env steps.",
     )
 

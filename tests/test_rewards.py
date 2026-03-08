@@ -502,3 +502,142 @@ def test_compute_reward_applies_safety_and_damage_penalties() -> None:
     assert result.breakdown.danger_tile_penalty == pytest.approx(-0.3)
     assert result.breakdown.damage_taken_penalty == pytest.approx(-1.8)
     assert result.total == pytest.approx(-2.1)
+
+
+def test_compute_reward_phase_progress_uses_wall_aware_shortest_path() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            energy_delta=0.0,
+            score_delta=0.0,
+            siphon_collected=0.0,
+            enemy_cleared=0.0,
+            phase_progress=1.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+            safe_tile_bonus=0.0,
+            danger_tile_penalty=0.0,
+            resource_proximity=0.0,
+            prog_collected_base=0.0,
+            points_collected=0.0,
+            damage_taken_penalty=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    wall_cell = MapCellState(
+        position=GridPosition(1, 0),
+        cell_type=1,
+        tile_variant=0,
+        wall_state=0,
+        is_wall=True,
+    )
+    previous_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(0, 0),
+            siphons=(GridPosition(2, 0),),
+            cells=(wall_cell,),
+        ),
+    )
+    current_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(0, 1),
+            siphons=(GridPosition(2, 0),),
+            cells=(wall_cell,),
+        ),
+    )
+
+    result = compute_reward(
+        previous_state=previous_state,
+        current_state=current_state,
+        done=False,
+        config=config,
+    )
+
+    # Manhattan distance gets worse (2 -> 3), but shortest path improves (4 -> 3).
+    assert result.breakdown.phase_progress == pytest.approx(1.0)
+
+
+def test_compute_reward_resource_proximity_uses_adjacent_targets_for_prog_walls() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            energy_delta=0.0,
+            score_delta=0.0,
+            siphon_collected=0.0,
+            enemy_cleared=0.0,
+            phase_progress=0.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+            safe_tile_bonus=0.0,
+            danger_tile_penalty=0.0,
+            resource_proximity=1.0,
+            prog_collected_base=0.0,
+            points_collected=0.0,
+            damage_taken_penalty=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    prog_wall = MapCellState(
+        position=GridPosition(2, 0),
+        cell_type=1,
+        tile_variant=0,
+        wall_state=0,
+        is_wall=True,
+        prog_id=10,
+    )
+    previous_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(0, 1),
+            cells=(prog_wall,),
+        ),
+    )
+    current_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(1, 1),
+            cells=(prog_wall,),
+        ),
+    )
+
+    result = compute_reward(
+        previous_state=previous_state,
+        current_state=current_state,
+        done=False,
+        config=config,
+    )
+
+    # Progress is measured against reachable adjacent tiles to the wall harvest target.
+    assert result.breakdown.resource_proximity == pytest.approx(1.0)
