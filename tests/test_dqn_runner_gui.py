@@ -13,12 +13,11 @@ from src.gui.dqn_runner_gui import (
     _initial_browse_dir,
     _iter_parser_actions,
     _parse_episode_progress,
+    _resolve_monitor_action_lines,
     _resolve_reward_metric_value,
     _run_dqn_preset_overrides,
-    _select_live_monitor_output_line,
     _sort_form_actions,
 )
-from src.memory.state_monitor_tui import CONTROL_MODE_AUTO, CONTROL_MODE_PAUSED
 from src.training.rewards import RewardWeights
 
 
@@ -92,22 +91,27 @@ def test_estimate_epsilon_eta_seconds_computes_linear_decay_remaining_time() -> 
     assert eta == pytest.approx(150.0)
 
 
-def test_select_live_monitor_output_line_prefers_reward_when_paused() -> None:
-    assert (
-        _select_live_monitor_output_line(
-            action_line="action=move_up reason=dqn_select_action",
-            reward_line="reward total=+0.420 survival=+0.050",
-            session_mode=CONTROL_MODE_PAUSED,
-        )
-        == "reward total=+0.420 survival=+0.050"
+def test_resolve_monitor_action_lines_prefers_explicit_before_and_after_lines() -> None:
+    assert _resolve_monitor_action_lines(
+        training_line="episode=episode-00001 step=2 total=1.200 waiting=step",
+        action_line="action=move_up reason=dqn_select_action",
+        before_action_line="action=move_up reason=dqn_select_action status=waiting_for_step",
+        after_action_line="action=move_up reason=dqn_select_action loss=0.123000",
+    ) == (
+        "action=move_up reason=dqn_select_action status=waiting_for_step",
+        "action=move_up reason=dqn_select_action loss=0.123000",
     )
-    assert (
-        _select_live_monitor_output_line(
-            action_line="action=move_up reason=dqn_select_action",
-            reward_line="reward total=+0.420 survival=+0.050",
-            session_mode=CONTROL_MODE_AUTO,
-        )
-        == "action=move_up reason=dqn_select_action"
+
+
+def test_resolve_monitor_action_lines_falls_back_to_legacy_action_line() -> None:
+    assert _resolve_monitor_action_lines(
+        training_line="episode=episode-00001 step=2 total=1.200 waiting=step",
+        action_line="action=move_up reason=dqn_select_action status=waiting_for_step",
+        before_action_line="",
+        after_action_line="",
+    ) == (
+        "action=move_up reason=dqn_select_action status=waiting_for_step",
+        "action=move_up reason=dqn_select_action status=waiting_for_step",
     )
 
 
