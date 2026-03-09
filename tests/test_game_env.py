@@ -18,7 +18,15 @@ from src.env.game_env import (
     run_random_policy,
 )
 from src.env.reset_manager import NoopResetManager
-from src.state.schema import FieldState, GameStateSnapshot, GridPosition, InventoryState, MapCellState, MapState
+from src.state.schema import (
+    EnemyState,
+    FieldState,
+    GameStateSnapshot,
+    GridPosition,
+    InventoryState,
+    MapCellState,
+    MapState,
+)
 
 
 def _field(value: object, *, status: str = "ok") -> FieldState:
@@ -867,3 +875,109 @@ def test_game_env_prog_action_backoff_after_ineffective_attempt() -> None:
     assert info["action_effective"] is False
     assert info["invalid_action_reason"] == "prog_no_effect"
     assert "prog_slot_1" not in env.available_actions()
+
+
+def test_game_env_space_action_is_effective_when_enemy_hp_changes_without_player_movement() -> None:
+    before = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            enemies=(
+                EnemyState(
+                    slot=0,
+                    type_id=1,
+                    position=GridPosition(1, 0),
+                    hp=5,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    after = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            enemies=(
+                EnemyState(
+                    slot=0,
+                    type_id=1,
+                    position=GridPosition(1, 0),
+                    hp=4,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("space",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    _state, _reward, _done, info = env.step("space")
+
+    assert info["action_effective"] is True
+    assert info["invalid_action_reason"] is None
+
+
+def test_game_env_prog_action_is_effective_when_map_cell_state_changes_without_player_movement() -> None:
+    before = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            cells=(
+                MapCellState(
+                    position=GridPosition(0, 0),
+                    cell_type=2,
+                    tile_variant=1,
+                    wall_state=0,
+                    points=3,
+                ),
+            ),
+        ),
+        inventory_state=InventoryState(status="ok", raw_prog_ids=(2,)),
+        energy=10,
+    )
+    after = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            cells=(
+                MapCellState(
+                    position=GridPosition(0, 0),
+                    cell_type=2,
+                    tile_variant=1,
+                    wall_state=0,
+                    points=2,
+                ),
+            ),
+        ),
+        inventory_state=InventoryState(status="ok", raw_prog_ids=(2,)),
+        energy=10,
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("prog_slot_1",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    _state, _reward, _done, info = env.step("prog_slot_1")
+
+    assert info["action_effective"] is True
+    assert info["invalid_action_reason"] is None

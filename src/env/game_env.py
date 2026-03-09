@@ -102,6 +102,85 @@ def _player_on_exit(snapshot: GameStateSnapshot) -> bool:
     return player is not None and exit_position is not None and player == exit_position
 
 
+def _field_effect_signature(field: Any) -> tuple[str, Any | None]:
+    status = str(getattr(field, "status", "missing"))
+    if status != "ok":
+        return (status, None)
+    return ("ok", getattr(field, "value", None))
+
+
+def _extra_fields_effect_signature(snapshot: GameStateSnapshot) -> tuple[tuple[str, tuple[str, Any | None]], ...]:
+    if not snapshot.extra_fields:
+        return ()
+    return tuple(
+        sorted(
+            (str(key), _field_effect_signature(field))
+            for key, field in snapshot.extra_fields.items()
+        )
+    )
+
+
+def _inventory_effect_signature(snapshot: GameStateSnapshot) -> tuple[Any, ...]:
+    inventory = snapshot.inventory
+    if inventory.status != "ok":
+        return (inventory.status,)
+    return (
+        "ok",
+        tuple(int(prog_id) for prog_id in inventory.raw_prog_ids),
+        tuple((int(item.prog_id), int(item.count)) for item in inventory.collected_progs),
+    )
+
+
+def _map_effect_signature(snapshot: GameStateSnapshot) -> tuple[Any, ...]:
+    map_state = snapshot.map
+    if map_state.status != "ok":
+        return (map_state.status,)
+    return (
+        "ok",
+        int(map_state.width),
+        int(map_state.height),
+        map_state.player_position,
+        map_state.exit_position,
+        tuple(map_state.cells),
+        tuple(map_state.siphons),
+        tuple(map_state.walls),
+        tuple(map_state.resource_cells),
+        tuple(map_state.enemies),
+    )
+
+
+def _state_effect_signature(snapshot: GameStateSnapshot) -> tuple[Any, ...]:
+    return (
+        _field_effect_signature(snapshot.health),
+        _field_effect_signature(snapshot.energy),
+        _field_effect_signature(snapshot.currency),
+        _field_effect_signature(snapshot.fail_state),
+        _inventory_effect_signature(snapshot),
+        _map_effect_signature(snapshot),
+        snapshot.can_siphon_now,
+        snapshot.prog_slots_available_mask,
+        _extra_fields_effect_signature(snapshot),
+    )
+
+
+def _state_has_effect_observability(snapshot: GameStateSnapshot) -> bool:
+    scalar_visible = any(
+        _field_effect_signature(field)[0] == "ok"
+        for field in (snapshot.health, snapshot.energy, snapshot.currency, snapshot.fail_state)
+    )
+    inventory_visible = snapshot.inventory.status == "ok"
+    map_visible = snapshot.map.status == "ok"
+    ui_visible = (
+        snapshot.can_siphon_now is not None
+        or snapshot.prog_slots_available_mask is not None
+    )
+    extra_visible = any(
+        _field_effect_signature(field)[0] == "ok"
+        for field in snapshot.extra_fields.values()
+    )
+    return scalar_visible or inventory_visible or map_visible or ui_visible or extra_visible
+
+
 class GameEnvError(RuntimeError):
     """Base environment error."""
 
@@ -666,25 +745,18 @@ class GameEnv:
         previous_state: GameStateSnapshot,
         current_state: GameStateSnapshot,
     ) -> tuple[bool, str | None]:
+        state_changed = self._transition_has_effect(
+            previous_state=previous_state,
+            current_state=current_state,
+        )
+
         if action == "space":
-            if self._transition_has_effect(previous_state=previous_state, current_state=current_state):
+            if state_changed:
                 return (True, None)
             return (False, "space_no_effect")
 
         if action.startswith("prog_slot_"):
-            energy_before = _state_numeric(previous_state.energy)
-            energy_after = _state_numeric(current_state.energy)
-            energy_spent: bool | None = None
-            if energy_before is not None and energy_after is not None:
-                energy_spent = energy_after < energy_before
-
-            state_changed = self._transition_has_effect(
-                previous_state=previous_state,
-                current_state=current_state,
-            )
-            if energy_spent is None and not state_changed:
-                return (False, "prog_no_effect")
-            if energy_spent is False and not state_changed:
+            if not state_changed:
                 return (False, "prog_no_effect")
         return (True, None)
 
@@ -694,45 +766,12 @@ class GameEnv:
         previous_state: GameStateSnapshot,
         current_state: GameStateSnapshot,
     ) -> bool:
-        numeric_changes: list[bool | None] = []
-        for before_field, after_field in (
-            (previous_state.energy, current_state.energy),
-            (previous_state.currency, current_state.currency),
-            (previous_state.health, current_state.health),
+        if (
+            not _state_has_effect_observability(previous_state)
+            and not _state_has_effect_observability(current_state)
         ):
-            before_value = _state_numeric(before_field)
-            after_value = _state_numeric(after_field)
-            if before_value is None or after_value is None:
-                numeric_changes.append(None)
-                continue
-            numeric_changes.append(after_value != before_value)
-
-        prev_siphons = _count_siphons(previous_state)
-        curr_siphons = _count_siphons(current_state)
-        siphon_change = None if prev_siphons is None or curr_siphons is None else (prev_siphons != curr_siphons)
-
-        prev_enemies = _count_live_enemies(previous_state)
-        curr_enemies = _count_live_enemies(current_state)
-        enemy_change = None if prev_enemies is None or curr_enemies is None else (prev_enemies != curr_enemies)
-
-        player_change: bool | None = None
-        if previous_state.map.status == "ok" and current_state.map.status == "ok":
-            player_change = previous_state.map.player_position != current_state.map.player_position
-
-        inventory_change: bool | None = None
-        if previous_state.inventory.status == "ok" and current_state.inventory.status == "ok":
-            inventory_change = previous_state.inventory.raw_prog_ids != current_state.inventory.raw_prog_ids
-
-        signals = (
-            *numeric_changes,
-            siphon_change,
-            enemy_change,
-            player_change,
-            inventory_change,
-        )
-        if any(signal is True for signal in signals):
             return True
-        return not any(signal is not None for signal in signals)
+        return _state_effect_signature(previous_state) != _state_effect_signature(current_state)
 
     @staticmethod
     def _bounded_attempts(value: int) -> int:
