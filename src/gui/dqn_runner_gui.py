@@ -36,7 +36,7 @@ _HIDDEN_GUI_DESTS = {"external_status_file", "external_control_file"}
 _MAX_FORM_COLUMNS = 5
 _CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
 _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
-_EPSILON_HISTORY_LIMIT = 240
+_REWARD_HISTORY_LIMIT = 30
 _PALETTE = {
     "bg": "#0b0f14",
     "surface": "#121922",
@@ -785,7 +785,9 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_step_button: ttk.Button | None = None
         self._monitor_resume_button: ttk.Button | None = None
         self._monitor_metric_vars: dict[str, tk.StringVar] = {}
-        self._epsilon_history: list[float] = []
+        self._reward_history: list[float] = []
+        self._epsilon_progress_value = tk.DoubleVar(value=0.0)
+        self._epsilon_progress_text = tk.StringVar(value="0.0%")
         self._monitor_total_episodes: int | None = None
         self._monitor_epsilon_start: float | None = None
         self._monitor_epsilon_end: float | None = None
@@ -798,6 +800,7 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_completed_episode_ids: set[int] = set()
         self._monitor_episode_duration_sum = 0.0
         self._monitor_episode_duration_count = 0
+        self._monitor_last_reward_step_key: tuple[int, int] | None = None
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=4)
@@ -979,6 +982,15 @@ class DqnRunnerGui(tk.Tk):
         style.configure("TEntry", fieldbackground="#0f1620", foreground=_PALETTE["text"], borderwidth=1)
         style.configure("TCombobox", fieldbackground="#0f1620", foreground=_PALETTE["text"])
         style.configure("TSpinbox", fieldbackground="#0f1620", foreground=_PALETTE["text"])
+        style.configure(
+            "MonitorEpsilon.Horizontal.TProgressbar",
+            troughcolor="#0f1620",
+            background=_PALETTE["accent"],
+            bordercolor="#243244",
+            lightcolor=_PALETTE["accent"],
+            darkcolor=_PALETTE["accent"],
+            thickness=14,
+        )
 
         style.configure("Primary.TButton", background="#1f8f81", foreground="#ffffff", borderwidth=0, padding=(10, 5))
         style.map("Primary.TButton", background=[("active", "#28a594"), ("disabled", "#345955")])
@@ -1123,7 +1135,7 @@ class DqnRunnerGui(tk.Tk):
         graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
         graph_shell.grid(row=4, column=0, sticky="nsew", pady=(20, 0))
         graph_shell.columnconfigure(0, weight=1)
-        graph_shell.rowconfigure(3, weight=1)
+        graph_shell.rowconfigure(4, weight=1)
         ttk.Label(graph_shell, text="action_line", style="FormLabel.TLabel").grid(
             row=0,
             column=0,
@@ -1164,15 +1176,37 @@ class DqnRunnerGui(tk.Tk):
             padx=(220, 0),
             pady=(0, 8),
         )
-        self._epsilon_canvas = tk.Canvas(
+        epsilon_row = ttk.Frame(graph_shell, style="Surface.TFrame")
+        epsilon_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        epsilon_row.columnconfigure(0, weight=1)
+        ttk.Label(epsilon_row, text="epsilon_progress", style="FormLabel.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        ttk.Label(
+            epsilon_row,
+            textvariable=self._epsilon_progress_text,
+            style="FormHelp.TLabel",
+        ).grid(row=0, column=1, sticky="e")
+        self._epsilon_progress = ttk.Progressbar(
+            epsilon_row,
+            orient="horizontal",
+            mode="determinate",
+            maximum=100.0,
+            variable=self._epsilon_progress_value,
+            style="MonitorEpsilon.Horizontal.TProgressbar",
+        )
+        self._epsilon_progress.grid(row=1, column=0, columnspan=2, sticky="ew", pady=(3, 0))
+        self._reward_canvas = tk.Canvas(
             graph_shell,
             height=180,
             bg="#0d141d",
             highlightthickness=1,
             highlightbackground="#243244",
         )
-        self._epsilon_canvas.grid(row=3, column=0, sticky="nsew")
-        self._epsilon_canvas.bind("<Configure>", lambda _: self._draw_epsilon_graph())
+        self._reward_canvas.grid(row=4, column=0, sticky="nsew")
+        self._reward_canvas.bind("<Configure>", lambda _: self._draw_reward_graph())
         self._set_monitor_controls_enabled(False)
 
         self._notebook.add(monitor, text="Live Monitor")
@@ -1243,6 +1277,7 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_completed_episode_ids.clear()
         self._monitor_episode_duration_sum = 0.0
         self._monitor_episode_duration_count = 0
+        self._monitor_last_reward_step_key = None
 
     def _configure_monitor_estimates(self, *, form: _ArgForm) -> None:
         self._reset_monitor_estimates()
@@ -1326,7 +1361,10 @@ class DqnRunnerGui(tk.Tk):
         else:
             self._monitor_control_state.set("session=unavailable")
             self._set_monitor_controls_enabled(False)
-        self._epsilon_history.clear()
+        self._reward_history.clear()
+        self._epsilon_progress_value.set(0.0)
+        self._epsilon_progress_text.set("0.0%")
+        self._draw_reward_graph()
         for variable in self._monitor_metric_vars.values():
             variable.set("-")
 
@@ -1447,6 +1485,7 @@ class DqnRunnerGui(tk.Tk):
     def _update_monitor_metrics(self, training_line: str, *, reward_line: str = "") -> None:
         status_values = _parse_status_values(training_line)
         now = time.monotonic()
+        new_step_event = False
 
         current_episode, reported_total_episodes = _parse_episode_progress(
             status_values.get("episode", ""),
@@ -1464,6 +1503,7 @@ class DqnRunnerGui(tk.Tk):
                     self._monitor_first_step_time = now
                 self._monitor_step_events += 1
                 self._monitor_last_step_key = step_key
+                new_step_event = True
             self._monitor_episode_start_times.setdefault(current_episode, now)
 
         if (
@@ -1539,19 +1579,36 @@ class DqnRunnerGui(tk.Tk):
             if variable is not None:
                 variable.set(value)
 
-        epsilon_graph_text = mapped_values["epsilon"]
-        try:
-            graph_epsilon = float(epsilon_graph_text)
-        except (TypeError, ValueError):
-            return
-        graph_epsilon = max(0.0, min(1.0, graph_epsilon))
-        self._epsilon_history.append(graph_epsilon)
-        if len(self._epsilon_history) > _EPSILON_HISTORY_LIMIT:
-            self._epsilon_history = self._epsilon_history[-_EPSILON_HISTORY_LIMIT:]
-        self._draw_epsilon_graph()
+        if epsilon_value is None:
+            self._epsilon_progress_value.set(0.0)
+            self._epsilon_progress_text.set("-")
+        else:
+            clamped_epsilon = max(0.0, min(1.0, epsilon_value))
+            self._epsilon_progress_value.set(clamped_epsilon * 100.0)
+            self._epsilon_progress_text.set(f"{clamped_epsilon * 100.0:.1f}%")
 
-    def _draw_epsilon_graph(self) -> None:
-        canvas = self._epsilon_canvas
+        reward_step_key: tuple[int, int] | None = None
+        if current_episode is not None and current_step is not None:
+            reward_step_key = (current_episode, current_step)
+
+        should_record_reward = reward_step_key is None or (
+            new_step_event and reward_step_key != self._monitor_last_reward_step_key
+        )
+        if should_record_reward:
+            try:
+                reward_sample = float(reward_value)
+            except (TypeError, ValueError):
+                reward_sample = None
+            if reward_sample is not None:
+                self._reward_history.append(reward_sample)
+                if len(self._reward_history) > _REWARD_HISTORY_LIMIT:
+                    self._reward_history = self._reward_history[-_REWARD_HISTORY_LIMIT:]
+                if reward_step_key is not None:
+                    self._monitor_last_reward_step_key = reward_step_key
+        self._draw_reward_graph()
+
+    def _draw_reward_graph(self) -> None:
+        canvas = self._reward_canvas
         width = max(canvas.winfo_width(), 2)
         height = max(canvas.winfo_height(), 2)
         canvas.delete("all")
@@ -1564,43 +1621,78 @@ class DqnRunnerGui(tk.Tk):
         for ratio in (0.25, 0.5, 0.75):
             y = top + int((bottom - top) * ratio)
             canvas.create_line(left, y, right, y, fill="#1a2432")
-
-        canvas.create_text(left - 8, top, text="1.0", fill=_PALETTE["muted"], anchor="e", font=_FONTS["small"])
-        canvas.create_text(
-            left - 8,
-            bottom,
-            text="0.0",
-            fill=_PALETTE["muted"],
-            anchor="e",
-            font=_FONTS["small"],
-        )
         canvas.create_text(
             left,
             top - 2,
-            text="epsilon",
+            text=f"reward (last {_REWARD_HISTORY_LIMIT} steps)",
             fill=_PALETTE["accent"],
             anchor="sw",
             font=("Segoe UI", 8, "bold"),
         )
 
-        points = self._epsilon_history
-        if len(points) < 2:
+        points = self._reward_history
+        if not points:
+            canvas.create_text(
+                (left + right) / 2,
+                (top + bottom) / 2,
+                text="waiting for reward data",
+                fill=_PALETTE["muted"],
+                font=_FONTS["small"],
+            )
             return
-        span = len(points) - 1
-        line_points: list[float] = []
-        for index, value in enumerate(points):
-            x = left + ((right - left) * index / span)
-            y = top + ((bottom - top) * (1.0 - value))
-            line_points.extend((x, y))
-        canvas.create_line(*line_points, fill=_PALETTE["accent"], width=2, smooth=True)
-        canvas.create_oval(
-            line_points[-2] - 3,
-            line_points[-1] - 3,
-            line_points[-2] + 3,
-            line_points[-1] + 3,
-            fill=_PALETTE["accent_alt"],
-            outline="",
+
+        min_reward = min(min(points), 0.0)
+        max_reward = max(max(points), 0.0)
+        if math.isclose(min_reward, max_reward):
+            padding = max(1.0, abs(max_reward) * 0.1)
+            min_reward -= padding
+            max_reward += padding
+        reward_span = max(max_reward - min_reward, 1e-9)
+
+        canvas.create_text(
+            left - 8,
+            top,
+            text=f"{max_reward:.2f}",
+            fill=_PALETTE["muted"],
+            anchor="e",
+            font=_FONTS["small"],
         )
+        canvas.create_text(
+            left - 8,
+            bottom,
+            text=f"{min_reward:.2f}",
+            fill=_PALETTE["muted"],
+            anchor="e",
+            font=_FONTS["small"],
+        )
+        zero_ratio = (0.0 - min_reward) / reward_span
+        zero_y = bottom - ((bottom - top) * zero_ratio)
+        canvas.create_line(left, zero_y, right, zero_y, fill="#31445b", dash=(3, 3))
+
+        positive_color = "#3ac26d"
+        negative_color = _PALETTE["danger"]
+        neutral_color = "#6f8195"
+        point_count = len(points)
+        bar_slot = max((right - left) / float(point_count), 1.0)
+        bar_width = max(1.0, (bar_slot * 0.75) - 1.0)
+
+        for index, value in enumerate(points):
+            y_ratio = (value - min_reward) / reward_span
+            y = bottom - ((bottom - top) * y_ratio)
+            x_center = left + ((index + 0.5) * bar_slot)
+            x0 = x_center - (bar_width / 2.0)
+            x1 = x_center + (bar_width / 2.0)
+            y0 = min(zero_y, y)
+            y1 = max(zero_y, y)
+            if math.isclose(y0, y1):
+                y1 = y0 + 1.0
+            if value > 0:
+                color = positive_color
+            elif value < 0:
+                color = negative_color
+            else:
+                color = neutral_color
+            canvas.create_rectangle(x0, y0, x1, y1, fill=color, outline="")
 
     def _run_process(self, command: list[str]) -> None:
         try:
