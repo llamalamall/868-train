@@ -302,6 +302,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Weight for progress toward active objective (siphon->enemy->exit).",
     )
     parser.add_argument(
+        "--reward-backtrack-penalty",
+        type=float,
+        default=default_weights.backtrack_penalty,
+        help="Penalty weight for increased distance from the active objective.",
+    )
+    parser.add_argument(
         "--reward-map-clear-bonus",
         type=float,
         default=default_weights.map_clear_bonus,

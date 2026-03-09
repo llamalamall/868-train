@@ -588,6 +588,8 @@ def state_to_feature_vector(
     map_known = state.map.status == "ok"
     width = int(state.map.width) if map_known else 1
     height = int(state.map.height) if map_known else 1
+    max_x = max(width - 1, 1)
+    max_y = max(height - 1, 1)
     max_distance = max(width + height - 2, 1)
 
     player = state.map.player_position if map_known else None
@@ -632,8 +634,6 @@ def state_to_feature_vector(
         if map_known
         else ()
     )
-    on_siphon_tile = 1.0 if player is not None and player in siphon_positions else 0.0
-    on_exit_tile = 1.0 if player is not None and exit_position is not None and player == exit_position else 0.0
 
     nearest_siphon_steps = _nearest_path_distance_to_targets(state=state, targets=siphon_positions)
     nearest_siphon = (
@@ -654,6 +654,24 @@ def state_to_feature_vector(
         phase_siphon, phase_enemy, phase_exit = (0.0, 1.0, 0.0)
     else:
         phase_siphon, phase_enemy, phase_exit = (0.0, 0.0, 1.0 if map_known else 0.0)
+    phase_target_position = _phase_target_position(
+        state=state,
+        siphon_positions=siphon_positions,
+        enemy_positions=enemy_positions,
+        exit_position=exit_position,
+    )
+    objective_dx = _relative_axis_delta(
+        player=player,
+        target=phase_target_position,
+        axis="x",
+        axis_scale=max_x,
+    )
+    objective_dy = _relative_axis_delta(
+        player=player,
+        target=phase_target_position,
+        axis="y",
+        axis_scale=max_y,
+    )
 
     mask = state.prog_slots_available_mask
     if mask is not None:
@@ -680,8 +698,8 @@ def state_to_feature_vector(
         float(len(enemy_positions)) / 8.0,
         float(nearest_siphon),
         float(nearest_enemy),
-        on_siphon_tile,
-        on_exit_tile,
+        float(objective_dx),
+        float(objective_dy),
         phase_siphon,
         phase_enemy,
         phase_exit,
@@ -824,6 +842,69 @@ def _nearest_path_distance_to_targets(
         if best is None or distance < best:
             best = distance
     return best
+
+
+def _nearest_reachable_target_position(
+    *,
+    state: GameStateSnapshot,
+    targets: tuple[GridPosition, ...],
+) -> GridPosition | None:
+    if not targets:
+        return None
+    best_target: GridPosition | None = None
+    best_distance: int | None = None
+    for target in targets:
+        distance = _shortest_path_distance(state, target=target)
+        if distance is None:
+            continue
+        if (
+            best_distance is None
+            or distance < best_distance
+            or (
+                distance == best_distance
+                and best_target is not None
+                and (target.x, target.y) < (best_target.x, best_target.y)
+            )
+        ):
+            best_target = target
+            best_distance = distance
+    return best_target
+
+
+def _phase_target_position(
+    *,
+    state: GameStateSnapshot,
+    siphon_positions: tuple[GridPosition, ...],
+    enemy_positions: tuple[GridPosition, ...],
+    exit_position: GridPosition | None,
+) -> GridPosition | None:
+    if state.map.status != "ok" or state.map.player_position is None:
+        return None
+    if siphon_positions:
+        return _nearest_reachable_target_position(state=state, targets=siphon_positions)
+    if enemy_positions:
+        return _nearest_reachable_target_position(state=state, targets=enemy_positions)
+    if exit_position is None:
+        return None
+    if _shortest_path_distance(state, target=exit_position) is None:
+        return None
+    return exit_position
+
+
+def _relative_axis_delta(
+    *,
+    player: GridPosition | None,
+    target: GridPosition | None,
+    axis: str,
+    axis_scale: int,
+) -> float:
+    if player is None or target is None or axis_scale <= 0:
+        return 0.0
+    if axis == "x":
+        return float(target.x - player.x) / float(axis_scale)
+    if axis == "y":
+        return float(target.y - player.y) / float(axis_scale)
+    raise ValueError(f"Unsupported axis '{axis}'.")
 
 
 def _distance_to_highest_resource_tile(

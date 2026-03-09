@@ -33,6 +33,7 @@ class RewardWeights:
     enemy_damaged: float = 0.35
     enemy_cleared: float = 1.50
     phase_progress: float = 0.25
+    backtrack_penalty: float = 0.35
     map_clear_bonus: float = 8.0
     premature_exit_penalty: float = 2.5
     invalid_action_penalty: float = 0.75
@@ -58,6 +59,7 @@ class RewardWeights:
             enemy_damaged=float(values.get("enemy_damaged", cls.enemy_damaged)),
             enemy_cleared=float(values.get("enemy_cleared", cls.enemy_cleared)),
             phase_progress=float(values.get("phase_progress", cls.phase_progress)),
+            backtrack_penalty=float(values.get("backtrack_penalty", cls.backtrack_penalty)),
             map_clear_bonus=float(values.get("map_clear_bonus", cls.map_clear_bonus)),
             premature_exit_penalty=float(
                 values.get("premature_exit_penalty", cls.premature_exit_penalty)
@@ -108,6 +110,7 @@ class RewardBreakdown:
     enemy_damaged: float
     enemy_cleared: float
     phase_progress: float
+    backtrack_penalty: float
     map_clear_bonus: float
     premature_exit_penalty: float
     invalid_action_penalty: float
@@ -133,6 +136,7 @@ class RewardBreakdown:
             + self.enemy_damaged
             + self.enemy_cleared
             + self.phase_progress
+            + self.backtrack_penalty
             + self.map_clear_bonus
             + self.premature_exit_penalty
             + self.invalid_action_penalty
@@ -593,13 +597,12 @@ def compute_reward(
     siphon_component = siphons_collected * abs(weights.siphon_collected)
     enemy_damage_component = enemy_damage * abs(weights.enemy_damaged)
     enemy_component = enemies_cleared * abs(weights.enemy_cleared)
-    phase_progress_component = (
-        _phase_progress_delta(
-            previous_state=previous_state,
-            current_state=current_state,
-        )
-        * weights.phase_progress
+    phase_delta = _phase_progress_delta(
+        previous_state=previous_state,
+        current_state=current_state,
     )
+    phase_progress_component = max(phase_delta, 0.0) * abs(weights.phase_progress)
+    backtrack_component = -max(-phase_delta, 0.0) * abs(weights.backtrack_penalty)
     proximity_component = harvest_progress * abs(weights.resource_proximity)
     prog_component = _prog_gain_reward(
         previous_state=previous_state,
@@ -647,6 +650,7 @@ def compute_reward(
         enemy_damaged=enemy_damage_component,
         enemy_cleared=enemy_component,
         phase_progress=phase_progress_component,
+        backtrack_penalty=backtrack_component,
         map_clear_bonus=map_clear_component,
         premature_exit_penalty=premature_exit_component,
         invalid_action_penalty=invalid_action_component,
@@ -664,7 +668,7 @@ def compute_reward(
     active_logger.debug(
         "Reward breakdown survival=%.4f step_penalty=%.4f health_change=%.4f currency_change=%.4f "
         "energy_change=%.4f score_change=%.4f siphon_collected=%.4f enemy_damaged=%.4f enemy_cleared=%.4f "
-        "phase_progress=%.4f map_clear_bonus=%.4f premature_exit_penalty=%.4f "
+        "phase_progress=%.4f backtrack_penalty=%.4f map_clear_bonus=%.4f premature_exit_penalty=%.4f "
         "invalid_action_penalty=%.4f fail_penalty=%.4f safe_tile_bonus=%.4f danger_tile_penalty=%.4f "
         "resource_proximity=%.4f prog_collected=%.4f points_collected=%.4f damage_taken_penalty=%.4f "
         "total=%.4f unclipped_total=%.4f done=%s health_delta=%.4f energy_delta=%.4f "
@@ -679,6 +683,7 @@ def compute_reward(
         breakdown.enemy_damaged,
         breakdown.enemy_cleared,
         breakdown.phase_progress,
+        breakdown.backtrack_penalty,
         breakdown.map_clear_bonus,
         breakdown.premature_exit_penalty,
         breakdown.invalid_action_penalty,

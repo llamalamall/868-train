@@ -5,6 +5,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 
+import pytest
+
 from src.agent.dqn_agent import DQNAgent, DQNConfig, state_to_feature_vector
 from src.state.schema import (
     EnemyState,
@@ -352,3 +354,36 @@ def test_dqn_feature_vector_uses_relative_distances_for_high_value_targets() -> 
     assert features[9] == 2.0 / max_distance  # ideal_prog_wall_distance
     assert features[10] == 4.0 / max_distance  # ideal_points_wall_distance
     assert features[11] == 5.0 / max_distance  # exit_distance
+
+
+def test_dqn_feature_vector_includes_phase_objective_direction_components() -> None:
+    state = GameStateSnapshot(
+        timestamp_utc="2026-03-09T00:00:00+00:00",
+        health=_field(10),
+        energy=_field(5),
+        currency=_field(0),
+        fail_state=_field(False),
+        map=MapState(
+            status="ok",
+            width=5,
+            height=5,
+            player_position=GridPosition(1, 1),
+            exit_position=GridPosition(4, 0),
+            siphons=(GridPosition(3, 4),),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=2,
+                    position=GridPosition(0, 4),
+                    hp=3,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+
+    features = state_to_feature_vector(state)
+
+    assert features[16] == pytest.approx(0.5)   # objective_dx: (3 - 1) / (width - 1)
+    assert features[17] == pytest.approx(0.75)  # objective_dy: (4 - 1) / (height - 1)

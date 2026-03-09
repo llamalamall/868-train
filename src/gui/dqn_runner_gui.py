@@ -209,6 +209,7 @@ _SMOKE_TEST_REWARD_DESTS: tuple[str, ...] = (
     "reward_enemy_damaged",
     "reward_enemy_cleared",
     "reward_phase_progress",
+    "reward_backtrack_penalty",
     "reward_map_clear_bonus",
     "reward_premature_exit_penalty",
     "reward_invalid_action_penalty",

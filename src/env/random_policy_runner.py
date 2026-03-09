@@ -98,6 +98,7 @@ def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
             enemy_damaged=float(args.reward_enemy_damaged),
             enemy_cleared=float(args.reward_enemy_cleared),
             phase_progress=float(args.reward_phase_progress),
+            backtrack_penalty=float(args.reward_backtrack_penalty),
             map_clear_bonus=float(args.reward_map_clear_bonus),
             premature_exit_penalty=float(args.reward_premature_exit_penalty),
             invalid_action_penalty=float(args.reward_invalid_action_penalty),
@@ -142,6 +143,7 @@ def _build_reward_fn(
             "enemy_damaged": result.breakdown.enemy_damaged,
             "enemy_cleared": result.breakdown.enemy_cleared,
             "phase_progress": result.breakdown.phase_progress,
+            "backtrack_penalty": result.breakdown.backtrack_penalty,
             "map_clear_bonus": result.breakdown.map_clear_bonus,
             "premature_exit_penalty": result.breakdown.premature_exit_penalty,
             "invalid_action_penalty": result.breakdown.invalid_action_penalty,
@@ -160,6 +162,7 @@ def _build_reward_fn(
                 "survival={survival:.3f} step_penalty={step_penalty:.3f} health={health:.3f} "
                 "currency={currency:.3f} energy={energy:.3f} score={score:.3f} "
                 "siphon={siphon:.3f} enemy_damage={enemy_damage:.3f} enemy={enemy:.3f} "
+                "phase={phase:.3f} backtrack={backtrack:.3f} "
                 "safe={safe:.3f} danger={danger:.3f} proximity={proximity:.3f} "
                 "prog={prog:.3f} points={points:.3f} damage_taken={damage:.3f} "
                 "premature_exit={premature:.3f} invalid={invalid:.3f} "
@@ -176,6 +179,8 @@ def _build_reward_fn(
                     siphon=result.breakdown.siphon_collected,
                     enemy_damage=result.breakdown.enemy_damaged,
                     enemy=result.breakdown.enemy_cleared,
+                    phase=result.breakdown.phase_progress,
+                    backtrack=result.breakdown.backtrack_penalty,
                     safe=result.breakdown.safe_tile_bonus,
                     danger=result.breakdown.danger_tile_penalty,
                     proximity=result.breakdown.resource_proximity,
@@ -218,6 +223,7 @@ def format_reward_breakdown_line(event: dict[str, Any]) -> str:
         ("enemy_damaged", "enemy_damage"),
         ("enemy_cleared", "enemy"),
         ("phase_progress", "phase"),
+        ("backtrack_penalty", "backtrack"),
         ("map_clear_bonus", "map_clear"),
         ("safe_tile_bonus", "safe"),
         ("danger_tile_penalty", "danger"),
@@ -415,6 +421,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=default_weights.phase_progress,
         help="Weight for progress toward active objective (siphon->enemy->exit).",
+    )
+    parser.add_argument(
+        "--reward-backtrack-penalty",
+        type=float,
+        default=default_weights.backtrack_penalty,
+        help="Penalty weight for increased distance from the active objective.",
     )
     parser.add_argument(
         "--reward-map-clear-bonus",

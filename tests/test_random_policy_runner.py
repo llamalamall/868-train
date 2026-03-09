@@ -136,6 +136,7 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
         reward_enemy_damaged=0.0,
         reward_enemy_cleared=0.0,
         reward_phase_progress=0.0,
+        reward_backtrack_penalty=0.0,
         reward_map_clear_bonus=0.0,
         reward_premature_exit_penalty=0.0,
         reward_invalid_action_penalty=0.0,
