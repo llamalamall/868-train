@@ -23,6 +23,21 @@ EvaluationEventCallback = Callable[[dict[str, Any]], None]
 _ENEMY_TYPE_VIRUS = 2
 
 
+def _format_monitor_actions(actions: object, *, limit: int = 8) -> str:
+    if not isinstance(actions, (tuple, list)):
+        return "-"
+    normalized = tuple(str(item).strip() for item in actions if str(item).strip())
+    if not normalized:
+        return "-"
+    if len(normalized) <= limit:
+        return ",".join(normalized)
+    remaining = len(normalized) - limit
+    return "{head},...(+{remaining})".format(
+        head=",".join(normalized[:limit]),
+        remaining=remaining,
+    )
+
+
 class ClosableEpisodeEnv(EpisodeEnv, Protocol):
     """Episode environment with optional close hook."""
 
@@ -576,6 +591,7 @@ def evaluate_dqn_checkpoint(
                 reason = info.get("terminal_reason")
                 if isinstance(reason, str) and reason.strip():
                     terminal_reason = reason
+                next_available_actions = tuple(env.available_actions(state))
                 if step_callback is not None:
                     step_callback(
                         {
@@ -601,6 +617,7 @@ def evaluate_dqn_checkpoint(
                             "prog_gains": prog_gains,
                             "siphons_collected": siphons_collected,
                             "enemies_cleared": enemies_cleared,
+                            "next_available_actions": next_available_actions,
                         }
                     )
 
@@ -1208,6 +1225,9 @@ def main() -> None:
                     action=event.get("action"),
                     reason=event.get("action_reason") or "greedy_q",
                 ),
+                next_available_actions_line="next_available_actions={actions}".format(
+                    actions=_format_monitor_actions(event.get("next_available_actions")),
+                ),
             )
 
         def _on_episode(event: dict[str, Any]) -> None:
@@ -1224,6 +1244,7 @@ def main() -> None:
                         )
                     ),
                     action_line="action=idle reason=episode_start",
+                    next_available_actions_line="next_available_actions=-",
                 )
                 return
             if event_type == "episode_end":
@@ -1243,6 +1264,7 @@ def main() -> None:
                         )
                     ),
                     action_line="action=idle reason=episode_complete",
+                    next_available_actions_line="next_available_actions=-",
                 )
 
         try:
@@ -1250,6 +1272,7 @@ def main() -> None:
             tui.update(
                 training_line="compare checkpoint={label} status=starting".format(label=label_a),
                 action_line="action=idle reason=checkpoint_start",
+                next_available_actions_line="next_available_actions=-",
             )
             report_a = evaluate_dqn_checkpoint(
                 env_factory=env_factory,
@@ -1264,10 +1287,12 @@ def main() -> None:
             tui.update(
                 training_line="compare checkpoint={label} status=complete".format(label=label_a),
                 action_line="action=idle reason=checkpoint_complete",
+                next_available_actions_line="next_available_actions=-",
             )
             tui.update(
                 training_line="compare checkpoint={label} status=starting".format(label=label_b),
                 action_line="action=idle reason=checkpoint_start",
+                next_available_actions_line="next_available_actions=-",
             )
             report_b = evaluate_dqn_checkpoint(
                 env_factory=env_factory,
@@ -1285,6 +1310,7 @@ def main() -> None:
                     b=label_b,
                 ),
                 action_line="action=idle reason=compare_complete",
+                next_available_actions_line="next_available_actions=-",
             )
         finally:
             tui.close()

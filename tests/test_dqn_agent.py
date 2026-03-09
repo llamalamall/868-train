@@ -202,6 +202,8 @@ def test_dqn_training_step_callback_reports_action_and_reason() -> None:
     first = events[0]
     assert isinstance(first["action"], str)
     assert first["action_reason"] in {"epsilon_explore", "greedy_q", "dqn_select_action"}
+    assert isinstance(first["available_actions"], tuple)
+    assert isinstance(first["next_available_actions"], tuple)
 
 
 def test_dqn_training_before_step_callback_reports_pending_action() -> None:
@@ -224,6 +226,7 @@ def test_dqn_training_before_step_callback_reports_pending_action() -> None:
     assert isinstance(first["action"], str)
     assert first["action_reason"] in {"epsilon_explore", "greedy_q", "dqn_select_action"}
     assert isinstance(first["epsilon"], float)
+    assert isinstance(first["available_actions"], tuple)
 
 
 def test_dqn_feature_vector_uses_wall_aware_shortest_path_distances() -> None:

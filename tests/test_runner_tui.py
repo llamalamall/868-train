@@ -52,6 +52,7 @@ def test_runner_tui_update_writes_reward_line(tmp_path) -> None:
         assert payload["training_line"] == "training=ok"
         assert payload["action_line"] == "action=move_up"
         assert payload["reward_line"] == "reward total=+0.100"
+        assert payload["next_available_actions_line"] == ""
         assert "before_action_line" not in payload
         assert "after_action_line" not in payload
     finally:
@@ -83,6 +84,35 @@ def test_runner_tui_update_preserves_previous_reward_line_when_omitted(tmp_path)
 
         payload = json.loads(status_file.read_text(encoding="utf-8"))
         assert payload["reward_line"] == "reward total=+0.100"
+    finally:
+        session.close()
+
+
+def test_runner_tui_update_preserves_previous_next_available_actions_when_omitted(tmp_path) -> None:
+    status_file = tmp_path / "status.json"
+    control_file = tmp_path / "control.json"
+    session = RunnerTuiSession(
+        executable_name="868-HACK.exe",
+        enabled=True,
+        launch_monitor=False,
+        external_status_file=str(status_file),
+        external_control_file=str(control_file),
+    )
+
+    session.start()
+    try:
+        session.update(
+            training_line="episode=1 step=1",
+            action_line="action=move_up",
+            next_available_actions_line="next_available_actions=move_left,move_right",
+        )
+        session.update(
+            training_line="episode=1 step=2 waiting=step",
+            action_line="action=move_right status=waiting_for_step",
+        )
+
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+        assert payload["next_available_actions_line"] == "next_available_actions=move_left,move_right"
     finally:
         session.close()
 

@@ -772,10 +772,13 @@ class DqnRunnerGui(tk.Tk):
         self._last_form: _ArgForm | None = None
         self._external_status_file: Path | None = None
         self._external_control_file: Path | None = None
-        self._status_snapshot: tuple[str, str, str] = ("", "", "")
+        self._status_snapshot: tuple[str, str, str, str] = ("", "", "", "")
         self._monitor_training_line = tk.StringVar(value="training=idle")
         self._monitor_action_line = tk.StringVar(value="action=idle")
         self._monitor_reward_line = tk.StringVar(value="reward=idle")
+        self._monitor_next_available_actions_line = tk.StringVar(
+            value="next_available_actions=unavailable"
+        )
         self._monitor_control_state = tk.StringVar(value="session=idle")
         self._monitor_pause_button: ttk.Button | None = None
         self._monitor_step_button: ttk.Button | None = None
@@ -1119,7 +1122,7 @@ class DqnRunnerGui(tk.Tk):
         graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
         graph_shell.grid(row=4, column=0, sticky="nsew", pady=(20, 0))
         graph_shell.columnconfigure(0, weight=1)
-        graph_shell.rowconfigure(2, weight=1)
+        graph_shell.rowconfigure(3, weight=1)
         ttk.Label(graph_shell, text="action_line", style="FormLabel.TLabel").grid(
             row=0,
             column=0,
@@ -1144,6 +1147,22 @@ class DqnRunnerGui(tk.Tk):
             padx=(140, 0),
             pady=(0, 8),
         )
+        ttk.Label(graph_shell, text="next_available_actions", style="FormLabel.TLabel").grid(
+            row=2,
+            column=0,
+            sticky="w",
+        )
+        ttk.Label(
+            graph_shell,
+            textvariable=self._monitor_next_available_actions_line,
+            style="FormHelp.TLabel",
+        ).grid(
+            row=2,
+            column=0,
+            sticky="e",
+            padx=(220, 0),
+            pady=(0, 8),
+        )
         self._epsilon_canvas = tk.Canvas(
             graph_shell,
             height=180,
@@ -1151,7 +1170,7 @@ class DqnRunnerGui(tk.Tk):
             highlightthickness=1,
             highlightbackground="#243244",
         )
-        self._epsilon_canvas.grid(row=2, column=0, sticky="nsew")
+        self._epsilon_canvas.grid(row=3, column=0, sticky="nsew")
         self._epsilon_canvas.bind("<Configure>", lambda _: self._draw_epsilon_graph())
         self._set_monitor_controls_enabled(False)
 
@@ -1292,10 +1311,11 @@ class DqnRunnerGui(tk.Tk):
         self._external_status_file = status_file
         control_file = self._create_control_file() if is_dqn_runner else None
         self._external_control_file = control_file
-        self._status_snapshot = ("", "", "")
+        self._status_snapshot = ("", "", "", "")
         self._monitor_training_line.set("training=starting")
         self._monitor_action_line.set("action=idle")
         self._monitor_reward_line.set("reward=idle")
+        self._monitor_next_available_actions_line.set("next_available_actions=unavailable")
         if control_file is not None:
             snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_AUTO)
             self._monitor_control_state.set(
@@ -1363,12 +1383,16 @@ class DqnRunnerGui(tk.Tk):
                 training_line = str(payload.get("training_line", ""))
                 action_line = str(payload.get("action_line", ""))
                 reward_line = str(payload.get("reward_line", ""))
-                snapshot = (training_line, action_line, reward_line)
+                next_available_actions_line = str(payload.get("next_available_actions_line", ""))
+                snapshot = (training_line, action_line, reward_line, next_available_actions_line)
                 if snapshot != self._status_snapshot:
                     self._status_snapshot = snapshot
                     self._monitor_training_line.set(training_line or "training=idle")
                     self._monitor_action_line.set(action_line or "action=idle")
                     self._monitor_reward_line.set(reward_line or "reward=unavailable")
+                    self._monitor_next_available_actions_line.set(
+                        next_available_actions_line or "next_available_actions=unavailable"
+                    )
                     self._update_monitor_metrics(training_line, reward_line=reward_line)
         self._refresh_monitor_control_state()
         self.after(200, self._poll_external_status)

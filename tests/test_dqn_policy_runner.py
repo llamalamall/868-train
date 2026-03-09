@@ -11,6 +11,7 @@ from src.env.dqn_policy_runner import (
     _build_dqn_config,
     _build_parser,
     _default_checkpoint_path,
+    _format_monitor_actions,
     _resolve_checkpoint_path,
     _validate_args,
 )
@@ -25,7 +26,7 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.episodes == 20
     assert args.max_steps == 500
     assert args.checkpoint is None
-    assert args.checkpoint_every == 1
+    assert args.checkpoint_every == 0
     assert args.movement_keys == "arrows"
     assert args.prog_actions is True
     assert args.launch_exe is True
@@ -33,7 +34,7 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
-    assert args.post_action_delay == 0.2
+    assert args.post_action_delay == 0.5
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35
     assert args.action_ack_poll_interval == 0.05
@@ -173,3 +174,12 @@ def test_validate_args_rejects_negative_checkpoint_every() -> None:
 
     with pytest.raises(SystemExit):
         _validate_args(parser, args)
+
+
+def test_format_monitor_actions_truncates_long_lists() -> None:
+    formatted = _format_monitor_actions(
+        ("move_up", "move_down", "move_left", "move_right", "confirm"),
+        limit=3,
+    )
+
+    assert formatted == "move_up,move_down,move_left,...(+2)"

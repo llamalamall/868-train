@@ -194,7 +194,7 @@ def run_dqn_training(
 
         while steps < max_steps_per_episode and not done:
             step_index = steps
-            available_actions = env.available_actions(state)
+            available_actions = tuple(env.available_actions(state))
             if not available_actions:
                 fallback_actions = tuple(action for action in env.action_space if action != "wait")
                 if not fallback_actions:
@@ -229,10 +229,12 @@ def run_dqn_training(
                         "updates_applied": updates_applied,
                         "last_loss": last_loss,
                         "epsilon": agent.epsilon,
+                        "available_actions": available_actions,
                     }
                 )
 
             next_state, reward, done, info = env.step(action)
+            next_available_actions = tuple(env.available_actions(next_state))
             if learn:
                 update = agent.observe(
                     state=state,
@@ -240,7 +242,7 @@ def run_dqn_training(
                     reward=reward,
                     next_state=next_state,
                     done=done,
-                    next_available_actions=env.available_actions(next_state),
+                    next_available_actions=next_available_actions,
                 )
                 if update.did_update:
                     updates_applied += 1
@@ -269,6 +271,8 @@ def run_dqn_training(
                         "last_loss": last_loss,
                         "epsilon": agent.epsilon,
                         "reward_breakdown": info.get("reward_breakdown"),
+                        "available_actions": available_actions,
+                        "next_available_actions": next_available_actions,
                     }
                 )
 

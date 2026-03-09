@@ -40,6 +40,7 @@ class RunnerTuiSession:
     _last_advance_counter: int = field(default=0, init=False, repr=False)
     _last_step_was_manual: bool = field(default=False, init=False, repr=False)
     _last_reward_line: str = field(default="", init=False, repr=False)
+    _last_next_available_actions_line: str = field(default="", init=False, repr=False)
 
     def start(self) -> None:
         if not self.enabled or self._process is not None:
@@ -77,6 +78,7 @@ class RunnerTuiSession:
         self._last_advance_counter = 0
         self._last_step_was_manual = False
         self._last_reward_line = ""
+        self._last_next_available_actions_line = ""
         self.update(
             training_line="training=initializing",
             action_line="action=idle reason=initializing",
@@ -107,6 +109,7 @@ class RunnerTuiSession:
         training_line: str,
         action_line: str,
         reward_line: str | None = None,
+        next_available_actions_line: str | None = None,
     ) -> None:
         if not self.enabled or self._status_file_path is None:
             return
@@ -115,6 +118,11 @@ class RunnerTuiSession:
         else:
             reward_text = str(reward_line)
             self._last_reward_line = reward_text
+        if next_available_actions_line is None:
+            next_actions_text = self._last_next_available_actions_line
+        else:
+            next_actions_text = str(next_available_actions_line)
+            self._last_next_available_actions_line = next_actions_text
 
         self._write_json_payload(
             path=self._status_file_path,
@@ -122,6 +130,7 @@ class RunnerTuiSession:
                 "training_line": str(training_line),
                 "action_line": str(action_line),
                 "reward_line": reward_text,
+                "next_available_actions_line": next_actions_text,
             },
         )
 

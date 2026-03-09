@@ -21,6 +21,21 @@ from src.training.rewards import RewardWeights
 from src.training.train import LearningEpisodeRolloutResult, run_dqn_training
 
 
+def _format_monitor_actions(actions: object, *, limit: int = 8) -> str:
+    if not isinstance(actions, (tuple, list)):
+        return "-"
+    normalized = tuple(str(item).strip() for item in actions if str(item).strip())
+    if not normalized:
+        return "-"
+    if len(normalized) <= limit:
+        return ",".join(normalized)
+    remaining = len(normalized) - limit
+    return "{head},...(+{remaining})".format(
+        head=",".join(normalized[:limit]),
+        remaining=remaining,
+    )
+
+
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run DQN training/evaluation episodes against live game env."
@@ -66,7 +81,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--checkpoint-every",
         type=int,
-        default=1,
+        default=0,
         help="In train mode, also save periodic checkpoints every N episodes (0 disables).",
     )
     parser.add_argument(
@@ -137,7 +152,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--post-action-delay",
         type=float,
-        default=0.2,
+        default=0.5,
         help="Fixed delay after dispatching each action before reading state.",
     )
     parser.add_argument(
@@ -519,6 +534,9 @@ def main() -> None:
                     ),
                 ),
                 reward_line=format_reward_breakdown_line(event),
+                next_available_actions_line="next_available_actions={actions}".format(
+                    actions=_format_monitor_actions(event.get("next_available_actions")),
+                ),
             )
 
         def _on_before_step(event: dict[str, Any]) -> None:
