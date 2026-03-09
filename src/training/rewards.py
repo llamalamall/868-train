@@ -30,6 +30,7 @@ class RewardWeights:
     energy_delta: float = 0.02
     score_delta: float = 0.01
     siphon_collected: float = 2.50
+    enemy_damaged: float = 0.35
     enemy_cleared: float = 1.50
     phase_progress: float = 0.25
     map_clear_bonus: float = 8.0
@@ -54,6 +55,7 @@ class RewardWeights:
             energy_delta=float(values.get("energy_delta", cls.energy_delta)),
             score_delta=float(values.get("score_delta", cls.score_delta)),
             siphon_collected=float(values.get("siphon_collected", cls.siphon_collected)),
+            enemy_damaged=float(values.get("enemy_damaged", cls.enemy_damaged)),
             enemy_cleared=float(values.get("enemy_cleared", cls.enemy_cleared)),
             phase_progress=float(values.get("phase_progress", cls.phase_progress)),
             map_clear_bonus=float(values.get("map_clear_bonus", cls.map_clear_bonus)),
@@ -103,6 +105,7 @@ class RewardBreakdown:
     energy_change: float
     score_change: float
     siphon_collected: float
+    enemy_damaged: float
     enemy_cleared: float
     phase_progress: float
     map_clear_bonus: float
@@ -127,6 +130,7 @@ class RewardBreakdown:
             + self.energy_change
             + self.score_change
             + self.siphon_collected
+            + self.enemy_damaged
             + self.enemy_cleared
             + self.phase_progress
             + self.map_clear_bonus
@@ -213,6 +217,37 @@ def _enemy_cleared_delta(
         if previous_count > current_count:
             cleared += previous_count - current_count
     return float(cleared)
+
+
+def _enemy_hp_by_slot(state: GameStateSnapshot) -> dict[int, int] | None:
+    if state.map.status != "ok":
+        return None
+    hp_by_slot: dict[int, int] = {}
+    for enemy in state.map.enemies:
+        if not enemy.in_bounds:
+            continue
+        hp_by_slot[int(enemy.slot)] = max(int(enemy.hp), 0)
+    return hp_by_slot
+
+
+def _enemy_damage_delta(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> float:
+    previous_hp = _enemy_hp_by_slot(previous_state)
+    current_hp = _enemy_hp_by_slot(current_state)
+    if previous_hp is None or current_hp is None:
+        return 0.0
+
+    total_damage = 0
+    for enemy_id, before_hp in previous_hp.items():
+        after_hp = current_hp.get(enemy_id)
+        if after_hp is None:
+            continue
+        if before_hp > after_hp:
+            total_damage += before_hp - after_hp
+    return float(total_damage)
 
 
 def _player_on_exit(state: GameStateSnapshot) -> bool:
@@ -522,6 +557,10 @@ def compute_reward(
 
     previous_enemies = _count_live_enemies(previous_state)
     current_enemies = _count_live_enemies(current_state)
+    enemy_damage = _enemy_damage_delta(
+        previous_state=previous_state,
+        current_state=current_state,
+    )
     enemies_cleared = _enemy_cleared_delta(
         previous_state=previous_state,
         current_state=current_state,
@@ -552,6 +591,7 @@ def compute_reward(
     energy_component = energy_delta * weights.energy_delta
     score_component = score_delta * weights.score_delta
     siphon_component = siphons_collected * abs(weights.siphon_collected)
+    enemy_damage_component = enemy_damage * abs(weights.enemy_damaged)
     enemy_component = enemies_cleared * abs(weights.enemy_cleared)
     phase_progress_component = (
         _phase_progress_delta(
@@ -604,6 +644,7 @@ def compute_reward(
         energy_change=energy_component,
         score_change=score_component,
         siphon_collected=siphon_component,
+        enemy_damaged=enemy_damage_component,
         enemy_cleared=enemy_component,
         phase_progress=phase_progress_component,
         map_clear_bonus=map_clear_component,
@@ -622,7 +663,7 @@ def compute_reward(
 
     active_logger.debug(
         "Reward breakdown survival=%.4f step_penalty=%.4f health_change=%.4f currency_change=%.4f "
-        "energy_change=%.4f score_change=%.4f siphon_collected=%.4f enemy_cleared=%.4f "
+        "energy_change=%.4f score_change=%.4f siphon_collected=%.4f enemy_damaged=%.4f enemy_cleared=%.4f "
         "phase_progress=%.4f map_clear_bonus=%.4f premature_exit_penalty=%.4f "
         "invalid_action_penalty=%.4f fail_penalty=%.4f safe_tile_bonus=%.4f danger_tile_penalty=%.4f "
         "resource_proximity=%.4f prog_collected=%.4f points_collected=%.4f damage_taken_penalty=%.4f "
@@ -635,6 +676,7 @@ def compute_reward(
         breakdown.energy_change,
         breakdown.score_change,
         breakdown.siphon_collected,
+        breakdown.enemy_damaged,
         breakdown.enemy_cleared,
         breakdown.phase_progress,
         breakdown.map_clear_bonus,

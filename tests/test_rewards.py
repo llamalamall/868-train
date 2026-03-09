@@ -343,6 +343,87 @@ def test_compute_reward_map_clear_does_not_ignore_type_zero_enemies() -> None:
     assert result.breakdown.map_clear_bonus == 0.0
 
 
+def test_compute_reward_rewards_nonlethal_enemy_damage() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            energy_delta=0.0,
+            score_delta=0.0,
+            siphon_collected=0.0,
+            enemy_damaged=0.5,
+            enemy_cleared=0.0,
+            phase_progress=0.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+            safe_tile_bonus=0.0,
+            danger_tile_penalty=0.0,
+            resource_proximity=0.0,
+            prog_collected_base=0.0,
+            points_collected=0.0,
+            damage_taken_penalty=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    previous_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(1),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(0, 0),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=3,
+                    position=GridPosition(1, 0),
+                    hp=5,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    current_state = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(1),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(0, 0),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=3,
+                    position=GridPosition(1, 0),
+                    hp=3,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+
+    result = compute_reward(
+        previous_state=previous_state,
+        current_state=current_state,
+        done=False,
+        config=config,
+    )
+
+    assert result.breakdown.enemy_damaged == pytest.approx(1.0)
+    assert result.breakdown.enemy_cleared == 0.0
+    assert result.total == pytest.approx(1.0)
+
+
 def test_compute_reward_uses_phase_progress_when_distance_improves() -> None:
     config = RewardConfig(
         weights=RewardWeights(

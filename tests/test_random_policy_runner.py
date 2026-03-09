@@ -133,6 +133,7 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
         reward_energy_delta=0.0,
         reward_score_delta=0.0,
         reward_siphon_collected=0.0,
+        reward_enemy_damaged=0.0,
         reward_enemy_cleared=0.0,
         reward_phase_progress=0.0,
         reward_map_clear_bonus=0.0,
@@ -166,6 +167,7 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
     assert breakdown["energy_change"] == 0.0
     assert breakdown["score_change"] == 0.0
     assert breakdown["siphon_collected"] == 0.0
+    assert breakdown["enemy_damaged"] == 0.0
     assert breakdown["enemy_cleared"] == 0.0
     assert breakdown["prog_collected"] == 0.0
     assert breakdown["resource_proximity"] == 0.0

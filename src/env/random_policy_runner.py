@@ -95,6 +95,7 @@ def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
             energy_delta=float(args.reward_energy_delta),
             score_delta=float(args.reward_score_delta),
             siphon_collected=float(args.reward_siphon_collected),
+            enemy_damaged=float(args.reward_enemy_damaged),
             enemy_cleared=float(args.reward_enemy_cleared),
             phase_progress=float(args.reward_phase_progress),
             map_clear_bonus=float(args.reward_map_clear_bonus),
@@ -138,6 +139,7 @@ def _build_reward_fn(
             "energy_change": result.breakdown.energy_change,
             "score_change": result.breakdown.score_change,
             "siphon_collected": result.breakdown.siphon_collected,
+            "enemy_damaged": result.breakdown.enemy_damaged,
             "enemy_cleared": result.breakdown.enemy_cleared,
             "phase_progress": result.breakdown.phase_progress,
             "map_clear_bonus": result.breakdown.map_clear_bonus,
@@ -157,7 +159,7 @@ def _build_reward_fn(
                 "reward step={step} action={action} total={total:.3f} "
                 "survival={survival:.3f} step_penalty={step_penalty:.3f} health={health:.3f} "
                 "currency={currency:.3f} energy={energy:.3f} score={score:.3f} "
-                "siphon={siphon:.3f} enemy={enemy:.3f} "
+                "siphon={siphon:.3f} enemy_damage={enemy_damage:.3f} enemy={enemy:.3f} "
                 "safe={safe:.3f} danger={danger:.3f} proximity={proximity:.3f} "
                 "prog={prog:.3f} points={points:.3f} damage_taken={damage:.3f} "
                 "premature_exit={premature:.3f} invalid={invalid:.3f} "
@@ -172,6 +174,7 @@ def _build_reward_fn(
                     energy=result.breakdown.energy_change,
                     score=result.breakdown.score_change,
                     siphon=result.breakdown.siphon_collected,
+                    enemy_damage=result.breakdown.enemy_damaged,
                     enemy=result.breakdown.enemy_cleared,
                     safe=result.breakdown.safe_tile_bonus,
                     danger=result.breakdown.danger_tile_penalty,
@@ -212,6 +215,7 @@ def format_reward_breakdown_line(event: dict[str, Any]) -> str:
         ("energy_change", "energy"),
         ("score_change", "score"),
         ("siphon_collected", "siphon"),
+        ("enemy_damaged", "enemy_damage"),
         ("enemy_cleared", "enemy"),
         ("phase_progress", "phase"),
         ("map_clear_bonus", "map_clear"),
@@ -393,6 +397,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=default_weights.siphon_collected,
         help="Reward per siphon removed from map.",
+    )
+    parser.add_argument(
+        "--reward-enemy-damaged",
+        type=float,
+        default=default_weights.enemy_damaged,
+        help="Reward per enemy HP point reduced when an enemy survives the step.",
     )
     parser.add_argument(
         "--reward-enemy-cleared",

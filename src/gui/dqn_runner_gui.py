@@ -206,6 +206,7 @@ _SMOKE_TEST_REWARD_DESTS: tuple[str, ...] = (
     "reward_energy_delta",
     "reward_score_delta",
     "reward_siphon_collected",
+    "reward_enemy_damaged",
     "reward_enemy_cleared",
     "reward_phase_progress",
     "reward_map_clear_bonus",

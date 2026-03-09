@@ -284,6 +284,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reward per siphon removed from map.",
     )
     parser.add_argument(
+        "--reward-enemy-damaged",
+        type=float,
+        default=default_weights.enemy_damaged,
+        help="Reward per enemy HP point reduced when an enemy survives the step.",
+    )
+    parser.add_argument(
         "--reward-enemy-cleared",
         type=float,
         default=default_weights.enemy_cleared,
