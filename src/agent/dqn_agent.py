@@ -588,8 +588,6 @@ def state_to_feature_vector(
     map_known = state.map.status == "ok"
     width = int(state.map.width) if map_known else 1
     height = int(state.map.height) if map_known else 1
-    max_x = max(width - 1, 1)
-    max_y = max(height - 1, 1)
     max_distance = max(width + height - 2, 1)
 
     player = state.map.player_position if map_known else None
@@ -597,15 +595,34 @@ def state_to_feature_vector(
     has_player = 1.0 if player is not None else 0.0
     has_exit = 1.0 if exit_position is not None else 0.0
 
-    player_x = float(player.x) / float(max_x) if player is not None else 0.0
-    player_y = float(player.y) / float(max_y) if player is not None else 0.0
-    exit_x = float(exit_position.x) / float(max_x) if exit_position is not None else 0.0
-    exit_y = float(exit_position.y) / float(max_y) if exit_position is not None else 0.0
-
     exit_steps = _shortest_path_distance(state, target=exit_position) if exit_position is not None else None
     exit_distance = (
         float(exit_steps) / float(max_distance)
         if player is not None and exit_steps is not None
+        else 1.0
+    )
+    highest_energy_steps = _distance_to_highest_resource_tile(state, resource_name="energy")
+    highest_energy_distance = (
+        float(highest_energy_steps) / float(max_distance)
+        if player is not None and highest_energy_steps is not None
+        else 1.0
+    )
+    highest_credits_steps = _distance_to_highest_resource_tile(state, resource_name="credits")
+    highest_credits_distance = (
+        float(highest_credits_steps) / float(max_distance)
+        if player is not None and highest_credits_steps is not None
+        else 1.0
+    )
+    ideal_prog_wall_steps = _ideal_prog_wall_distance(state)
+    ideal_prog_wall_distance = (
+        float(ideal_prog_wall_steps) / float(max_distance)
+        if player is not None and ideal_prog_wall_steps is not None
+        else 1.0
+    )
+    ideal_points_wall_steps = _ideal_points_wall_distance(state)
+    ideal_points_wall_distance = (
+        float(ideal_points_wall_steps) / float(max_distance)
+        if player is not None and ideal_points_wall_steps is not None
         else 1.0
     )
 
@@ -653,11 +670,11 @@ def state_to_feature_vector(
         1.0 if (state.fail_state.status == "ok" and bool(state.fail_state.value)) else 0.0,
         1.0 if map_known else 0.0,
         has_player,
-        player_x,
-        player_y,
+        float(highest_energy_distance),
+        float(highest_credits_distance),
         has_exit,
-        exit_x,
-        exit_y,
+        float(ideal_prog_wall_distance),
+        float(ideal_points_wall_distance),
         float(exit_distance),
         float(len(siphon_positions)) / 6.0,
         float(len(enemy_positions)) / 8.0,
@@ -807,6 +824,145 @@ def _nearest_path_distance_to_targets(
         if best is None or distance < best:
             best = distance
     return best
+
+
+def _distance_to_highest_resource_tile(
+    state: GameStateSnapshot,
+    *,
+    resource_name: str,
+) -> int | None:
+    if state.map.status != "ok" or state.map.player_position is None:
+        return None
+    if resource_name not in {"energy", "credits"}:
+        raise ValueError(f"Unsupported resource_name '{resource_name}'.")
+
+    best_value: int | None = None
+    best_distance: int | None = None
+    seen_positions: set[GridPosition] = set()
+
+    for resource in state.map.resource_cells:
+        position = resource.position
+        if position in seen_positions:
+            continue
+        seen_positions.add(position)
+        value = int(getattr(resource, resource_name, 0))
+        if value <= 0:
+            continue
+        distance = _shortest_path_distance(state, target=position)
+        if distance is None:
+            continue
+        if (
+            best_value is None
+            or value > best_value
+            or (value == best_value and (best_distance is None or distance < best_distance))
+        ):
+            best_value = value
+            best_distance = distance
+
+    for cell in state.map.cells:
+        if cell.is_wall or cell.position in seen_positions:
+            continue
+        value = int(getattr(cell, resource_name, 0))
+        if value <= 0:
+            continue
+        distance = _shortest_path_distance(state, target=cell.position)
+        if distance is None:
+            continue
+        if (
+            best_value is None
+            or value > best_value
+            or (value == best_value and (best_distance is None or distance < best_distance))
+        ):
+            best_value = value
+            best_distance = distance
+
+    return best_distance
+
+
+def _iter_wall_candidates(
+    state: GameStateSnapshot,
+) -> tuple[tuple[GridPosition, int | None, int], ...]:
+    if state.map.status != "ok":
+        return ()
+    candidates: list[tuple[GridPosition, int | None, int]] = []
+    seen: set[GridPosition] = set()
+    for wall in state.map.walls:
+        candidates.append((wall.position, wall.prog_id, int(wall.points)))
+        seen.add(wall.position)
+    for cell in state.map.cells:
+        if not cell.is_wall or cell.position in seen:
+            continue
+        candidates.append((cell.position, cell.prog_id, int(cell.points)))
+    return tuple(candidates)
+
+
+def _nearest_reachable_adjacent_distance_to_wall(
+    state: GameStateSnapshot,
+    *,
+    wall_position: GridPosition,
+) -> int | None:
+    if state.map.status != "ok" or state.map.player_position is None:
+        return None
+    width = int(state.map.width)
+    height = int(state.map.height)
+    if width <= 0 or height <= 0:
+        return None
+    walls = _wall_positions(state)
+    best: int | None = None
+    for dx, dy in _MOVE_VECTORS:
+        candidate = GridPosition(x=wall_position.x + dx, y=wall_position.y + dy)
+        if not _is_in_bounds(candidate, width=width, height=height):
+            continue
+        if candidate in walls:
+            continue
+        distance = _shortest_path_distance(state, target=candidate)
+        if distance is None:
+            continue
+        if best is None or distance < best:
+            best = distance
+    return best
+
+
+def _ideal_prog_wall_distance(state: GameStateSnapshot) -> int | None:
+    preferred_prog_rank = {10: 0, 5: 1, 9: 2, 11: 3, 8: 4}
+    fallback_rank = len(preferred_prog_rank) + 1
+    best_score: tuple[int, int, int] | None = None
+    best_distance: int | None = None
+
+    for position, prog_id, _points in _iter_wall_candidates(state):
+        if prog_id is None:
+            continue
+        distance = _nearest_reachable_adjacent_distance_to_wall(state, wall_position=position)
+        if distance is None:
+            continue
+        rank = preferred_prog_rank.get(int(prog_id), fallback_rank)
+        score = (rank, distance, int(prog_id))
+        if best_score is None or score < best_score:
+            best_score = score
+            best_distance = distance
+
+    return best_distance
+
+
+def _ideal_points_wall_distance(state: GameStateSnapshot) -> int | None:
+    best_points: int | None = None
+    best_distance: int | None = None
+
+    for position, _prog_id, points in _iter_wall_candidates(state):
+        if points <= 0:
+            continue
+        distance = _nearest_reachable_adjacent_distance_to_wall(state, wall_position=position)
+        if distance is None:
+            continue
+        if (
+            best_points is None
+            or points > best_points
+            or (points == best_points and (best_distance is None or distance < best_distance))
+        ):
+            best_points = points
+            best_distance = distance
+
+    return best_distance
 
 
 def _clip_gradients(

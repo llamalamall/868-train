@@ -6,7 +6,16 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.agent.dqn_agent import DQNAgent, DQNConfig, state_to_feature_vector
-from src.state.schema import EnemyState, FieldState, GameStateSnapshot, GridPosition, MapCellState, MapState
+from src.state.schema import (
+    EnemyState,
+    FieldState,
+    GameStateSnapshot,
+    GridPosition,
+    MapCellState,
+    MapState,
+    ResourceCellState,
+    WallCellState,
+)
 from src.training.train import run_dqn_training
 
 
@@ -292,3 +301,54 @@ def test_dqn_feature_vector_counts_type_zero_enemies_for_objective_features() ->
 
     assert features[13] > 0.0  # enemy_count
     assert features[19] == 1.0  # phase_enemy
+
+
+def test_dqn_feature_vector_uses_relative_distances_for_high_value_targets() -> None:
+    state = GameStateSnapshot(
+        timestamp_utc="2026-03-09T00:00:00+00:00",
+        health=_field(10),
+        energy=_field(5),
+        currency=_field(0),
+        fail_state=_field(False),
+        map=MapState(
+            status="ok",
+            width=5,
+            height=3,
+            player_position=GridPosition(0, 1),
+            exit_position=GridPosition(4, 0),
+                walls=(
+                    WallCellState(
+                        position=GridPosition(2, 0),
+                        wall_type="prog_wall",
+                        wall_state=0,
+                        prog_id=10,
+                    ),
+                WallCellState(
+                    position=GridPosition(4, 2),
+                    wall_type="point_wall",
+                    wall_state=0,
+                    points=9,
+                ),
+                WallCellState(
+                    position=GridPosition(1, 2),
+                    wall_type="point_wall",
+                    wall_state=0,
+                    points=2,
+                ),
+            ),
+            resource_cells=(
+                ResourceCellState(position=GridPosition(4, 1), energy=7, credits=1),
+                ResourceCellState(position=GridPosition(1, 1), energy=3, credits=2),
+                ResourceCellState(position=GridPosition(3, 1), energy=1, credits=9),
+            ),
+        ),
+    )
+
+    features = state_to_feature_vector(state)
+    max_distance = 6.0  # width + height - 2
+
+    assert features[6] == 4.0 / max_distance  # highest_energy_distance
+    assert features[7] == 3.0 / max_distance  # highest_credits_distance
+    assert features[9] == 2.0 / max_distance  # ideal_prog_wall_distance
+    assert features[10] == 4.0 / max_distance  # ideal_points_wall_distance
+    assert features[11] == 5.0 / max_distance  # exit_distance
