@@ -611,7 +611,7 @@ def state_to_feature_vector(
 
     siphon_positions = tuple(state.map.siphons) if map_known else ()
     enemy_positions = (
-        tuple(enemy.position for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+        tuple(enemy.position for enemy in state.map.enemies if enemy.in_bounds)
         if map_known
         else ()
     )

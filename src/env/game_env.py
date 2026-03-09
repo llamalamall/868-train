@@ -91,7 +91,7 @@ def _count_siphons(snapshot: GameStateSnapshot) -> int | None:
 def _count_live_enemies(snapshot: GameStateSnapshot) -> int | None:
     if snapshot.map.status != "ok":
         return None
-    return sum(1 for enemy in snapshot.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    return sum(1 for enemy in snapshot.map.enemies if enemy.in_bounds)
 
 
 def _player_on_exit(snapshot: GameStateSnapshot) -> bool:

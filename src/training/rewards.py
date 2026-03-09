@@ -188,7 +188,31 @@ def _count_siphons(state: GameStateSnapshot) -> int | None:
 def _count_live_enemies(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
-    return sum(1 for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    return sum(1 for enemy in state.map.enemies if enemy.in_bounds)
+
+
+def _enemy_identity_counts(state: GameStateSnapshot) -> Counter[int] | None:
+    if state.map.status != "ok":
+        return None
+    return Counter(int(enemy.slot) for enemy in state.map.enemies if enemy.in_bounds)
+
+
+def _enemy_cleared_delta(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> float:
+    previous_counts = _enemy_identity_counts(previous_state)
+    current_counts = _enemy_identity_counts(current_state)
+    if previous_counts is None or current_counts is None:
+        return 0.0
+
+    cleared = 0
+    for enemy_id, previous_count in previous_counts.items():
+        current_count = current_counts.get(enemy_id, 0)
+        if previous_count > current_count:
+            cleared += previous_count - current_count
+    return float(cleared)
 
 
 def _player_on_exit(state: GameStateSnapshot) -> bool:
@@ -289,7 +313,7 @@ def _nearest_enemy_distance(state: GameStateSnapshot) -> int | None:
         return None
     if state.map.player_position is None:
         return None
-    enemies = tuple(enemy.position for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    enemies = tuple(enemy.position for enemy in state.map.enemies if enemy.in_bounds)
     if not enemies:
         return None
     return _nearest_path_distance_to_targets(
@@ -437,7 +461,7 @@ def _player_tile_threatened(state: GameStateSnapshot) -> bool | None:
     if state.map.status != "ok" or state.map.player_position is None:
         return None
     player = state.map.player_position
-    enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds)
     if not enemies:
         return False
     return any(_enemy_can_attack_position(enemy=enemy, player_position=player) for enemy in enemies)
@@ -498,9 +522,10 @@ def compute_reward(
 
     previous_enemies = _count_live_enemies(previous_state)
     current_enemies = _count_live_enemies(current_state)
-    enemies_cleared = 0.0
-    if previous_enemies is not None and current_enemies is not None:
-        enemies_cleared = float(max(previous_enemies - current_enemies, 0))
+    enemies_cleared = _enemy_cleared_delta(
+        previous_state=previous_state,
+        current_state=current_state,
+    )
 
     previous_available_points = _available_points_total(previous_state)
     current_available_points = _available_points_total(current_state)

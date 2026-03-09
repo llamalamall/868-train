@@ -312,7 +312,7 @@ def summarize_board_state(map_state: MapState, enemy_name_by_id: dict[int, str] 
     credits_total = sum(max(0, resource.credits) for resource in map_state.resource_cells)
     energy_total = sum(max(0, resource.energy) for resource in map_state.resource_cells)
 
-    enemy_type_counts = Counter(enemy.type_id for enemy in map_state.enemies if enemy.type_id != 0)
+    enemy_type_counts = Counter(enemy.type_id for enemy in map_state.enemies)
     if enemy_type_counts:
         labels: list[str] = []
         for enemy_type, count in sorted(enemy_type_counts.items()):

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from src.agent.dqn_agent import DQNAgent, DQNConfig, state_to_feature_vector
-from src.state.schema import FieldState, GameStateSnapshot, GridPosition, MapCellState, MapState
+from src.state.schema import EnemyState, FieldState, GameStateSnapshot, GridPosition, MapCellState, MapState
 from src.training.train import run_dqn_training
 
 
@@ -259,3 +259,36 @@ def test_dqn_feature_vector_uses_wall_aware_shortest_path_distances() -> None:
     # Shortest path detours around the wall: distance is 4 on a map with max_distance=3.
     assert features[11] == 4.0 / 3.0  # exit_distance
     assert features[14] == 4.0 / 3.0  # nearest_siphon
+
+
+def test_dqn_feature_vector_counts_type_zero_enemies_for_objective_features() -> None:
+    state = GameStateSnapshot(
+        timestamp_utc="2026-03-09T00:00:00+00:00",
+        health=_field(10),
+        energy=_field(5),
+        currency=_field(0),
+        fail_state=_field(False),
+        map=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(2, 0),
+            siphons=(),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=0,
+                    position=GridPosition(1, 0),
+                    hp=3,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+
+    features = state_to_feature_vector(state)
+
+    assert features[13] > 0.0  # enemy_count
+    assert features[19] == 1.0  # phase_enemy

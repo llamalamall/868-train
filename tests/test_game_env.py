@@ -849,6 +849,61 @@ def test_game_env_marks_premature_exit_attempt_in_step_info() -> None:
     assert info["invalid_action_reason"] is None
 
 
+def test_game_env_premature_exit_counts_type_zero_enemy_as_remaining() -> None:
+    before = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=0,
+                    position=GridPosition(0, 0),
+                    hp=3,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    after = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(1, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=0,
+                    position=GridPosition(0, 0),
+                    hp=3,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_right",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    _state, _reward, _done, info = env.step("move_right")
+
+    assert info["premature_exit_attempt"] is True
+
+
 def test_game_env_prog_action_backoff_after_ineffective_attempt() -> None:
     stale = _snapshot(
         map_state=MapState(
