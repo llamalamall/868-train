@@ -31,10 +31,22 @@ from src.training import evaluate
 from src.training.rewards import RewardWeights
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
-_PATH_LIKE_DESTS = {"exe", "checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}
+_PATH_LIKE_DESTS = {
+    "exe",
+    "checkpoint",
+    "checkpoint_a",
+    "checkpoint_b",
+    "json_out",
+    "restore_save_file",
+}
 _HIDDEN_GUI_DESTS = {"external_status_file", "external_control_file"}
 _MAX_FORM_COLUMNS = 5
 _CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
+_APPDATA_GAME_SAVE_DIR = (
+    Path(os.environ["APPDATA"]) / "868-hack"
+    if os.environ.get("APPDATA")
+    else None
+)
 _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
 _REWARD_HISTORY_LIMIT = 30
 _PALETTE = {
@@ -78,6 +90,7 @@ def _sort_form_actions(actions: tuple[argparse.Action, ...]) -> tuple[argparse.A
     priority = {
         "exe": 0,
         "checkpoint": 1,
+        "restore_save_file": 2,
     }
     indexed_actions = list(enumerate(actions))
     indexed_actions.sort(key=lambda item: (priority.get(item[1].dest, 999), item[0]))
@@ -195,6 +208,12 @@ def _initial_browse_dir(*, dest: str, current_value: str) -> Path:
         return current_path
     if dest in {"checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}:
         return _CHECKPOINT_DIR
+    if (
+        dest == "restore_save_file"
+        and _APPDATA_GAME_SAVE_DIR is not None
+        and _APPDATA_GAME_SAVE_DIR.exists()
+    ):
+        return _APPDATA_GAME_SAVE_DIR
     return _REPO_ROOT
 
 
@@ -703,6 +722,13 @@ class _ArgForm(ttk.Frame):
                 title="Select checkpoint",
                 initialdir=initial_dir,
                 filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+            )
+        elif dest == "restore_save_file":
+            path = filedialog.askopenfilename(
+                parent=self,
+                title="Select source save file",
+                initialdir=initial_dir,
+                filetypes=[("All files", "*.*")],
             )
         else:
             path = filedialog.asksaveasfilename(

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -44,6 +46,59 @@ def _format_monitor_actions(actions: object, *, limit: int = 8) -> str:
         head=",".join(normalized[:limit]),
         remaining=remaining,
     )
+
+
+_FAIL_TERMINAL_REASON_TOKENS: tuple[str, ...] = ("fail", "loss", "dead", "start_screen")
+_APP_SAVE_FOLDER_NAME = "868-hack"
+_APP_SAVE_FILE_NAME = "savegame_868"
+
+
+def _default_game_save_target_path() -> Path:
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / _APP_SAVE_FOLDER_NAME / _APP_SAVE_FILE_NAME
+    return Path.home() / "AppData" / "Roaming" / _APP_SAVE_FOLDER_NAME / _APP_SAVE_FILE_NAME
+
+
+def _resolve_restore_save_source_path(args: argparse.Namespace) -> Path | None:
+    if not args.restore_save_file:
+        return None
+    return Path(str(args.restore_save_file)).expanduser().resolve()
+
+
+def _reason_indicates_fail_terminal(reason: object) -> bool:
+    if not isinstance(reason, str):
+        return False
+    normalized = reason.strip().lower()
+    if not normalized:
+        return False
+    return any(token in normalized for token in _FAIL_TERMINAL_REASON_TOKENS)
+
+
+def _event_indicates_fail_terminal(event: dict[str, Any]) -> bool:
+    if not bool(event.get("done", False)):
+        return False
+    return _reason_indicates_fail_terminal(event.get("terminal_reason"))
+
+
+def _restore_selected_save_file(*, source_path: Path, target_path: Path) -> None:
+    source = source_path.expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"Selected restore save file does not exist: {source}")
+    if not source.is_file():
+        raise IsADirectoryError(f"Selected restore save file must be a file: {source}")
+
+    target = target_path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target.exists():
+        try:
+            if source.samefile(target):
+                return
+        except OSError:
+            pass
+
+    shutil.copy2(source, target)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -93,6 +148,14 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="In train mode, also save periodic checkpoints every N episodes (0 disables).",
+    )
+    parser.add_argument(
+        "--restore-save-file",
+        default=None,
+        help=(
+            "Optional source save file to restore after each terminal fail state. "
+            "When set, the file is copied to %APPDATA%\\868-hack\\savegame_868."
+        ),
     )
     parser.add_argument(
         "--reset-sequence",
@@ -407,6 +470,12 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--checkpoint-every must be >= 0.")
     if args.mode == "eval" and not args.checkpoint:
         parser.error("--checkpoint is required when --mode=eval.")
+    restore_source = _resolve_restore_save_source_path(args)
+    if restore_source is not None:
+        if not restore_source.exists():
+            parser.error(f"--restore-save-file not found: {restore_source}.")
+        if not restore_source.is_file():
+            parser.error(f"--restore-save-file must be a file: {restore_source}.")
 
 
 def _build_dqn_config(args: argparse.Namespace) -> DQNConfig:
@@ -511,6 +580,20 @@ def main() -> None:
     )
 
     checkpoint_path = _resolve_checkpoint_path(args)
+    restore_save_source = _resolve_restore_save_source_path(args)
+    restore_save_target = (
+        _default_game_save_target_path()
+        if restore_save_source is not None
+        else None
+    )
+    restored_fail_episodes: set[str] = set()
+    if restore_save_source is not None and restore_save_target is not None:
+        print(
+            "savegame_restore_enabled\tsource={source}\ttarget={target}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+            )
+        )
     try:
         env = GameEnv.from_live_process(
             executable_name=args.exe,
@@ -537,7 +620,36 @@ def main() -> None:
         )
         tui.start()
 
+        def _maybe_restore_save_on_fail(event: dict[str, Any]) -> None:
+            if restore_save_source is None or restore_save_target is None:
+                return
+            if not _event_indicates_fail_terminal(event):
+                return
+
+            episode_id = str(event.get("episode_id") or "").strip()
+            if episode_id and episode_id in restored_fail_episodes:
+                return
+
+            _restore_selected_save_file(
+                source_path=restore_save_source,
+                target_path=restore_save_target,
+            )
+            if episode_id:
+                restored_fail_episodes.add(episode_id)
+
+            terminal_reason = str(event.get("terminal_reason") or "")
+            print(
+                "savegame_restored\tsource={source}\ttarget={target}\tterminal={terminal}".format(
+                    source=restore_save_source,
+                    target=restore_save_target,
+                    terminal=(terminal_reason or "-"),
+                )
+            )
+
         def _on_step(event: dict[str, Any]) -> None:
+            _maybe_restore_save_on_fail(event)
+            if not monitor_enabled:
+                return
             tui.consume_manual_step_flag()
             tui.update(
                 training_line=(
@@ -620,7 +732,11 @@ def main() -> None:
                     explore=True,
                     learn=True,
                     before_step_callback=_on_before_step if monitor_enabled else None,
-                    step_callback=_on_step if monitor_enabled else None,
+                    step_callback=(
+                        _on_step
+                        if monitor_enabled or restore_save_source is not None
+                        else None
+                    ),
                 )[0]
                 results.append(episode_result)
 
@@ -657,7 +773,11 @@ def main() -> None:
                     explore=False,
                     learn=False,
                     before_step_callback=_on_before_step if monitor_enabled else None,
-                    step_callback=_on_step if monitor_enabled else None,
+                    step_callback=(
+                        _on_step
+                        if monitor_enabled or restore_save_source is not None
+                        else None
+                    ),
                 )
             )
     finally:

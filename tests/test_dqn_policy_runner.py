@@ -11,7 +11,10 @@ from src.env.dqn_policy_runner import (
     _build_dqn_config,
     _build_parser,
     _default_checkpoint_path,
+    _event_indicates_fail_terminal,
     _format_monitor_actions,
+    _reason_indicates_fail_terminal,
+    _restore_selected_save_file,
     _resolve_checkpoint_path,
     _validate_args,
 )
@@ -94,6 +97,7 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
     assert args.episodes == 3
     assert args.max_steps == 90
     assert args.checkpoint == "artifacts/checkpoints/final.json"
+    assert args.restore_save_file is None
     assert args.movement_keys == "numpad"
     assert args.prog_actions is False
     assert args.launch_exe is False
@@ -186,6 +190,34 @@ def test_validate_args_rejects_negative_checkpoint_every() -> None:
 
     with pytest.raises(SystemExit):
         _validate_args(parser, args)
+
+
+def test_validate_args_rejects_missing_restore_save_file() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["--restore-save-file", "does-not-exist.bin"])
+
+    with pytest.raises(SystemExit):
+        _validate_args(parser, args)
+
+
+def test_reason_and_event_fail_detection_helpers() -> None:
+    assert _reason_indicates_fail_terminal("state:fail_state")
+    assert _reason_indicates_fail_terminal("memory:player_dead")
+    assert _reason_indicates_fail_terminal("state:start_screen")
+    assert not _reason_indicates_fail_terminal("timeout:max_steps")
+    assert _event_indicates_fail_terminal({"done": True, "terminal_reason": "state:fail_state"})
+    assert not _event_indicates_fail_terminal({"done": False, "terminal_reason": "state:fail_state"})
+    assert not _event_indicates_fail_terminal({"done": True, "terminal_reason": "timeout:max_steps"})
+
+
+def test_restore_selected_save_file_copies_contents(tmp_path: Path) -> None:
+    source = tmp_path / "source-save"
+    source.write_text("save-data", encoding="utf-8")
+    target = tmp_path / "target" / "savegame_868"
+
+    _restore_selected_save_file(source_path=source, target_path=target)
+
+    assert target.read_text(encoding="utf-8") == "save-data"
 
 
 def test_format_monitor_actions_truncates_long_lists() -> None:

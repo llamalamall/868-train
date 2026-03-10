@@ -23,8 +23,8 @@ from src.training.rewards import RewardWeights
 def test_sort_form_actions_prioritizes_exe_and_checkpoint() -> None:
     parser = dqn_policy_runner._build_parser()
     sorted_actions = _sort_form_actions(_iter_parser_actions(parser))
-    first_two_dests = [action.dest for action in sorted_actions[:2]]
-    assert first_two_dests == ["exe", "checkpoint"]
+    first_three_dests = [action.dest for action in sorted_actions[:3]]
+    assert first_three_dests == ["exe", "checkpoint", "restore_save_file"]
 
 
 def test_initial_browse_dir_uses_checkpoint_directory_for_checkpoint_fields() -> None:
