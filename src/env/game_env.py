@@ -17,6 +17,7 @@ from src.config.offsets import load_offset_registry
 from src.controller.action_api import ActionAPI, ActionConfig
 from src.controller.input_driver import InputDriver
 from src.controller.window_attach import WindowAttachError, attach_window, focus_window
+from src.env.enemy_spawn_suppression import EnemySpawnSuppressor
 from src.env.game_tick_speedup import GameTickSpeedupPatcher
 from src.env.reset_manager import NoopResetManager, ResetStrategy, SequenceResetManager
 from src.memory.process_attach import attach_process, close_attached_process
@@ -1123,6 +1124,7 @@ class GameEnv:
         pre_reset_hook: Callable[[], None] | None = None,
         reward_fn: RewardFunction = _default_reward_fn,
         game_tick_ms: int = 16,
+        no_enemies_mode: bool = False,
     ) -> GameEnv:
         """Create a live environment bound to running game process/window."""
         if int(game_tick_ms) < 1 or int(game_tick_ms) > 16:
@@ -1171,6 +1173,13 @@ class GameEnv:
             "attached_process": attached_process,
             "attached_window": attached_window,
         }
+        enemy_spawn_suppressor = EnemySpawnSuppressor(
+            enabled=bool(no_enemies_mode),
+            logger=LOGGER,
+        )
+        if enemy_spawn_suppressor.enabled:
+            LOGGER.info("no_enemies_mode_enabled: active enemy slots will be suppressed.")
+        no_enemy_map_root_address: int | None = None
         kernel32 = _get_kernel32()
         tick_speedup = GameTickSpeedupPatcher(
             game_tick_ms=int(game_tick_ms),
@@ -1239,12 +1248,54 @@ class GameEnv:
                 )
             return ReadResult.ok(base)
 
-        def state_provider() -> GameStateSnapshot:
+        def _extract_live_state() -> GameStateSnapshot:
             return extract_state(
                 reader=reader,
                 registry=registry,
                 module_base_resolver=module_base_resolver,
             )
+
+        def _suppress_enemies_for_root(
+            *,
+            map_root_address: int,
+            slots: tuple[int, ...] | None = None,
+        ) -> None:
+            if not enemy_spawn_suppressor.enabled:
+                return
+            with runtime_lock:
+                active_process = runtime.get("attached_process")
+            if active_process is None:
+                return
+            enemy_spawn_suppressor.suppress(
+                process_handle=int(active_process.handle),
+                map_root_address=int(map_root_address),
+                slots=slots,
+            )
+
+        def state_provider() -> GameStateSnapshot:
+            nonlocal no_enemy_map_root_address
+            snapshot = _extract_live_state()
+            if not enemy_spawn_suppressor.enabled:
+                return snapshot
+
+            map_state = snapshot.map
+            if map_state.status != "ok" or map_state.address is None:
+                return snapshot
+
+            no_enemy_map_root_address = int(map_state.address)
+            enemy_slots = tuple(int(enemy.slot) for enemy in map_state.enemies if int(enemy.slot) > 0)
+            if not enemy_slots:
+                return snapshot
+
+            _suppress_enemies_for_root(
+                map_root_address=no_enemy_map_root_address,
+                slots=enemy_slots,
+            )
+            refreshed_snapshot = _extract_live_state()
+            refreshed_map = refreshed_snapshot.map
+            if refreshed_map.status == "ok" and refreshed_map.address is not None:
+                no_enemy_map_root_address = int(refreshed_map.address)
+            return refreshed_snapshot
 
         fail_entry = next(
             (entry for entry in registry.entries if entry.name in {"player_health", "health"}),
@@ -1274,6 +1325,7 @@ class GameEnv:
                 )
 
         def _swap_runtime_handles(*, new_process: Any, new_window: Any) -> None:
+            nonlocal no_enemy_map_root_address
             with runtime_lock:
                 previous_process = runtime["attached_process"]
                 runtime["attached_process"] = new_process
@@ -1281,6 +1333,7 @@ class GameEnv:
                 reader._process_handle = int(new_process.handle)  # type: ignore[attr-defined]
                 if window_targeted_input and action_api_holder["value"] is not None:
                     action_api_holder["value"].target_hwnd = int(new_window.hwnd)
+                no_enemy_map_root_address = None
 
             _apply_tick_speedup(new_process)
             if int(previous_process.handle) != int(new_process.handle):
@@ -1377,6 +1430,8 @@ class GameEnv:
             return refreshed_window.hwnd
 
         def before_action(action_name: str) -> None:
+            if enemy_spawn_suppressor.enabled and no_enemy_map_root_address is not None:
+                _suppress_enemies_for_root(map_root_address=no_enemy_map_root_address)
             if window_targeted_input or not focus_window_on_attach:
                 return
             with runtime_lock:
@@ -1427,7 +1482,11 @@ class GameEnv:
             config=config,
             telemetry_logger=telemetry_logger,
             recovery_hook=_recover_live_bindings,
-            before_action_hook=before_action if focus_window_on_attach else None,
+            before_action_hook=(
+                before_action
+                if (focus_window_on_attach or enemy_spawn_suppressor.enabled)
+                else None
+            ),
         )
 
         def _cleanup_live_bindings() -> None:

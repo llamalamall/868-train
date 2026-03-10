@@ -11,6 +11,7 @@ from src.gui.dqn_runner_gui import (
     _estimate_epsilon_eta_seconds,
     _format_duration_seconds,
     _initial_browse_dir,
+    _is_boolean_flag,
     _iter_parser_actions,
     _parse_episode_progress,
     _resolve_reward_metric_value,
@@ -31,6 +32,14 @@ def test_initial_browse_dir_uses_checkpoint_directory_for_checkpoint_fields() ->
     assert _initial_browse_dir(dest="checkpoint", current_value="") == _CHECKPOINT_DIR
     assert _initial_browse_dir(dest="checkpoint_a", current_value="") == _CHECKPOINT_DIR
     assert _initial_browse_dir(dest="checkpoint_b", current_value="") == _CHECKPOINT_DIR
+
+
+def test_no_enemies_action_is_treated_as_boolean_flag() -> None:
+    parser = dqn_policy_runner._build_parser()
+    action_by_dest = {action.dest: action for action in _iter_parser_actions(parser)}
+
+    assert _is_boolean_flag(action_by_dest["no_enemies"]) is True
+    assert _is_boolean_flag(action_by_dest["episodes"]) is False
 
 
 def test_run_dqn_presets_include_expected_profiles() -> None:

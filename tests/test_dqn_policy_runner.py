@@ -36,6 +36,7 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.window_input is True
     assert args.step_through is False
     assert args.require_non_terminal_reset is True
+    assert args.no_enemies is False
     assert args.tui is True
     assert args.game_tick_ms == 16
     assert args.post_action_delay == 0.5
@@ -75,6 +76,7 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
             "--no-launch-exe",
             "--no-window-input",
             "--step-through",
+            "--no-enemies",
             "--no-require-non-terminal-reset",
             "--no-tui",
             "--game-tick-ms",
@@ -107,6 +109,7 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
     assert args.launch_exe is False
     assert args.window_input is False
     assert args.step_through is True
+    assert args.no_enemies is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False
     assert args.game_tick_ms == 8

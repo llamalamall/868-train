@@ -110,6 +110,16 @@ def _is_boolean_optional(action: argparse.Action) -> bool:
     return isinstance(action, argparse.BooleanOptionalAction)
 
 
+def _is_boolean_flag(action: argparse.Action) -> bool:
+    if _is_boolean_optional(action):
+        return True
+    if action.nargs != 0:
+        return False
+    if not isinstance(action.default, bool):
+        return False
+    return isinstance(getattr(action, "const", None), bool)
+
+
 def _primary_option(action: argparse.Action) -> str:
     for option in action.option_strings:
         if option.startswith("--no-"):
@@ -184,7 +194,7 @@ def _field_column_span(action: argparse.Action, *, max_columns: int) -> int:
         return 1
     if action.dest in _PATH_LIKE_DESTS:
         return 2
-    if _is_numeric_action(action) or _is_boolean_optional(action) or action.choices is not None:
+    if _is_numeric_action(action) or _is_boolean_flag(action) or action.choices is not None:
         return 1
     return 2
 
@@ -543,7 +553,7 @@ class _ArgForm(ttk.Frame):
 
             help_text = action.help or ""
             label_text = _display_label(action)
-            if _is_boolean_optional(action):
+            if _is_boolean_flag(action):
                 variable = tk.BooleanVar(value=bool(action.default))
                 widget = ttk.Checkbutton(
                     card,
@@ -746,7 +756,7 @@ class _ArgForm(ttk.Frame):
         for field in self._fields:
             action = field.action
             field_name = _primary_option(action)
-            if _is_boolean_optional(action):
+            if _is_boolean_flag(action):
                 value = bool(field.variable.get())
                 default = bool(action.default)
                 if value != default:

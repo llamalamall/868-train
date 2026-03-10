@@ -271,6 +271,15 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Require reset() to observe a non-terminal state before starting steps.",
     )
+    parser.add_argument(
+        "--no-enemies",
+        action="store_true",
+        default=False,
+        help=(
+            "Suppress active enemy entities each step so training can focus on "
+            "phase progression without combat pressure."
+        ),
+    )
 
     parser.add_argument(
         "--gamma",
@@ -574,6 +583,8 @@ def main() -> None:
             f"{mode} enabled: using window-targeted input so actions still go to the game "
             "while the TUI window has focus."
         )
+    if bool(args.no_enemies):
+        print("no_enemies_mode_enabled\tenemy entities will be suppressed.")
 
     reset_sequence = tuple(
         action.strip() for action in str(args.reset_sequence).split(",") if action.strip()
@@ -656,6 +667,7 @@ def main() -> None:
             ),
             reward_fn=reward_fn,
             game_tick_ms=int(args.game_tick_ms),
+            no_enemies_mode=bool(args.no_enemies),
         )
         tui.start()
 
