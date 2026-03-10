@@ -17,6 +17,7 @@ from src.config.offsets import load_offset_registry
 from src.controller.action_api import ActionAPI, ActionConfig
 from src.controller.input_driver import InputDriver
 from src.controller.window_attach import WindowAttachError, attach_window, focus_window
+from src.env.game_tick_speedup import GameTickSpeedupPatcher
 from src.env.reset_manager import NoopResetManager, ResetStrategy, SequenceResetManager
 from src.memory.process_attach import attach_process, close_attached_process
 from src.memory.reader import ProcessMemoryReader, ReadFailure, ReadResult
@@ -1100,8 +1101,11 @@ class GameEnv:
         window_targeted_input: bool = False,
         action_config: ActionConfig | None = None,
         reward_fn: RewardFunction = _default_reward_fn,
+        game_tick_ms: int = 16,
     ) -> GameEnv:
         """Create a live environment bound to running game process/window."""
+        if int(game_tick_ms) < 1 or int(game_tick_ms) > 16:
+            raise ValueError("game_tick_ms must be between 1 and 16.")
         registry = load_offset_registry(config_path=offsets_config_path)
         runtime_lock = threading.RLock()
         attach_retries = max(1, int(config.attach_retry_attempts))
@@ -1147,6 +1151,53 @@ class GameEnv:
             "attached_window": attached_window,
         }
         kernel32 = _get_kernel32()
+        tick_speedup = GameTickSpeedupPatcher(
+            game_tick_ms=int(game_tick_ms),
+            logger=LOGGER,
+        )
+
+        def _resolve_module_base_for_process(process: Any) -> int | None:
+            module_name = str(getattr(process, "executable_name", executable_name)).strip()
+            if not module_name:
+                module_name = executable_name
+            try:
+                return _find_module_base(
+                    pid=int(process.pid),
+                    module_name=module_name,
+                    kernel32=kernel32,
+                )
+            except Exception as error:  # pragma: no cover - runtime integration path
+                LOGGER.warning(
+                    "Unable to resolve module base for speedup pid=%s module=%s error=%s",
+                    getattr(process, "pid", None),
+                    module_name,
+                    error,
+                )
+                return None
+
+        def _apply_tick_speedup(process: Any) -> None:
+            if not tick_speedup.enabled:
+                return
+            module_base = _resolve_module_base_for_process(process)
+            if module_base is None:
+                return
+            tick_speedup.apply(
+                process_handle=int(process.handle),
+                module_base=int(module_base),
+            )
+
+        def _restore_tick_speedup(process: Any) -> None:
+            if not tick_speedup.enabled:
+                return
+            module_base = _resolve_module_base_for_process(process)
+            if module_base is None:
+                return
+            tick_speedup.restore(
+                process_handle=int(process.handle),
+                module_base=int(module_base),
+            )
+
+        _apply_tick_speedup(attached_process)
 
         def module_base_resolver(module_name: str) -> ReadResult[int]:
             try:
@@ -1210,6 +1261,7 @@ class GameEnv:
                 if window_targeted_input and action_api_holder["value"] is not None:
                     action_api_holder["value"].target_hwnd = int(new_window.hwnd)
 
+            _apply_tick_speedup(new_process)
             if int(previous_process.handle) != int(new_process.handle):
                 _close_process_handle_safe(previous_process)
 
@@ -1351,6 +1403,15 @@ class GameEnv:
                 _close_process_handle_safe(active_process)
 
         env.add_cleanup_callback(_cleanup_live_bindings)
+
+        def _cleanup_tick_speedup() -> None:
+            with runtime_lock:
+                active_process = runtime.get("attached_process")
+            if active_process is None:
+                return
+            _restore_tick_speedup(active_process)
+
+        env.add_cleanup_callback(_cleanup_tick_speedup)
         return env
 
 

@@ -39,6 +39,16 @@ _PROG_SLOT_ACTION_BINDINGS = {
 }
 
 
+def _game_tick_ms_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:  # pragma: no cover - argparse emits user-facing error.
+        raise argparse.ArgumentTypeError("game tick must be an integer.") from error
+    if parsed < 1 or parsed > 16:
+        raise argparse.ArgumentTypeError("game tick ms must be between 1 and 16.")
+    return parsed
+
+
 def _build_action_config(movement_keys: str, *, include_prog_actions: bool = True) -> ActionConfig:
     default_config = ActionConfig()
     bindings = dict(default_config.action_key_bindings)
@@ -321,6 +331,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-step watchdog timeout in seconds.",
     )
     parser.add_argument(
+        "--game-tick-ms",
+        type=_game_tick_ms_arg,
+        default=16,
+        help="Target game loop tick size in milliseconds (1..16). Lower values speed up gameplay.",
+    )
+    parser.add_argument(
         "--reset-timeout",
         type=float,
         default=15.0,
@@ -558,6 +574,7 @@ def main() -> None:
             window_targeted_input=effective_window_input,
             action_config=action_config,
             reward_fn=reward_fn,
+            game_tick_ms=int(args.game_tick_ms),
         )
         tui.start()
 

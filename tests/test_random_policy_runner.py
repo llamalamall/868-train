@@ -86,6 +86,7 @@ def test_random_runner_parser_prog_actions_defaults_to_enabled() -> None:
     assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
+    assert args.game_tick_ms == 16
     assert args.post_action_delay == 0.2
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35
@@ -102,6 +103,8 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
             "--step-through",
             "--no-require-non-terminal-reset",
             "--no-tui",
+            "--game-tick-ms",
+            "8",
             "--post-action-delay",
             "0.3",
             "--no-wait-for-action-processing",
@@ -118,10 +121,19 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
     assert args.step_through is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False
+    assert args.game_tick_ms == 8
     assert args.post_action_delay == 0.3
     assert args.wait_for_action_processing is False
     assert args.action_ack_timeout == 1.2
     assert args.action_ack_poll_interval == 0.25
+
+
+def test_random_runner_parser_rejects_out_of_range_game_tick_ms() -> None:
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--game-tick-ms", "0"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--game-tick-ms", "17"])
 
 
 def test_build_reward_fn_applies_configured_components_and_writes_breakdown() -> None:
