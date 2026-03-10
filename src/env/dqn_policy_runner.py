@@ -230,6 +230,24 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Target game loop tick size in milliseconds (1..16). Lower values speed up gameplay.",
     )
     parser.add_argument(
+        "--disable-idle-frame-delay",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Patch SDL_Delay(1) in the main loop to SDL_Delay(0) for faster runtime pacing.",
+    )
+    parser.add_argument(
+        "--disable-background-motion",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Disable animated background motion effect via runtime flag patching.",
+    )
+    parser.add_argument(
+        "--disable-wall-animations",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Freeze wall/tile palette animation counter in the renderer.",
+    )
+    parser.add_argument(
         "--reset-timeout",
         type=float,
         default=15.0,
@@ -238,7 +256,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--post-action-delay",
         type=float,
-        default=0.5,
+        default=0.2,
         help="Fixed delay after dispatching each action before reading state.",
     )
     parser.add_argument(
@@ -668,6 +686,9 @@ def main() -> None:
             reward_fn=reward_fn,
             game_tick_ms=int(args.game_tick_ms),
             no_enemies_mode=bool(args.no_enemies),
+            disable_idle_frame_delay=bool(args.disable_idle_frame_delay),
+            disable_background_motion=bool(args.disable_background_motion),
+            disable_wall_animations=bool(args.disable_wall_animations),
         )
         tui.start()
 

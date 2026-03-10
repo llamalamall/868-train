@@ -39,7 +39,10 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.no_enemies is False
     assert args.tui is True
     assert args.game_tick_ms == 16
-    assert args.post_action_delay == 0.5
+    assert args.disable_idle_frame_delay is False
+    assert args.disable_background_motion is False
+    assert args.disable_wall_animations is False
+    assert args.post_action_delay == 0.2
     assert args.restore_save_delay == 0.35
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35
@@ -81,6 +84,9 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
             "--no-tui",
             "--game-tick-ms",
             "8",
+            "--disable-idle-frame-delay",
+            "--disable-background-motion",
+            "--disable-wall-animations",
             "--post-action-delay",
             "0.4",
             "--restore-save-delay",
@@ -113,6 +119,9 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
     assert args.require_non_terminal_reset is False
     assert args.tui is False
     assert args.game_tick_ms == 8
+    assert args.disable_idle_frame_delay is True
+    assert args.disable_background_motion is True
+    assert args.disable_wall_animations is True
     assert args.post_action_delay == 0.4
     assert args.restore_save_delay == 1.25
     assert args.wait_for_action_processing is False

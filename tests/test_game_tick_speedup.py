@@ -4,7 +4,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-from src.env.game_tick_speedup import GameTickSpeedupPatcher
+from src.env.game_tick_speedup import (
+    BackgroundMotionDisablePatcher,
+    GameTickSpeedupPatcher,
+    IdleFrameDelayBypassPatcher,
+    TileAnimationFreezePatcher,
+)
 from src.memory.reader import ReadFailure, ReadResult
 from src.memory.writer import WriteFailure, WriteResult
 
@@ -64,6 +69,31 @@ def _load_tick_instruction(memory: FakeProcessMemory, *, module_base: int) -> No
     instruction = bytes.fromhex("83 05 0D DF 06 00 10")
     instruction_address = module_base + 0xB08C
     memory.write(instruction_address, instruction)
+
+
+def _load_idle_delay_instruction(memory: FakeProcessMemory, *, module_base: int) -> None:
+    instruction = bytes.fromhex("8B CE")
+    instruction_address = module_base + 0xB0C6
+    memory.write(instruction_address, instruction)
+
+
+def _load_background_motion_flag(
+    memory: FakeProcessMemory,
+    *,
+    module_base: int,
+    value: int,
+) -> None:
+    flag_address = module_base + 0x6CB80
+    memory.write(flag_address, int(value).to_bytes(4, byteorder="little", signed=False))
+
+
+def _load_tile_animation_counter_increment_instruction(
+    memory: FakeProcessMemory,
+    *,
+    module_base: int,
+) -> None:
+    instruction_address = module_base + 0xB07B
+    memory.write(instruction_address, bytes.fromhex("FF 05 33 12 12 00"))
 
 
 def test_game_tick_speedup_noops_when_target_is_default() -> None:
@@ -158,3 +188,78 @@ def test_game_tick_speedup_reapplies_after_recovering_new_process_handle() -> No
 
     assert patcher.apply(process_handle=1002, module_base=module_base) is True
     assert memory_b.read(module_base + 0xB08C + 6, 1) == b"\x08"
+
+
+def test_idle_frame_delay_bypass_applies_and_restores_instruction_bytes() -> None:
+    memory = FakeProcessMemory()
+    module_base = 0x140000000
+    _load_idle_delay_instruction(memory, module_base=module_base)
+    writer = FakeWriter(memory=memory)
+
+    patcher = IdleFrameDelayBypassPatcher(
+        enabled=True,
+        reader_factory=lambda _handle: FakeReader(memory=memory),
+        writer_factory=lambda _handle: writer,
+    )
+
+    applied = patcher.apply(process_handle=123, module_base=module_base)
+    assert applied is True
+    assert memory.read(module_base + 0xB0C6, 2) == bytes.fromhex("31 C9")
+
+    restored = patcher.restore(process_handle=123, module_base=module_base)
+    assert restored is True
+    assert memory.read(module_base + 0xB0C6, 2) == bytes.fromhex("8B CE")
+    assert writer.writes[0] == (module_base + 0xB0C6, bytes.fromhex("31 C9"))
+    assert writer.writes[1] == (module_base + 0xB0C6, bytes.fromhex("8B CE"))
+
+
+def test_background_motion_disable_applies_and_restores_flag_value() -> None:
+    memory = FakeProcessMemory()
+    module_base = 0x140000000
+    _load_background_motion_flag(memory, module_base=module_base, value=0)
+    writer = FakeWriter(memory=memory)
+
+    patcher = BackgroundMotionDisablePatcher(
+        enabled=True,
+        reader_factory=lambda _handle: FakeReader(memory=memory),
+        writer_factory=lambda _handle: writer,
+    )
+
+    applied = patcher.apply(process_handle=123, module_base=module_base)
+    assert applied is True
+    assert memory.read(module_base + 0x6CB80, 4) == (1).to_bytes(4, byteorder="little", signed=False)
+
+    restored = patcher.restore(process_handle=123, module_base=module_base)
+    assert restored is True
+    assert memory.read(module_base + 0x6CB80, 4) == (0).to_bytes(4, byteorder="little", signed=False)
+    assert writer.writes[0] == (
+        module_base + 0x6CB80,
+        (1).to_bytes(4, byteorder="little", signed=False),
+    )
+    assert writer.writes[1] == (
+        module_base + 0x6CB80,
+        (0).to_bytes(4, byteorder="little", signed=False),
+    )
+
+
+def test_tile_animation_freeze_applies_and_restores_instruction_bytes() -> None:
+    memory = FakeProcessMemory()
+    module_base = 0x140000000
+    _load_tile_animation_counter_increment_instruction(memory, module_base=module_base)
+    writer = FakeWriter(memory=memory)
+
+    patcher = TileAnimationFreezePatcher(
+        enabled=True,
+        reader_factory=lambda _handle: FakeReader(memory=memory),
+        writer_factory=lambda _handle: writer,
+    )
+
+    applied = patcher.apply(process_handle=123, module_base=module_base)
+    assert applied is True
+    assert memory.read(module_base + 0xB07B, 6) == bytes.fromhex("90 90 90 90 90 90")
+
+    restored = patcher.restore(process_handle=123, module_base=module_base)
+    assert restored is True
+    assert memory.read(module_base + 0xB07B, 6) == bytes.fromhex("FF 05 33 12 12 00")
+    assert writer.writes[0] == (module_base + 0xB07B, bytes.fromhex("90 90 90 90 90 90"))
+    assert writer.writes[1] == (module_base + 0xB07B, bytes.fromhex("FF 05 33 12 12 00"))

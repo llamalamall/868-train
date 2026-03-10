@@ -18,7 +18,12 @@ from src.controller.action_api import ActionAPI, ActionConfig
 from src.controller.input_driver import InputDriver
 from src.controller.window_attach import WindowAttachError, attach_window, focus_window
 from src.env.enemy_spawn_suppression import EnemySpawnSuppressor
-from src.env.game_tick_speedup import GameTickSpeedupPatcher
+from src.env.game_tick_speedup import (
+    BackgroundMotionDisablePatcher,
+    GameTickSpeedupPatcher,
+    IdleFrameDelayBypassPatcher,
+    TileAnimationFreezePatcher,
+)
 from src.env.reset_manager import NoopResetManager, ResetStrategy, SequenceResetManager
 from src.memory.process_attach import attach_process, close_attached_process
 from src.memory.reader import ProcessMemoryReader, ReadFailure, ReadResult
@@ -1125,6 +1130,9 @@ class GameEnv:
         reward_fn: RewardFunction = _default_reward_fn,
         game_tick_ms: int = 16,
         no_enemies_mode: bool = False,
+        disable_idle_frame_delay: bool = False,
+        disable_background_motion: bool = False,
+        disable_wall_animations: bool = False,
     ) -> GameEnv:
         """Create a live environment bound to running game process/window."""
         if int(game_tick_ms) < 1 or int(game_tick_ms) > 16:
@@ -1185,6 +1193,24 @@ class GameEnv:
             game_tick_ms=int(game_tick_ms),
             logger=LOGGER,
         )
+        idle_frame_delay_bypass = IdleFrameDelayBypassPatcher(
+            enabled=bool(disable_idle_frame_delay),
+            logger=LOGGER,
+        )
+        background_motion_disable = BackgroundMotionDisablePatcher(
+            enabled=bool(disable_background_motion),
+            logger=LOGGER,
+        )
+        tile_animation_freeze = TileAnimationFreezePatcher(
+            enabled=bool(disable_wall_animations),
+            logger=LOGGER,
+        )
+        runtime_patchers: tuple[Any, ...] = (
+            tick_speedup,
+            idle_frame_delay_bypass,
+            background_motion_disable,
+            tile_animation_freeze,
+        )
 
         def _resolve_module_base_for_process(process: Any) -> int | None:
             module_name = str(getattr(process, "executable_name", executable_name)).strip()
@@ -1198,36 +1224,40 @@ class GameEnv:
                 )
             except Exception as error:  # pragma: no cover - runtime integration path
                 LOGGER.warning(
-                    "Unable to resolve module base for speedup pid=%s module=%s error=%s",
+                    "Unable to resolve module base for runtime patches pid=%s module=%s error=%s",
                     getattr(process, "pid", None),
                     module_name,
                     error,
                 )
                 return None
 
-        def _apply_tick_speedup(process: Any) -> None:
-            if not tick_speedup.enabled:
+        def _apply_runtime_patches(process: Any) -> None:
+            enabled_patchers = tuple(patcher for patcher in runtime_patchers if bool(patcher.enabled))
+            if not enabled_patchers:
                 return
             module_base = _resolve_module_base_for_process(process)
             if module_base is None:
                 return
-            tick_speedup.apply(
-                process_handle=int(process.handle),
-                module_base=int(module_base),
-            )
+            for patcher in enabled_patchers:
+                patcher.apply(
+                    process_handle=int(process.handle),
+                    module_base=int(module_base),
+                )
 
-        def _restore_tick_speedup(process: Any) -> None:
-            if not tick_speedup.enabled:
+        def _restore_runtime_patches(process: Any) -> None:
+            enabled_patchers = tuple(patcher for patcher in runtime_patchers if bool(patcher.enabled))
+            if not enabled_patchers:
                 return
             module_base = _resolve_module_base_for_process(process)
             if module_base is None:
                 return
-            tick_speedup.restore(
-                process_handle=int(process.handle),
-                module_base=int(module_base),
-            )
+            for patcher in enabled_patchers:
+                patcher.restore(
+                    process_handle=int(process.handle),
+                    module_base=int(module_base),
+                )
 
-        _apply_tick_speedup(attached_process)
+        _apply_runtime_patches(attached_process)
 
         def module_base_resolver(module_name: str) -> ReadResult[int]:
             try:
@@ -1335,7 +1365,7 @@ class GameEnv:
                     action_api_holder["value"].target_hwnd = int(new_window.hwnd)
                 no_enemy_map_root_address = None
 
-            _apply_tick_speedup(new_process)
+            _apply_runtime_patches(new_process)
             if int(previous_process.handle) != int(new_process.handle):
                 _close_process_handle_safe(previous_process)
 
@@ -1498,14 +1528,14 @@ class GameEnv:
 
         env.add_cleanup_callback(_cleanup_live_bindings)
 
-        def _cleanup_tick_speedup() -> None:
+        def _cleanup_runtime_patches() -> None:
             with runtime_lock:
                 active_process = runtime.get("attached_process")
             if active_process is None:
                 return
-            _restore_tick_speedup(active_process)
+            _restore_runtime_patches(active_process)
 
-        env.add_cleanup_callback(_cleanup_tick_speedup)
+        env.add_cleanup_callback(_cleanup_runtime_patches)
         return env
 
 
