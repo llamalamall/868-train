@@ -1080,6 +1080,12 @@ def _add_shared_eval_args(
         help="Penalty multiplier applied to negative health deltas.",
     )
     parser.add_argument(
+        "--reward-sector-advance",
+        type=float,
+        default=default_weights.sector_advance,
+        help="Reward per positive sector index transition.",
+    )
+    parser.add_argument(
         "--reward-clip-abs",
         type=float,
         default=5.0,

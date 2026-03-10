@@ -34,10 +34,18 @@ class SequenceResetManager:
 
     action_api: AnyActionAPI
     sequence: tuple[str, ...] = ("cancel", "cancel", "confirm")
+    before_sequence_hook: Callable[[], None] | None = None
     inter_action_delay_seconds: float = 0.10
     sleep_fn: Callable[[float], None] = time.sleep
 
     def reset(self) -> None:
+        if self.before_sequence_hook is not None:
+            try:
+                self.before_sequence_hook()
+            except Exception as error:
+                raise ResetManagerError(
+                    f"Reset pre-sequence hook failed: error={error}"
+                ) from error
         for action_name in self.sequence:
             try:
                 self.action_api.perform_action(action_name)
@@ -54,4 +62,3 @@ class AnyActionAPI(Protocol):
 
     def perform_action(self, action_name: str) -> None:
         """Execute one named action."""
-

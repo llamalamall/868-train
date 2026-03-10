@@ -9,7 +9,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -108,6 +108,26 @@ def _field_effect_signature(field: Any) -> tuple[str, Any | None]:
     if status != "ok":
         return (status, None)
     return ("ok", getattr(field, "value", None))
+
+
+def _clamp_action_press_duration_to_game_tick(
+    *,
+    action_config: ActionConfig,
+    game_tick_ms: int,
+) -> ActionConfig:
+    """Cap key press hold duration so it never exceeds the configured game tick."""
+    tick_seconds = max(float(game_tick_ms), 1.0) / 1000.0
+    current_press_seconds = max(float(action_config.timings.press_duration_seconds), 0.0)
+    clamped_press_seconds = min(current_press_seconds, tick_seconds)
+    if abs(clamped_press_seconds - current_press_seconds) <= 1e-9:
+        return action_config
+    return replace(
+        action_config,
+        timings=replace(
+            action_config.timings,
+            press_duration_seconds=clamped_press_seconds,
+        ),
+    )
 
 
 def _extra_fields_effect_signature(snapshot: GameStateSnapshot) -> tuple[tuple[str, tuple[str, Any | None]], ...]:
@@ -1100,6 +1120,7 @@ class GameEnv:
         focus_window_on_attach: bool = True,
         window_targeted_input: bool = False,
         action_config: ActionConfig | None = None,
+        pre_reset_hook: Callable[[], None] | None = None,
         reward_fn: RewardFunction = _default_reward_fn,
         game_tick_ms: int = 16,
     ) -> GameEnv:
@@ -1369,9 +1390,22 @@ class GameEnv:
             except WindowAttachError as error:
                 _recover_live_bindings(f"focus_lost_before_action:{action_name}", error)
 
+        base_action_config = action_config or ActionConfig()
+        resolved_action_config = _clamp_action_press_duration_to_game_tick(
+            action_config=base_action_config,
+            game_tick_ms=int(game_tick_ms),
+        )
+        if resolved_action_config.timings.press_duration_seconds < base_action_config.timings.press_duration_seconds:
+            LOGGER.info(
+                "action_press_duration_clamped from=%s to=%s tick_ms=%s",
+                base_action_config.timings.press_duration_seconds,
+                resolved_action_config.timings.press_duration_seconds,
+                int(game_tick_ms),
+            )
+
         action_api = ActionAPI(
             input_driver=InputDriver(),
-            config=action_config or ActionConfig(),
+            config=resolved_action_config,
             target_hwnd=attached_window.hwnd if window_targeted_input else None,
             window_reacquire_hook=reacquire_window_handle if window_targeted_input else None,
         )
@@ -1380,6 +1414,7 @@ class GameEnv:
             reset_strategy: ResetStrategy = SequenceResetManager(
                 action_api=action_api,
                 sequence=reset_sequence,
+                before_sequence_hook=pre_reset_hook,
             )
         else:
             reset_strategy = NoopResetManager()

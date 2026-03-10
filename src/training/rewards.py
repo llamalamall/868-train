@@ -44,6 +44,7 @@ class RewardWeights:
     prog_collected_base: float = 0.5
     points_collected: float = 0.05
     damage_taken_penalty: float = 0.60
+    sector_advance: float = 1.0
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, float]) -> RewardWeights:
@@ -74,6 +75,7 @@ class RewardWeights:
             prog_collected_base=float(values.get("prog_collected_base", cls.prog_collected_base)),
             points_collected=float(values.get("points_collected", cls.points_collected)),
             damage_taken_penalty=float(values.get("damage_taken_penalty", cls.damage_taken_penalty)),
+            sector_advance=float(values.get("sector_advance", cls.sector_advance)),
         )
 
 
@@ -121,6 +123,7 @@ class RewardBreakdown:
     prog_collected: float
     points_collected: float
     damage_taken_penalty: float
+    sector_advance: float
 
     @property
     def total(self) -> float:
@@ -147,6 +150,7 @@ class RewardBreakdown:
             + self.prog_collected
             + self.points_collected
             + self.damage_taken_penalty
+            + self.sector_advance
         )
 
 
@@ -380,6 +384,9 @@ def _phase_progress_delta(
     if previous_siphons is not None and previous_siphons > 0:
         previous_distance = _nearest_siphon_distance(previous_state)
         current_distance = _nearest_siphon_distance(current_state)
+    elif _nearest_harvest_target_distance(previous_state) is not None:
+        previous_distance = _nearest_harvest_target_distance(previous_state)
+        current_distance = _nearest_harvest_target_distance(current_state)
     elif previous_enemies is not None and previous_enemies > 0:
         previous_distance = _nearest_enemy_distance(previous_state)
         current_distance = _nearest_enemy_distance(current_state)
@@ -506,6 +513,27 @@ def _player_tile_threatened(state: GameStateSnapshot) -> bool | None:
     return any(_enemy_can_attack_position(enemy=enemy, player_position=player) for enemy in enemies)
 
 
+def _sector_index(state: GameStateSnapshot) -> int | None:
+    sector = _state_extra_numeric(state, key="current_sector")
+    if sector is None:
+        return None
+    return int(sector)
+
+
+def _is_map_clear_exit_state(state: GameStateSnapshot) -> bool:
+    on_exit = _player_on_exit(state)
+    if not on_exit:
+        return False
+    siphons_remaining = _count_siphons(state)
+    enemies_remaining = _count_live_enemies(state)
+    return (
+        siphons_remaining is not None
+        and siphons_remaining == 0
+        and enemies_remaining is not None
+        and enemies_remaining == 0
+    )
+
+
 def compute_reward(
     *,
     previous_state: GameStateSnapshot,
@@ -614,16 +642,18 @@ def compute_reward(
     damage_taken_component = (
         -abs(health_delta) * abs(weights.damage_taken_penalty) if health_delta < 0 else 0.0
     )
+    previous_sector = _sector_index(previous_state)
+    current_sector = _sector_index(current_state)
+    sector_delta = 0.0
+    if previous_sector is not None and current_sector is not None and current_sector > previous_sector:
+        sector_delta = float(current_sector - previous_sector)
+    sector_advance_component = sector_delta * abs(weights.sector_advance)
 
-    on_exit_now = _player_on_exit(current_state)
-    map_cleared = (
-        on_exit_now
-        and current_siphons is not None
-        and current_siphons == 0
-        and current_enemies is not None
-        and current_enemies == 0
+    map_clear_component = (
+        abs(weights.map_clear_bonus)
+        if _is_map_clear_exit_state(current_state) and not _is_map_clear_exit_state(previous_state)
+        else 0.0
     )
-    map_clear_component = abs(weights.map_clear_bonus) if map_cleared else 0.0
 
     premature_exit_attempt = bool(info_payload.get("premature_exit_attempt", False))
     premature_exit_component = (
@@ -661,6 +691,7 @@ def compute_reward(
         prog_collected=prog_component,
         points_collected=points_collected_component,
         damage_taken_penalty=damage_taken_component,
+        sector_advance=sector_advance_component,
     )
     unclipped_total = breakdown.total
     total = _clip(unclipped_total, clip_abs=float(active_config.reward_clip_abs))
@@ -671,8 +702,9 @@ def compute_reward(
         "phase_progress=%.4f backtrack_penalty=%.4f map_clear_bonus=%.4f premature_exit_penalty=%.4f "
         "invalid_action_penalty=%.4f fail_penalty=%.4f safe_tile_bonus=%.4f danger_tile_penalty=%.4f "
         "resource_proximity=%.4f prog_collected=%.4f points_collected=%.4f damage_taken_penalty=%.4f "
+        "sector_advance=%.4f "
         "total=%.4f unclipped_total=%.4f done=%s health_delta=%.4f energy_delta=%.4f "
-        "currency_delta=%.4f score_delta=%.4f",
+        "currency_delta=%.4f score_delta=%.4f sector_delta=%.4f",
         breakdown.survival,
         breakdown.step_penalty,
         breakdown.health_change,
@@ -694,6 +726,7 @@ def compute_reward(
         breakdown.prog_collected,
         breakdown.points_collected,
         breakdown.damage_taken_penalty,
+        breakdown.sector_advance,
         total,
         unclipped_total,
         done,
@@ -701,6 +734,7 @@ def compute_reward(
         energy_delta,
         currency_delta,
         score_delta,
+        sector_delta,
     )
 
     return RewardResult(total=total, breakdown=breakdown)

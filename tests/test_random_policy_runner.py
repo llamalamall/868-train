@@ -91,6 +91,7 @@ def test_random_runner_parser_prog_actions_defaults_to_enabled() -> None:
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35
     assert args.action_ack_poll_interval == 0.05
+    assert args.reward_sector_advance == 1.0
 
 
 def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
@@ -159,6 +160,7 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
         reward_prog_collected_base=0.0,
         reward_points_collected=0.0,
         reward_damage_taken_penalty=0.0,
+        reward_sector_advance=0.0,
         reward_clip_abs=5.0,
     )
     reward_config = _build_reward_config(args)
@@ -185,4 +187,5 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
     assert breakdown["prog_collected"] == 0.0
     assert breakdown["resource_proximity"] == 0.0
     assert breakdown["fail_penalty"] == 0.0
+    assert breakdown["sector_advance"] == 0.0
     assert breakdown["total"] == pytest.approx(-0.3)

@@ -387,3 +387,48 @@ def test_dqn_feature_vector_includes_phase_objective_direction_components() -> N
 
     assert features[16] == pytest.approx(0.5)   # objective_dx: (3 - 1) / (width - 1)
     assert features[17] == pytest.approx(0.75)  # objective_dy: (4 - 1) / (height - 1)
+
+
+def test_dqn_feature_vector_includes_normalized_sector_progress() -> None:
+    state_sector_one = GameStateSnapshot(
+        timestamp_utc="2026-03-10T00:00:00+00:00",
+        health=_field(10),
+        energy=_field(5),
+        currency=_field(0),
+        fail_state=_field(False),
+        map=MapState(status="missing"),
+        extra_fields={"current_sector": _field(0)},
+    )
+    state_sector_eight = GameStateSnapshot(
+        timestamp_utc="2026-03-10T00:00:01+00:00",
+        health=_field(10),
+        energy=_field(5),
+        currency=_field(0),
+        fail_state=_field(False),
+        map=MapState(status="missing"),
+        extra_fields={"current_sector": _field(7)},
+    )
+
+    features_sector_one = state_to_feature_vector(state_sector_one)
+    features_sector_eight = state_to_feature_vector(state_sector_eight)
+
+    assert len(features_sector_one) == 23
+    assert features_sector_one[-1] == pytest.approx(0.125)
+    assert features_sector_eight[-1] == pytest.approx(1.0)
+
+
+def test_dqn_feature_vector_sets_sector_progress_to_zero_when_missing() -> None:
+    state = GameStateSnapshot(
+        timestamp_utc="2026-03-10T00:00:00+00:00",
+        health=_field(10),
+        energy=_field(5),
+        currency=_field(0),
+        fail_state=_field(False),
+        map=MapState(status="missing"),
+        extra_fields={},
+    )
+
+    features = state_to_feature_vector(state)
+
+    assert len(features) == 23
+    assert features[-1] == 0.0

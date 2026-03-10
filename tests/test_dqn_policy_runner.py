@@ -39,6 +39,7 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.tui is True
     assert args.game_tick_ms == 16
     assert args.post_action_delay == 0.5
+    assert args.restore_save_delay == 0.35
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35
     assert args.action_ack_poll_interval == 0.05
@@ -53,6 +54,7 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.reward_score_delta == 0.01
     assert args.reward_safe_tile_bonus == 0.02
     assert args.reward_danger_tile_penalty == 0.08
+    assert args.reward_sector_advance == 1.0
 
 
 def test_dqn_runner_parser_accepts_overrides() -> None:
@@ -79,6 +81,8 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
             "8",
             "--post-action-delay",
             "0.4",
+            "--restore-save-delay",
+            "1.25",
             "--no-wait-for-action-processing",
             "--action-ack-timeout",
             "1.5",
@@ -107,6 +111,7 @@ def test_dqn_runner_parser_accepts_overrides() -> None:
     assert args.tui is False
     assert args.game_tick_ms == 8
     assert args.post_action_delay == 0.4
+    assert args.restore_save_delay == 1.25
     assert args.wait_for_action_processing is False
     assert args.action_ack_timeout == 1.5
     assert args.action_ack_poll_interval == 0.2
@@ -195,6 +200,14 @@ def test_validate_args_rejects_negative_checkpoint_every() -> None:
 def test_validate_args_rejects_missing_restore_save_file() -> None:
     parser = _build_parser()
     args = parser.parse_args(["--restore-save-file", "does-not-exist.bin"])
+
+    with pytest.raises(SystemExit):
+        _validate_args(parser, args)
+
+
+def test_validate_args_rejects_negative_restore_save_delay() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["--restore-save-delay", "-0.01"])
 
     with pytest.raises(SystemExit):
         _validate_args(parser, args)

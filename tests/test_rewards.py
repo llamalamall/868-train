@@ -948,3 +948,326 @@ def test_compute_reward_resource_proximity_uses_adjacent_targets_for_prog_walls(
 
     # Progress is measured against reachable adjacent tiles to the wall harvest target.
     assert result.breakdown.resource_proximity == pytest.approx(1.0)
+
+
+def test_compute_reward_phase_progress_routes_objectives_in_order() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            energy_delta=0.0,
+            score_delta=0.0,
+            siphon_collected=0.0,
+            enemy_cleared=0.0,
+            phase_progress=1.0,
+            backtrack_penalty=1.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+            safe_tile_bonus=0.0,
+            danger_tile_penalty=0.0,
+            resource_proximity=0.0,
+            prog_collected_base=0.0,
+            points_collected=0.0,
+            damage_taken_penalty=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+
+    # 1) Siphon phase.
+    siphon_before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(0, 0),
+            siphons=(GridPosition(2, 0),),
+            enemies=(EnemyState(slot=1, type_id=2, position=GridPosition(0, 1), hp=1, state=0, in_bounds=True),),
+            resource_cells=(ResourceCellState(position=GridPosition(2, 0), credits=1),),
+            exit_position=GridPosition(2, 1),
+        ),
+    )
+    siphon_after = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(1, 0),
+            siphons=(GridPosition(2, 0),),
+            enemies=(EnemyState(slot=1, type_id=2, position=GridPosition(0, 1), hp=1, state=0, in_bounds=True),),
+            resource_cells=(ResourceCellState(position=GridPosition(2, 0), credits=1),),
+            exit_position=GridPosition(2, 1),
+        ),
+    )
+    siphon_result = compute_reward(
+        previous_state=siphon_before,
+        current_state=siphon_after,
+        done=False,
+        config=config,
+    )
+    assert siphon_result.breakdown.phase_progress == pytest.approx(1.0)
+    assert siphon_result.breakdown.backtrack_penalty == 0.0
+
+    # 2) Harvest phase (takes priority over enemies once siphons are gone).
+    harvest_before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(0, 0),
+            siphons=(),
+            enemies=(EnemyState(slot=1, type_id=2, position=GridPosition(0, 1), hp=1, state=0, in_bounds=True),),
+            resource_cells=(ResourceCellState(position=GridPosition(2, 0), credits=1),),
+            exit_position=GridPosition(2, 1),
+        ),
+    )
+    harvest_after = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(EnemyState(slot=1, type_id=2, position=GridPosition(0, 1), hp=1, state=0, in_bounds=True),),
+            resource_cells=(ResourceCellState(position=GridPosition(2, 0), credits=1),),
+            exit_position=GridPosition(2, 1),
+        ),
+    )
+    harvest_result = compute_reward(
+        previous_state=harvest_before,
+        current_state=harvest_after,
+        done=False,
+        config=config,
+    )
+    assert harvest_result.breakdown.phase_progress == pytest.approx(1.0)
+    assert harvest_result.breakdown.backtrack_penalty == 0.0
+
+    # 3) Enemy phase.
+    enemy_before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(0, 0),
+            siphons=(),
+            enemies=(EnemyState(slot=1, type_id=3, position=GridPosition(2, 0), hp=1, state=0, in_bounds=True),),
+            exit_position=GridPosition(2, 0),
+        ),
+    )
+    enemy_after = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(EnemyState(slot=1, type_id=3, position=GridPosition(2, 0), hp=1, state=0, in_bounds=True),),
+            exit_position=GridPosition(2, 0),
+        ),
+    )
+    enemy_result = compute_reward(
+        previous_state=enemy_before,
+        current_state=enemy_after,
+        done=False,
+        config=config,
+    )
+    assert enemy_result.breakdown.phase_progress == pytest.approx(1.0)
+    assert enemy_result.breakdown.backtrack_penalty == 0.0
+
+    # 4) Exit phase.
+    exit_before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(0, 0),
+            siphons=(),
+            enemies=(),
+            exit_position=GridPosition(2, 0),
+        ),
+    )
+    exit_after = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=1,
+            player_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(),
+            exit_position=GridPosition(2, 0),
+        ),
+    )
+    exit_result = compute_reward(
+        previous_state=exit_before,
+        current_state=exit_after,
+        done=False,
+        config=config,
+    )
+    assert exit_result.breakdown.phase_progress == pytest.approx(1.0)
+    assert exit_result.breakdown.backtrack_penalty == 0.0
+
+
+def test_compute_reward_adds_sector_advance_reward_for_positive_deltas_only() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            energy_delta=0.0,
+            score_delta=0.0,
+            siphon_collected=0.0,
+            enemy_damaged=0.0,
+            enemy_cleared=0.0,
+            phase_progress=0.0,
+            backtrack_penalty=0.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+            safe_tile_bonus=0.0,
+            danger_tile_penalty=0.0,
+            resource_proximity=0.0,
+            prog_collected_base=0.0,
+            points_collected=0.0,
+            damage_taken_penalty=0.0,
+            sector_advance=1.25,
+        ),
+        reward_clip_abs=100.0,
+    )
+
+    before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        extra_fields={"current_sector": _ok_field(0)},
+    )
+    after_advance = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        extra_fields={"current_sector": _ok_field(2)},
+    )
+    after_regress = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        extra_fields={"current_sector": _ok_field(0)},
+    )
+
+    advance_result = compute_reward(
+        previous_state=before,
+        current_state=after_advance,
+        done=False,
+        config=config,
+    )
+    regress_result = compute_reward(
+        previous_state=after_advance,
+        current_state=after_regress,
+        done=False,
+        config=config,
+    )
+
+    assert advance_result.breakdown.sector_advance == pytest.approx(2.5)
+    assert regress_result.breakdown.sector_advance == 0.0
+
+
+def test_compute_reward_applies_map_clear_bonus_only_on_entering_cleared_exit() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            energy_delta=0.0,
+            score_delta=0.0,
+            siphon_collected=0.0,
+            enemy_damaged=0.0,
+            enemy_cleared=0.0,
+            phase_progress=0.0,
+            backtrack_penalty=0.0,
+            map_clear_bonus=8.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+            safe_tile_bonus=0.0,
+            danger_tile_penalty=0.0,
+            resource_proximity=0.0,
+            prog_collected_base=0.0,
+            points_collected=0.0,
+            damage_taken_penalty=0.0,
+            sector_advance=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(),
+        ),
+    )
+    at_exit = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(1, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(),
+        ),
+    )
+
+    first = compute_reward(
+        previous_state=before,
+        current_state=at_exit,
+        done=False,
+        config=config,
+    )
+    second = compute_reward(
+        previous_state=at_exit,
+        current_state=at_exit,
+        done=False,
+        config=config,
+    )
+
+    assert first.breakdown.map_clear_bonus == pytest.approx(8.0)
+    assert second.breakdown.map_clear_bonus == 0.0

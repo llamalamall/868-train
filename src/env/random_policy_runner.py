@@ -119,6 +119,7 @@ def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
             prog_collected_base=float(args.reward_prog_collected_base),
             points_collected=float(args.reward_points_collected),
             damage_taken_penalty=float(args.reward_damage_taken_penalty),
+            sector_advance=float(args.reward_sector_advance),
         ),
         reward_clip_abs=float(args.reward_clip_abs),
     )
@@ -164,6 +165,7 @@ def _build_reward_fn(
             "prog_collected": result.breakdown.prog_collected,
             "points_collected": result.breakdown.points_collected,
             "damage_taken_penalty": result.breakdown.damage_taken_penalty,
+            "sector_advance": result.breakdown.sector_advance,
             "total": result.total,
         }
         if print_breakdown:
@@ -175,6 +177,7 @@ def _build_reward_fn(
                 "phase={phase:.3f} backtrack={backtrack:.3f} "
                 "safe={safe:.3f} danger={danger:.3f} proximity={proximity:.3f} "
                 "prog={prog:.3f} points={points:.3f} damage_taken={damage:.3f} "
+                "sector_advance={sector_advance:.3f} "
                 "premature_exit={premature:.3f} invalid={invalid:.3f} "
                 "fail_penalty={fail_penalty:.3f} done={done}".format(
                     step=info.get("step_index"),
@@ -197,6 +200,7 @@ def _build_reward_fn(
                     prog=result.breakdown.prog_collected,
                     points=result.breakdown.points_collected,
                     damage=result.breakdown.damage_taken_penalty,
+                    sector_advance=result.breakdown.sector_advance,
                     premature=result.breakdown.premature_exit_penalty,
                     invalid=result.breakdown.invalid_action_penalty,
                     fail_penalty=result.breakdown.fail_penalty,
@@ -235,6 +239,7 @@ def format_reward_breakdown_line(event: dict[str, Any]) -> str:
         ("phase_progress", "phase"),
         ("backtrack_penalty", "backtrack"),
         ("map_clear_bonus", "map_clear"),
+        ("sector_advance", "sector_advance"),
         ("safe_tile_bonus", "safe"),
         ("danger_tile_penalty", "danger"),
         ("resource_proximity", "proximity"),
@@ -503,6 +508,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=default_weights.damage_taken_penalty,
         help="Penalty multiplier applied to negative health deltas.",
+    )
+    parser.add_argument(
+        "--reward-sector-advance",
+        type=float,
+        default=default_weights.sector_advance,
+        help="Reward per positive sector index transition.",
     )
     parser.add_argument(
         "--reward-clip-abs",

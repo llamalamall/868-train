@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.controller.action_api import ActionConfig, ActionTimings
 from src.env.game_env import (
     GameEnv,
     GameEnvConfig,
@@ -15,6 +16,7 @@ from src.env.game_env import (
     ResetTimeoutError,
     StateDesyncError,
     StepTimeoutError,
+    _clamp_action_press_duration_to_game_tick,
     run_random_policy,
 )
 from src.env.reset_manager import NoopResetManager
@@ -159,6 +161,33 @@ class FakeClock:
 
     def sleep(self, duration_seconds: float) -> None:
         self.now += max(float(duration_seconds), 0.0)
+
+
+def test_clamp_action_press_duration_to_game_tick_caps_long_press() -> None:
+    base = ActionConfig(
+        timings=ActionTimings(press_duration_seconds=0.05),
+    )
+
+    clamped = _clamp_action_press_duration_to_game_tick(
+        action_config=base,
+        game_tick_ms=8,
+    )
+
+    assert clamped.timings.press_duration_seconds == pytest.approx(0.008)
+
+
+def test_clamp_action_press_duration_to_game_tick_keeps_short_press() -> None:
+    base = ActionConfig(
+        timings=ActionTimings(press_duration_seconds=0.004),
+    )
+
+    clamped = _clamp_action_press_duration_to_game_tick(
+        action_config=base,
+        game_tick_ms=8,
+    )
+
+    assert clamped is base
+    assert clamped.timings.press_duration_seconds == pytest.approx(0.004)
 
 
 def test_game_env_reset_and_step_contract() -> None:

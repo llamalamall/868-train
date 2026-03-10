@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import os
 import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -49,7 +50,7 @@ def _format_monitor_actions(actions: object, *, limit: int = 8) -> str:
 
 
 _FAIL_TERMINAL_REASON_TOKENS: tuple[str, ...] = ("fail", "loss", "dead", "start_screen")
-_APP_SAVE_FOLDER_NAME = "868-hack"
+_APP_SAVE_FOLDER_NAME = "868-HACK"
 _APP_SAVE_FILE_NAME = "savegame_868"
 
 
@@ -153,9 +154,15 @@ def _build_parser() -> argparse.ArgumentParser:
         "--restore-save-file",
         default=None,
         help=(
-            "Optional source save file to restore after each terminal fail state. "
+            "Optional source save file to restore before each new-game confirm/reset action. "
             "When set, the file is copied to %APPDATA%\\868-hack\\savegame_868."
         ),
+    )
+    parser.add_argument(
+        "--restore-save-delay",
+        type=float,
+        default=0.35,
+        help="Delay in seconds after restoring save file before the next episode reset/new game.",
     )
     parser.add_argument(
         "--reset-sequence",
@@ -447,6 +454,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Penalty multiplier applied to negative health deltas.",
     )
     parser.add_argument(
+        "--reward-sector-advance",
+        type=float,
+        default=default_weights.sector_advance,
+        help="Reward per positive sector index transition.",
+    )
+    parser.add_argument(
         "--reward-clip-abs",
         type=float,
         default=5.0,
@@ -470,6 +483,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--checkpoint-every must be >= 0.")
     if args.mode == "eval" and not args.checkpoint:
         parser.error("--checkpoint is required when --mode=eval.")
+    if float(args.restore_save_delay) < 0:
+        parser.error("--restore-save-delay must be >= 0.")
     restore_source = _resolve_restore_save_source_path(args)
     if restore_source is not None:
         if not restore_source.exists():
@@ -581,19 +596,38 @@ def main() -> None:
 
     checkpoint_path = _resolve_checkpoint_path(args)
     restore_save_source = _resolve_restore_save_source_path(args)
+    restore_save_delay_seconds = max(float(args.restore_save_delay), 0.0)
     restore_save_target = (
         _default_game_save_target_path()
         if restore_save_source is not None
         else None
     )
-    restored_fail_episodes: set[str] = set()
     if restore_save_source is not None and restore_save_target is not None:
         print(
-            "savegame_restore_enabled\tsource={source}\ttarget={target}".format(
+            "savegame_restore_enabled\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
                 source=restore_save_source,
                 target=restore_save_target,
+                delay=restore_save_delay_seconds,
             )
         )
+
+    def _restore_save_before_reset() -> None:
+        if restore_save_source is None or restore_save_target is None:
+            return
+        _restore_selected_save_file(
+            source_path=restore_save_source,
+            target_path=restore_save_target,
+        )
+        print(
+            "savegame_restored_before_reset\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+        if restore_save_delay_seconds > 0:
+            time.sleep(restore_save_delay_seconds)
+
     try:
         env = GameEnv.from_live_process(
             executable_name=args.exe,
@@ -615,39 +649,17 @@ def main() -> None:
                 args.movement_keys,
                 include_prog_actions=bool(args.prog_actions),
             ),
+            pre_reset_hook=(
+                _restore_save_before_reset
+                if restore_save_source is not None and restore_save_target is not None
+                else None
+            ),
             reward_fn=reward_fn,
             game_tick_ms=int(args.game_tick_ms),
         )
         tui.start()
 
-        def _maybe_restore_save_on_fail(event: dict[str, Any]) -> None:
-            if restore_save_source is None or restore_save_target is None:
-                return
-            if not _event_indicates_fail_terminal(event):
-                return
-
-            episode_id = str(event.get("episode_id") or "").strip()
-            if episode_id and episode_id in restored_fail_episodes:
-                return
-
-            _restore_selected_save_file(
-                source_path=restore_save_source,
-                target_path=restore_save_target,
-            )
-            if episode_id:
-                restored_fail_episodes.add(episode_id)
-
-            terminal_reason = str(event.get("terminal_reason") or "")
-            print(
-                "savegame_restored\tsource={source}\ttarget={target}\tterminal={terminal}".format(
-                    source=restore_save_source,
-                    target=restore_save_target,
-                    terminal=(terminal_reason or "-"),
-                )
-            )
-
         def _on_step(event: dict[str, Any]) -> None:
-            _maybe_restore_save_on_fail(event)
             if not monitor_enabled:
                 return
             tui.consume_manual_step_flag()

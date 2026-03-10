@@ -9,8 +9,7 @@
             "type": "debugpy",
             "request": "launch",
             "program": "${workspaceFolder}/src/gui/dqn_runner_gui.py",
-            "console": "integratedTerminal",
-            "args": "${command:pickArgs}"
+            "console": "integratedTerminal"
         },
         {
             "name": "868-train",

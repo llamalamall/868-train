@@ -211,6 +211,7 @@ def test_compare_parser_defaults_window_targeted_input_without_focus() -> None:
     assert args.tui is True
     assert args.reward_energy_delta == 0.02
     assert args.reward_score_delta == 0.01
+    assert args.reward_sector_advance == 1.0
 
 
 def test_run_parser_defaults_window_targeted_input_and_focus() -> None:

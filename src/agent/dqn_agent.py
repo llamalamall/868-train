@@ -37,7 +37,7 @@ class DQNConfig:
     epsilon_start: float = 0.8
     epsilon_end: float = 0.05
     epsilon_decay_steps: int = 5_000
-    feature_count: int = 22
+    feature_count: int = 23
     feature_clip_abs: float = 100.0
     max_gradient_norm: float = 10.0
 
@@ -262,7 +262,7 @@ class _LinearQModel:
 class DQNAgent:
     """Simple DQN agent for compact vector state spaces."""
 
-    CHECKPOINT_VERSION = 1
+    CHECKPOINT_VERSION = 2
 
     def __init__(
         self,
@@ -680,6 +680,7 @@ def state_to_feature_vector(
         usable_prog_slots = len(state.inventory.raw_prog_ids[:10])
     else:
         usable_prog_slots = 0
+    sector_progress = _normalized_sector_progress(state)
 
     features = (
         _scaled_numeric(state.health.value if state.health.status == "ok" else None, scale=10.0),
@@ -704,6 +705,7 @@ def state_to_feature_vector(
         phase_enemy,
         phase_exit,
         float(min(max(usable_prog_slots, 0), 10)) / 10.0,
+        sector_progress,
     )
     return tuple(_clip_feature(value, clip_abs=clip_abs) for value in features)
 
@@ -777,6 +779,20 @@ def _clip_feature(value: float, *, clip_abs: float) -> float:
     if value < -clip_abs:
         return -clip_abs
     return value
+
+
+def _normalized_sector_progress(state: GameStateSnapshot) -> float:
+    sector_field = state.extra_fields.get("current_sector")
+    if sector_field is None or sector_field.status != "ok":
+        return 0.0
+    value = sector_field.value
+    if value is None or isinstance(value, bool):
+        return 0.0
+    try:
+        normalized = (float(value) + 1.0) / 8.0
+    except (TypeError, ValueError):
+        return 0.0
+    return max(0.0, min(1.0, normalized))
 
 
 def _is_in_bounds(position: GridPosition, *, width: int, height: int) -> bool:
