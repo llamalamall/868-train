@@ -270,6 +270,9 @@ def test_dqn_feature_vector_uses_wall_aware_shortest_path_distances() -> None:
     # Shortest path detours around the wall: distance is 4 on a map with max_distance=3.
     assert features[11] == 4.0 / 3.0  # exit_distance
     assert features[14] == 4.0 / 3.0  # nearest_siphon
+    assert features[16] == 4.0 / 3.0  # objective_distance
+    assert features[17] == 0.0  # objective_step_dx
+    assert features[18] == 1.0  # objective_step_dy
 
 
 def test_dqn_feature_vector_counts_type_zero_enemies_for_objective_features() -> None:
@@ -302,7 +305,7 @@ def test_dqn_feature_vector_counts_type_zero_enemies_for_objective_features() ->
     features = state_to_feature_vector(state)
 
     assert features[13] > 0.0  # enemy_count
-    assert features[19] == 1.0  # phase_enemy
+    assert features[20] == 1.0  # phase_enemy
 
 
 def test_dqn_feature_vector_uses_relative_distances_for_high_value_targets() -> None:
@@ -356,7 +359,7 @@ def test_dqn_feature_vector_uses_relative_distances_for_high_value_targets() -> 
     assert features[11] == 5.0 / max_distance  # exit_distance
 
 
-def test_dqn_feature_vector_includes_phase_objective_direction_components() -> None:
+def test_dqn_feature_vector_includes_phase_objective_distance_and_next_step_direction() -> None:
     state = GameStateSnapshot(
         timestamp_utc="2026-03-09T00:00:00+00:00",
         health=_field(10),
@@ -385,8 +388,9 @@ def test_dqn_feature_vector_includes_phase_objective_direction_components() -> N
 
     features = state_to_feature_vector(state)
 
-    assert features[16] == pytest.approx(0.5)   # objective_dx: (3 - 1) / (width - 1)
-    assert features[17] == pytest.approx(0.75)  # objective_dy: (4 - 1) / (height - 1)
+    assert features[16] == pytest.approx(5.0 / 8.0)  # objective_distance
+    assert features[17] == pytest.approx(0.0)  # objective_step_dx
+    assert features[18] == pytest.approx(1.0)  # objective_step_dy
 
 
 def test_dqn_feature_vector_includes_normalized_sector_progress() -> None:
@@ -412,7 +416,7 @@ def test_dqn_feature_vector_includes_normalized_sector_progress() -> None:
     features_sector_one = state_to_feature_vector(state_sector_one)
     features_sector_eight = state_to_feature_vector(state_sector_eight)
 
-    assert len(features_sector_one) == 23
+    assert len(features_sector_one) == 24
     assert features_sector_one[-1] == pytest.approx(0.125)
     assert features_sector_eight[-1] == pytest.approx(1.0)
 
@@ -430,5 +434,5 @@ def test_dqn_feature_vector_sets_sector_progress_to_zero_when_missing() -> None:
 
     features = state_to_feature_vector(state)
 
-    assert len(features) == 23
+    assert len(features) == 24
     assert features[-1] == 0.0

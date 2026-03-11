@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections import deque
+import heapq
 import logging
 import random
 from dataclasses import dataclass, field
@@ -1432,15 +1432,21 @@ def _shortest_path_first_action(
         return None
     if not _is_in_bounds(target, width=width, height=height):
         return None
-    if target in walls:
+    if start in walls or target in walls:
         return None
 
-    queue: deque[GridPosition] = deque([start])
-    visited: set[GridPosition] = {start}
+    open_heap: list[tuple[int, int, int, GridPosition]] = []
+    push_counter = 0
+    start_h = _manhattan(start, target)
+    heapq.heappush(open_heap, (start_h, 0, push_counter, start))
+    best_cost: dict[GridPosition, int] = {start: 0}
     parent: dict[GridPosition, tuple[GridPosition, str]] = {}
 
-    while queue:
-        current = queue.popleft()
+    while open_heap:
+        _, current_cost, _, current = heapq.heappop(open_heap)
+        known_cost = best_cost.get(current)
+        if known_cost is None or current_cost != known_cost:
+            continue
         if current == target:
             break
         if current == start:
@@ -1452,11 +1458,17 @@ def _shortest_path_first_action(
             candidate = GridPosition(x=current.x + dx, y=current.y + dy)
             if not _is_in_bounds(candidate, width=width, height=height):
                 continue
-            if candidate in walls or candidate in visited:
+            if candidate in walls:
                 continue
-            visited.add(candidate)
+            tentative_cost = current_cost + 1
+            candidate_best = best_cost.get(candidate)
+            if candidate_best is not None and tentative_cost >= candidate_best:
+                continue
+            best_cost[candidate] = tentative_cost
             parent[candidate] = (current, action)
-            queue.append(candidate)
+            push_counter += 1
+            priority = tentative_cost + _manhattan(candidate, target)
+            heapq.heappush(open_heap, (priority, tentative_cost, push_counter, candidate))
 
     if target not in parent:
         return None

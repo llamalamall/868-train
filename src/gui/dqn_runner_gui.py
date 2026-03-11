@@ -280,6 +280,17 @@ def _run_dqn_preset_overrides() -> dict[str, dict[str, object]]:
             "reward_points_collected": 0.004,
             "reward_phase_progress": 0.2,
         },
+        "phase progression (no enemies)": {
+            "mode": "train",
+            "no_enemies": True,
+            "episodes": 250,
+            "reward_enemy_damaged": 0.0,
+            "reward_enemy_cleared": 0.0,
+            "reward_phase_progress": 0.8,
+            "reward_backtrack_penalty": 0.8,
+            "reward_sector_advance": 1.5,
+            "reward_resource_proximity": 0.02,
+        },
         "smoke test - siphon objective": _build_smoke_test_reward_profile(
             reward_siphon_collected=default_weights.siphon_collected,
         ),

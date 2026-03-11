@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter, deque
+import heapq
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -303,23 +304,37 @@ def _shortest_path_distance(state: GameStateSnapshot, *, target: GridPosition) -
         return 0
 
     walls = _wall_positions(state)
-    if target in walls:
+    if start in walls or target in walls:
         return None
 
-    queue: deque[tuple[GridPosition, int]] = deque([(start, 0)])
-    visited: set[GridPosition] = {start}
-    while queue:
-        current, distance = queue.popleft()
+    open_heap: list[tuple[int, int, int, GridPosition]] = []
+    push_counter = 0
+    start_h = _manhattan(start, target)
+    heapq.heappush(open_heap, (start_h, 0, push_counter, start))
+    best_cost: dict[GridPosition, int] = {start: 0}
+
+    while open_heap:
+        _, current_cost, _, current = heapq.heappop(open_heap)
+        known_cost = best_cost.get(current)
+        if known_cost is None or current_cost != known_cost:
+            continue
+        if current == target:
+            return current_cost
+
         for dx, dy in _MOVE_VECTORS:
             candidate = GridPosition(x=current.x + dx, y=current.y + dy)
             if not _is_in_bounds(candidate, width=width, height=height):
                 continue
-            if candidate in walls or candidate in visited:
+            if candidate in walls:
                 continue
-            if candidate == target:
-                return distance + 1
-            visited.add(candidate)
-            queue.append((candidate, distance + 1))
+            tentative_cost = current_cost + 1
+            candidate_best = best_cost.get(candidate)
+            if candidate_best is not None and tentative_cost >= candidate_best:
+                continue
+            best_cost[candidate] = tentative_cost
+            push_counter += 1
+            priority = tentative_cost + _manhattan(candidate, target)
+            heapq.heappush(open_heap, (priority, tentative_cost, push_counter, candidate))
     return None
 
 

@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import json
+import heapq
 import math
 import random
-from collections import deque
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Sequence
@@ -37,7 +37,7 @@ class DQNConfig:
     epsilon_start: float = 0.8
     epsilon_end: float = 0.05
     epsilon_decay_steps: int = 5_000
-    feature_count: int = 23
+    feature_count: int = 24
     feature_clip_abs: float = 100.0
     max_gradient_norm: float = 10.0
 
@@ -73,6 +73,12 @@ class DQNTrainingState:
     optimization_steps: int
     episodes_seen: int
     last_loss: float | None
+
+
+@dataclass(frozen=True)
+class _PathRoute:
+    distance: int
+    first_step: GridPosition | None
 
 
 class ReplayBuffer:
@@ -588,8 +594,6 @@ def state_to_feature_vector(
     map_known = state.map.status == "ok"
     width = int(state.map.width) if map_known else 1
     height = int(state.map.height) if map_known else 1
-    max_x = max(width - 1, 1)
-    max_y = max(height - 1, 1)
     max_distance = max(width + height - 2, 1)
 
     player = state.map.player_position if map_known else None
@@ -660,17 +664,19 @@ def state_to_feature_vector(
         enemy_positions=enemy_positions,
         exit_position=exit_position,
     )
-    objective_dx = _relative_axis_delta(
-        player=player,
-        target=phase_target_position,
-        axis="x",
-        axis_scale=max_x,
+    phase_target_route = (
+        _shortest_path_route(state, target=phase_target_position)
+        if phase_target_position is not None
+        else None
     )
-    objective_dy = _relative_axis_delta(
+    objective_distance = (
+        float(phase_target_route.distance) / float(max_distance)
+        if player is not None and phase_target_route is not None
+        else 1.0
+    )
+    objective_step_dx, objective_step_dy = _route_next_step_direction(
         player=player,
-        target=phase_target_position,
-        axis="y",
-        axis_scale=max_y,
+        route=phase_target_route,
     )
 
     mask = state.prog_slots_available_mask
@@ -699,8 +705,9 @@ def state_to_feature_vector(
         float(len(enemy_positions)) / 8.0,
         float(nearest_siphon),
         float(nearest_enemy),
-        float(objective_dx),
-        float(objective_dy),
+        float(objective_distance),
+        float(objective_step_dx),
+        float(objective_step_dy),
         phase_siphon,
         phase_enemy,
         phase_exit,
@@ -808,7 +815,15 @@ def _wall_positions(state: GameStateSnapshot) -> set[GridPosition]:
     return {wall.position for wall in state.map.walls}
 
 
-def _shortest_path_distance(state: GameStateSnapshot, *, target: GridPosition | None) -> int | None:
+def _manhattan_distance(a: GridPosition, b: GridPosition) -> int:
+    return abs(a.x - b.x) + abs(a.y - b.y)
+
+
+def _shortest_path_route(
+    state: GameStateSnapshot,
+    *,
+    target: GridPosition | None,
+) -> _PathRoute | None:
     if state.map.status != "ok" or state.map.player_position is None or target is None:
         return None
     width = int(state.map.width)
@@ -820,27 +835,61 @@ def _shortest_path_distance(state: GameStateSnapshot, *, target: GridPosition | 
 
     start = state.map.player_position
     if start == target:
-        return 0
+        return _PathRoute(distance=0, first_step=None)
 
     walls = _wall_positions(state)
-    if target in walls:
+    if start in walls or target in walls:
         return None
 
-    queue: deque[tuple[GridPosition, int]] = deque([(start, 0)])
-    visited: set[GridPosition] = {start}
-    while queue:
-        current, distance = queue.popleft()
+    open_heap: list[tuple[int, int, int, GridPosition]] = []
+    push_counter = 0
+    start_h = _manhattan_distance(start, target)
+    heapq.heappush(open_heap, (start_h, 0, push_counter, start))
+    g_score: dict[GridPosition, int] = {start: 0}
+    parent: dict[GridPosition, GridPosition] = {}
+
+    while open_heap:
+        _, current_g, _, current = heapq.heappop(open_heap)
+        known_g = g_score.get(current)
+        if known_g is None or current_g != known_g:
+            continue
+        if current == target:
+            first_step: GridPosition | None = None
+            if current_g > 0:
+                cursor = target
+                while True:
+                    previous = parent.get(cursor)
+                    if previous is None:
+                        break
+                    if previous == start:
+                        first_step = cursor
+                        break
+                    cursor = previous
+            return _PathRoute(distance=current_g, first_step=first_step)
+
         for dx, dy in _MOVE_VECTORS:
             candidate = GridPosition(x=current.x + dx, y=current.y + dy)
             if not _is_in_bounds(candidate, width=width, height=height):
                 continue
-            if candidate in walls or candidate in visited:
+            if candidate in walls:
                 continue
-            if candidate == target:
-                return distance + 1
-            visited.add(candidate)
-            queue.append((candidate, distance + 1))
+            tentative_g = current_g + 1
+            candidate_best = g_score.get(candidate)
+            if candidate_best is not None and tentative_g >= candidate_best:
+                continue
+            g_score[candidate] = tentative_g
+            parent[candidate] = current
+            push_counter += 1
+            f_score = tentative_g + _manhattan_distance(candidate, target)
+            heapq.heappush(open_heap, (f_score, tentative_g, push_counter, candidate))
     return None
+
+
+def _shortest_path_distance(state: GameStateSnapshot, *, target: GridPosition | None) -> int | None:
+    route = _shortest_path_route(state, target=target)
+    if route is None:
+        return None
+    return route.distance
 
 
 def _nearest_path_distance_to_targets(
@@ -902,25 +951,22 @@ def _phase_target_position(
         return _nearest_reachable_target_position(state=state, targets=enemy_positions)
     if exit_position is None:
         return None
-    if _shortest_path_distance(state, target=exit_position) is None:
+    if _shortest_path_route(state, target=exit_position) is None:
         return None
     return exit_position
 
 
-def _relative_axis_delta(
+def _route_next_step_direction(
     *,
     player: GridPosition | None,
-    target: GridPosition | None,
-    axis: str,
-    axis_scale: int,
-) -> float:
-    if player is None or target is None or axis_scale <= 0:
-        return 0.0
-    if axis == "x":
-        return float(target.x - player.x) / float(axis_scale)
-    if axis == "y":
-        return float(target.y - player.y) / float(axis_scale)
-    raise ValueError(f"Unsupported axis '{axis}'.")
+    route: _PathRoute | None,
+) -> tuple[float, float]:
+    if player is None or route is None or route.first_step is None:
+        return (0.0, 0.0)
+    step = route.first_step
+    dx = max(-1.0, min(1.0, float(step.x - player.x)))
+    dy = max(-1.0, min(1.0, float(step.y - player.y)))
+    return (dx, dy)
 
 
 def _distance_to_highest_resource_tile(
