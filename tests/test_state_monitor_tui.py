@@ -226,7 +226,7 @@ def test_summarize_board_state_uses_enemy_names_when_provided() -> None:
     assert summary == "board progs=0 points=0 credits=0 energy=0 enemies=virus(2):2,daemon(7):1"
 
 
-def test_summarize_board_state_uses_enemy_overrides_and_ignores_type_zero() -> None:
+def test_summarize_board_state_uses_enemy_overrides_and_includes_type_zero() -> None:
     map_state = MapState(
         status="ok",
         enemies=(
@@ -276,7 +276,7 @@ def test_summarize_board_state_uses_enemy_overrides_and_ignores_type_zero() -> N
     summary = summarize_board_state(map_state, enemy_name_by_id={2: "wrong", 3: "wrong"})
     assert summary == (
         "board progs=0 points=0 credits=0 energy=0 "
-        "enemies=virus(2):1,classic(3):1,glitch(4):1,cryptog(5):1"
+        "enemies=0:1,virus(2):1,classic(3):1,glitch(4):1,cryptog(5):1"
     )
 
 

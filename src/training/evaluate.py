@@ -240,7 +240,27 @@ def _count_siphons(state: GameStateSnapshot) -> int | None:
 def _count_live_enemies(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
-    return sum(1 for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    return sum(1 for enemy in state.map.enemies if enemy.in_bounds)
+
+
+def _enemy_identity_counts(state: GameStateSnapshot) -> Counter[int] | None:
+    if state.map.status != "ok":
+        return None
+    return Counter(int(enemy.slot) for enemy in state.map.enemies if enemy.in_bounds)
+
+
+def _enemy_cleared_delta(*, previous: GameStateSnapshot, current: GameStateSnapshot) -> int:
+    previous_counts = _enemy_identity_counts(previous)
+    current_counts = _enemy_identity_counts(current)
+    if previous_counts is None or current_counts is None:
+        return 0
+
+    cleared = 0
+    for enemy_id, previous_count in previous_counts.items():
+        current_count = current_counts.get(enemy_id, 0)
+        if previous_count > current_count:
+            cleared += previous_count - current_count
+    return int(cleared)
 
 
 def _state_extra_float(state: GameStateSnapshot, *, key: str) -> float | None:
@@ -318,7 +338,7 @@ def _player_tile_threatened(state: GameStateSnapshot) -> bool | None:
     if state.map.status != "ok" or state.map.player_position is None:
         return None
     player = state.map.player_position
-    enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds)
     if not enemies:
         return False
     return any(
@@ -546,8 +566,7 @@ def evaluate_dqn_checkpoint(
 
                 previous_enemies = _count_live_enemies(previous_state)
                 current_enemies = _count_live_enemies(state)
-                if previous_enemies is not None and current_enemies is not None:
-                    enemies_cleared += max(previous_enemies - current_enemies, 0)
+                enemies_cleared += _enemy_cleared_delta(previous=previous_state, current=state)
 
                 prog_gains += _prog_gain_delta(previous=previous_state, current=state)
 
@@ -977,6 +996,12 @@ def _add_shared_eval_args(
         help="Reward per siphon removed from map.",
     )
     parser.add_argument(
+        "--reward-enemy-damaged",
+        type=float,
+        default=default_weights.enemy_damaged,
+        help="Reward per enemy HP point reduced when an enemy survives the step.",
+    )
+    parser.add_argument(
         "--reward-enemy-cleared",
         type=float,
         default=default_weights.enemy_cleared,
@@ -986,13 +1011,19 @@ def _add_shared_eval_args(
         "--reward-phase-progress",
         type=float,
         default=default_weights.phase_progress,
-        help="Weight for progress toward active objective (siphon->enemy->exit).",
+        help="Weight for progress toward active objective (siphon->high-priority siphon target->enemy->exit).",
+    )
+    parser.add_argument(
+        "--reward-backtrack-penalty",
+        type=float,
+        default=default_weights.backtrack_penalty,
+        help="Penalty weight for increased distance from the active objective.",
     )
     parser.add_argument(
         "--reward-map-clear-bonus",
         type=float,
         default=default_weights.map_clear_bonus,
-        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+        help="Bonus when player reaches exit after siphons/enemies are cleared and high-priority targets are siphoned.",
     )
     parser.add_argument(
         "--reward-premature-exit-penalty",
@@ -1047,6 +1078,12 @@ def _add_shared_eval_args(
         type=float,
         default=default_weights.damage_taken_penalty,
         help="Penalty multiplier applied to negative health deltas.",
+    )
+    parser.add_argument(
+        "--reward-sector-advance",
+        type=float,
+        default=default_weights.sector_advance,
+        help="Reward per positive sector index transition.",
     )
     parser.add_argument(
         "--reward-clip-abs",

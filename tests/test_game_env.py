@@ -8,6 +8,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.controller.action_api import ActionConfig, ActionTimings
 from src.env.game_env import (
     GameEnv,
     GameEnvConfig,
@@ -15,10 +16,19 @@ from src.env.game_env import (
     ResetTimeoutError,
     StateDesyncError,
     StepTimeoutError,
+    _clamp_action_press_duration_to_game_tick,
     run_random_policy,
 )
 from src.env.reset_manager import NoopResetManager
-from src.state.schema import FieldState, GameStateSnapshot, GridPosition, InventoryState, MapCellState, MapState
+from src.state.schema import (
+    EnemyState,
+    FieldState,
+    GameStateSnapshot,
+    GridPosition,
+    InventoryState,
+    MapCellState,
+    MapState,
+)
 
 
 def _field(value: object, *, status: str = "ok") -> FieldState:
@@ -151,6 +161,33 @@ class FakeClock:
 
     def sleep(self, duration_seconds: float) -> None:
         self.now += max(float(duration_seconds), 0.0)
+
+
+def test_clamp_action_press_duration_to_game_tick_caps_long_press() -> None:
+    base = ActionConfig(
+        timings=ActionTimings(press_duration_seconds=0.05),
+    )
+
+    clamped = _clamp_action_press_duration_to_game_tick(
+        action_config=base,
+        game_tick_ms=8,
+    )
+
+    assert clamped.timings.press_duration_seconds == pytest.approx(0.008)
+
+
+def test_clamp_action_press_duration_to_game_tick_keeps_short_press() -> None:
+    base = ActionConfig(
+        timings=ActionTimings(press_duration_seconds=0.004),
+    )
+
+    clamped = _clamp_action_press_duration_to_game_tick(
+        action_config=base,
+        game_tick_ms=8,
+    )
+
+    assert clamped is base
+    assert clamped.timings.press_duration_seconds == pytest.approx(0.004)
 
 
 def test_game_env_reset_and_step_contract() -> None:
@@ -701,6 +738,28 @@ def test_available_actions_adds_space_only_when_player_can_siphon() -> None:
     assert env.available_actions() == ("space",)
 
 
+def test_available_actions_adds_space_when_adjacent_to_siphon_without_ui_flag() -> None:
+    state = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=3,
+            player_position=GridPosition(0, 0),
+            siphons=(GridPosition(1, 0),),
+        )
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([state]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    assert env.available_actions() == ("move_up", "space")
+
+
 def test_available_actions_allows_space_from_ui_flag_even_when_not_on_tile() -> None:
     state = _snapshot(
         map_state=MapState(
@@ -841,6 +900,61 @@ def test_game_env_marks_premature_exit_attempt_in_step_info() -> None:
     assert info["invalid_action_reason"] is None
 
 
+def test_game_env_premature_exit_counts_type_zero_enemy_as_remaining() -> None:
+    before = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=0,
+                    position=GridPosition(0, 0),
+                    hp=3,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    after = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(1, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(
+                EnemyState(
+                    slot=1,
+                    type_id=0,
+                    position=GridPosition(0, 0),
+                    hp=3,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_right",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    _state, _reward, _done, info = env.step("move_right")
+
+    assert info["premature_exit_attempt"] is True
+
+
 def test_game_env_prog_action_backoff_after_ineffective_attempt() -> None:
     stale = _snapshot(
         map_state=MapState(
@@ -867,3 +981,109 @@ def test_game_env_prog_action_backoff_after_ineffective_attempt() -> None:
     assert info["action_effective"] is False
     assert info["invalid_action_reason"] == "prog_no_effect"
     assert "prog_slot_1" not in env.available_actions()
+
+
+def test_game_env_space_action_is_effective_when_enemy_hp_changes_without_player_movement() -> None:
+    before = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            enemies=(
+                EnemyState(
+                    slot=0,
+                    type_id=1,
+                    position=GridPosition(1, 0),
+                    hp=5,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    after = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            enemies=(
+                EnemyState(
+                    slot=0,
+                    type_id=1,
+                    position=GridPosition(1, 0),
+                    hp=4,
+                    state=0,
+                    in_bounds=True,
+                ),
+            ),
+        ),
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("space",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    _state, _reward, _done, info = env.step("space")
+
+    assert info["action_effective"] is True
+    assert info["invalid_action_reason"] is None
+
+
+def test_game_env_prog_action_is_effective_when_map_cell_state_changes_without_player_movement() -> None:
+    before = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            cells=(
+                MapCellState(
+                    position=GridPosition(0, 0),
+                    cell_type=2,
+                    tile_variant=1,
+                    wall_state=0,
+                    points=3,
+                ),
+            ),
+        ),
+        inventory_state=InventoryState(status="ok", raw_prog_ids=(2,)),
+        energy=10,
+    )
+    after = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            cells=(
+                MapCellState(
+                    position=GridPosition(0, 0),
+                    cell_type=2,
+                    tile_variant=1,
+                    wall_state=0,
+                    points=2,
+                ),
+            ),
+        ),
+        inventory_state=InventoryState(status="ok", raw_prog_ids=(2,)),
+        energy=10,
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("prog_slot_1",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    _state, _reward, _done, info = env.step("prog_slot_1")
+
+    assert info["action_effective"] is True
+    assert info["invalid_action_reason"] is None

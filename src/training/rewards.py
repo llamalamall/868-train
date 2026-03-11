@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import logging
-from collections import Counter, deque
+import heapq
+from collections import Counter
 from dataclasses import dataclass, field
 from typing import Any, Mapping
 
@@ -30,8 +31,10 @@ class RewardWeights:
     energy_delta: float = 0.02
     score_delta: float = 0.01
     siphon_collected: float = 2.50
+    enemy_damaged: float = 0.35
     enemy_cleared: float = 1.50
     phase_progress: float = 0.25
+    backtrack_penalty: float = 0.35
     map_clear_bonus: float = 8.0
     premature_exit_penalty: float = 2.5
     invalid_action_penalty: float = 0.75
@@ -42,6 +45,7 @@ class RewardWeights:
     prog_collected_base: float = 0.5
     points_collected: float = 0.05
     damage_taken_penalty: float = 0.60
+    sector_advance: float = 1.0
 
     @classmethod
     def from_mapping(cls, values: Mapping[str, float]) -> RewardWeights:
@@ -54,8 +58,10 @@ class RewardWeights:
             energy_delta=float(values.get("energy_delta", cls.energy_delta)),
             score_delta=float(values.get("score_delta", cls.score_delta)),
             siphon_collected=float(values.get("siphon_collected", cls.siphon_collected)),
+            enemy_damaged=float(values.get("enemy_damaged", cls.enemy_damaged)),
             enemy_cleared=float(values.get("enemy_cleared", cls.enemy_cleared)),
             phase_progress=float(values.get("phase_progress", cls.phase_progress)),
+            backtrack_penalty=float(values.get("backtrack_penalty", cls.backtrack_penalty)),
             map_clear_bonus=float(values.get("map_clear_bonus", cls.map_clear_bonus)),
             premature_exit_penalty=float(
                 values.get("premature_exit_penalty", cls.premature_exit_penalty)
@@ -70,6 +76,7 @@ class RewardWeights:
             prog_collected_base=float(values.get("prog_collected_base", cls.prog_collected_base)),
             points_collected=float(values.get("points_collected", cls.points_collected)),
             damage_taken_penalty=float(values.get("damage_taken_penalty", cls.damage_taken_penalty)),
+            sector_advance=float(values.get("sector_advance", cls.sector_advance)),
         )
 
 
@@ -103,8 +110,10 @@ class RewardBreakdown:
     energy_change: float
     score_change: float
     siphon_collected: float
+    enemy_damaged: float
     enemy_cleared: float
     phase_progress: float
+    backtrack_penalty: float
     map_clear_bonus: float
     premature_exit_penalty: float
     invalid_action_penalty: float
@@ -115,6 +124,7 @@ class RewardBreakdown:
     prog_collected: float
     points_collected: float
     damage_taken_penalty: float
+    sector_advance: float
 
     @property
     def total(self) -> float:
@@ -127,8 +137,10 @@ class RewardBreakdown:
             + self.energy_change
             + self.score_change
             + self.siphon_collected
+            + self.enemy_damaged
             + self.enemy_cleared
             + self.phase_progress
+            + self.backtrack_penalty
             + self.map_clear_bonus
             + self.premature_exit_penalty
             + self.invalid_action_penalty
@@ -139,6 +151,7 @@ class RewardBreakdown:
             + self.prog_collected
             + self.points_collected
             + self.damage_taken_penalty
+            + self.sector_advance
         )
 
 
@@ -188,7 +201,62 @@ def _count_siphons(state: GameStateSnapshot) -> int | None:
 def _count_live_enemies(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
-    return sum(1 for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    return sum(1 for enemy in state.map.enemies if enemy.in_bounds)
+
+
+def _enemy_identity_counts(state: GameStateSnapshot) -> Counter[int] | None:
+    if state.map.status != "ok":
+        return None
+    return Counter(int(enemy.slot) for enemy in state.map.enemies if enemy.in_bounds)
+
+
+def _enemy_cleared_delta(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> float:
+    previous_counts = _enemy_identity_counts(previous_state)
+    current_counts = _enemy_identity_counts(current_state)
+    if previous_counts is None or current_counts is None:
+        return 0.0
+
+    cleared = 0
+    for enemy_id, previous_count in previous_counts.items():
+        current_count = current_counts.get(enemy_id, 0)
+        if previous_count > current_count:
+            cleared += previous_count - current_count
+    return float(cleared)
+
+
+def _enemy_hp_by_slot(state: GameStateSnapshot) -> dict[int, int] | None:
+    if state.map.status != "ok":
+        return None
+    hp_by_slot: dict[int, int] = {}
+    for enemy in state.map.enemies:
+        if not enemy.in_bounds:
+            continue
+        hp_by_slot[int(enemy.slot)] = max(int(enemy.hp), 0)
+    return hp_by_slot
+
+
+def _enemy_damage_delta(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> float:
+    previous_hp = _enemy_hp_by_slot(previous_state)
+    current_hp = _enemy_hp_by_slot(current_state)
+    if previous_hp is None or current_hp is None:
+        return 0.0
+
+    total_damage = 0
+    for enemy_id, before_hp in previous_hp.items():
+        after_hp = current_hp.get(enemy_id)
+        if after_hp is None:
+            continue
+        if before_hp > after_hp:
+            total_damage += before_hp - after_hp
+    return float(total_damage)
 
 
 def _player_on_exit(state: GameStateSnapshot) -> bool:
@@ -236,23 +304,37 @@ def _shortest_path_distance(state: GameStateSnapshot, *, target: GridPosition) -
         return 0
 
     walls = _wall_positions(state)
-    if target in walls:
+    if start in walls or target in walls:
         return None
 
-    queue: deque[tuple[GridPosition, int]] = deque([(start, 0)])
-    visited: set[GridPosition] = {start}
-    while queue:
-        current, distance = queue.popleft()
+    open_heap: list[tuple[int, int, int, GridPosition]] = []
+    push_counter = 0
+    start_h = _manhattan(start, target)
+    heapq.heappush(open_heap, (start_h, 0, push_counter, start))
+    best_cost: dict[GridPosition, int] = {start: 0}
+
+    while open_heap:
+        _, current_cost, _, current = heapq.heappop(open_heap)
+        known_cost = best_cost.get(current)
+        if known_cost is None or current_cost != known_cost:
+            continue
+        if current == target:
+            return current_cost
+
         for dx, dy in _MOVE_VECTORS:
             candidate = GridPosition(x=current.x + dx, y=current.y + dy)
             if not _is_in_bounds(candidate, width=width, height=height):
                 continue
-            if candidate in walls or candidate in visited:
+            if candidate in walls:
                 continue
-            if candidate == target:
-                return distance + 1
-            visited.add(candidate)
-            queue.append((candidate, distance + 1))
+            tentative_cost = current_cost + 1
+            candidate_best = best_cost.get(candidate)
+            if candidate_best is not None and tentative_cost >= candidate_best:
+                continue
+            best_cost[candidate] = tentative_cost
+            push_counter += 1
+            priority = tentative_cost + _manhattan(candidate, target)
+            heapq.heappush(open_heap, (priority, tentative_cost, push_counter, candidate))
     return None
 
 
@@ -284,12 +366,88 @@ def _nearest_siphon_distance(state: GameStateSnapshot) -> int | None:
     )
 
 
+def _high_priority_prog_ids(config: RewardConfig) -> set[int]:
+    priority_ids: set[int] = set()
+    for prog_id, bonus in config.prog_priority_bonus_by_id.items():
+        try:
+            normalized_prog_id = int(prog_id)
+            normalized_bonus = float(bonus)
+        except (TypeError, ValueError):
+            continue
+        if normalized_bonus > 0.0:
+            priority_ids.add(normalized_prog_id)
+    return priority_ids
+
+
+def _high_priority_siphon_targets(
+    state: GameStateSnapshot,
+    *,
+    config: RewardConfig,
+) -> tuple[GridPosition, ...]:
+    if state.map.status != "ok":
+        return ()
+
+    priority_prog_ids = _high_priority_prog_ids(config)
+    if not priority_prog_ids:
+        return ()
+
+    targets: set[GridPosition] = set()
+    width = int(state.map.width)
+    height = int(state.map.height)
+    walls = _wall_positions(state)
+
+    def _add_adjacent_walkable_positions(position: GridPosition) -> None:
+        for dx, dy in _MOVE_VECTORS:
+            candidate = GridPosition(x=position.x + dx, y=position.y + dy)
+            if not _is_in_bounds(candidate, width=width, height=height):
+                continue
+            if candidate in walls:
+                continue
+            targets.add(candidate)
+
+    for cell in state.map.cells:
+        if cell.prog_id is None or int(cell.prog_id) not in priority_prog_ids:
+            continue
+        if cell.is_wall:
+            _add_adjacent_walkable_positions(cell.position)
+        else:
+            targets.add(cell.position)
+
+    for wall in state.map.walls:
+        if wall.prog_id is None or int(wall.prog_id) not in priority_prog_ids:
+            continue
+        _add_adjacent_walkable_positions(wall.position)
+
+    return tuple(targets)
+
+
+def _has_high_priority_siphon_targets(
+    state: GameStateSnapshot,
+    *,
+    config: RewardConfig,
+) -> bool:
+    return bool(_high_priority_siphon_targets(state, config=config))
+
+
+def _nearest_high_priority_siphon_target_distance(
+    state: GameStateSnapshot,
+    *,
+    config: RewardConfig,
+) -> int | None:
+    if state.map.status != "ok" or state.map.player_position is None:
+        return None
+    targets = _high_priority_siphon_targets(state, config=config)
+    if not targets:
+        return None
+    return _nearest_path_distance_to_targets(state=state, targets=targets)
+
+
 def _nearest_enemy_distance(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
     if state.map.player_position is None:
         return None
-    enemies = tuple(enemy.position for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    enemies = tuple(enemy.position for enemy in state.map.enemies if enemy.in_bounds)
     if not enemies:
         return None
     return _nearest_path_distance_to_targets(
@@ -311,12 +469,23 @@ def _phase_progress_delta(
     *,
     previous_state: GameStateSnapshot,
     current_state: GameStateSnapshot,
+    config: RewardConfig,
 ) -> float:
     previous_siphons = _count_siphons(previous_state)
     previous_enemies = _count_live_enemies(previous_state)
+    previous_high_priority_distance = _nearest_high_priority_siphon_target_distance(
+        previous_state,
+        config=config,
+    )
     if previous_siphons is not None and previous_siphons > 0:
         previous_distance = _nearest_siphon_distance(previous_state)
         current_distance = _nearest_siphon_distance(current_state)
+    elif previous_high_priority_distance is not None:
+        previous_distance = previous_high_priority_distance
+        current_distance = _nearest_high_priority_siphon_target_distance(
+            current_state,
+            config=config,
+        )
     elif previous_enemies is not None and previous_enemies > 0:
         previous_distance = _nearest_enemy_distance(previous_state)
         current_distance = _nearest_enemy_distance(current_state)
@@ -437,10 +606,40 @@ def _player_tile_threatened(state: GameStateSnapshot) -> bool | None:
     if state.map.status != "ok" or state.map.player_position is None:
         return None
     player = state.map.player_position
-    enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    enemies = tuple(enemy for enemy in state.map.enemies if enemy.in_bounds)
     if not enemies:
         return False
     return any(_enemy_can_attack_position(enemy=enemy, player_position=player) for enemy in enemies)
+
+
+def _sector_index(state: GameStateSnapshot) -> int | None:
+    sector = _state_extra_numeric(state, key="current_sector")
+    if sector is None:
+        return None
+    return int(sector)
+
+
+def _is_map_clear_exit_state(
+    state: GameStateSnapshot,
+    *,
+    config: RewardConfig,
+) -> bool:
+    on_exit = _player_on_exit(state)
+    if not on_exit:
+        return False
+    siphons_remaining = _count_siphons(state)
+    enemies_remaining = _count_live_enemies(state)
+    high_priority_targets_remaining = _has_high_priority_siphon_targets(
+        state,
+        config=config,
+    )
+    return (
+        siphons_remaining is not None
+        and siphons_remaining == 0
+        and enemies_remaining is not None
+        and enemies_remaining == 0
+        and not high_priority_targets_remaining
+    )
 
 
 def compute_reward(
@@ -498,9 +697,14 @@ def compute_reward(
 
     previous_enemies = _count_live_enemies(previous_state)
     current_enemies = _count_live_enemies(current_state)
-    enemies_cleared = 0.0
-    if previous_enemies is not None and current_enemies is not None:
-        enemies_cleared = float(max(previous_enemies - current_enemies, 0))
+    enemy_damage = _enemy_damage_delta(
+        previous_state=previous_state,
+        current_state=current_state,
+    )
+    enemies_cleared = _enemy_cleared_delta(
+        previous_state=previous_state,
+        current_state=current_state,
+    )
 
     previous_available_points = _available_points_total(previous_state)
     current_available_points = _available_points_total(current_state)
@@ -527,14 +731,15 @@ def compute_reward(
     energy_component = energy_delta * weights.energy_delta
     score_component = score_delta * weights.score_delta
     siphon_component = siphons_collected * abs(weights.siphon_collected)
+    enemy_damage_component = enemy_damage * abs(weights.enemy_damaged)
     enemy_component = enemies_cleared * abs(weights.enemy_cleared)
-    phase_progress_component = (
-        _phase_progress_delta(
-            previous_state=previous_state,
-            current_state=current_state,
-        )
-        * weights.phase_progress
+    phase_delta = _phase_progress_delta(
+        previous_state=previous_state,
+        current_state=current_state,
+        config=active_config,
     )
+    phase_progress_component = max(phase_delta, 0.0) * abs(weights.phase_progress)
+    backtrack_component = -max(-phase_delta, 0.0) * abs(weights.backtrack_penalty)
     proximity_component = harvest_progress * abs(weights.resource_proximity)
     prog_component = _prog_gain_reward(
         previous_state=previous_state,
@@ -546,16 +751,19 @@ def compute_reward(
     damage_taken_component = (
         -abs(health_delta) * abs(weights.damage_taken_penalty) if health_delta < 0 else 0.0
     )
+    previous_sector = _sector_index(previous_state)
+    current_sector = _sector_index(current_state)
+    sector_delta = 0.0
+    if previous_sector is not None and current_sector is not None and current_sector > previous_sector:
+        sector_delta = float(current_sector - previous_sector)
+    sector_advance_component = sector_delta * abs(weights.sector_advance)
 
-    on_exit_now = _player_on_exit(current_state)
-    map_cleared = (
-        on_exit_now
-        and current_siphons is not None
-        and current_siphons == 0
-        and current_enemies is not None
-        and current_enemies == 0
+    map_clear_component = (
+        abs(weights.map_clear_bonus)
+        if _is_map_clear_exit_state(current_state, config=active_config)
+        and not _is_map_clear_exit_state(previous_state, config=active_config)
+        else 0.0
     )
-    map_clear_component = abs(weights.map_clear_bonus) if map_cleared else 0.0
 
     premature_exit_attempt = bool(info_payload.get("premature_exit_attempt", False))
     premature_exit_component = (
@@ -579,8 +787,10 @@ def compute_reward(
         energy_change=energy_component,
         score_change=score_component,
         siphon_collected=siphon_component,
+        enemy_damaged=enemy_damage_component,
         enemy_cleared=enemy_component,
         phase_progress=phase_progress_component,
+        backtrack_penalty=backtrack_component,
         map_clear_bonus=map_clear_component,
         premature_exit_penalty=premature_exit_component,
         invalid_action_penalty=invalid_action_component,
@@ -591,18 +801,20 @@ def compute_reward(
         prog_collected=prog_component,
         points_collected=points_collected_component,
         damage_taken_penalty=damage_taken_component,
+        sector_advance=sector_advance_component,
     )
     unclipped_total = breakdown.total
     total = _clip(unclipped_total, clip_abs=float(active_config.reward_clip_abs))
 
     active_logger.debug(
         "Reward breakdown survival=%.4f step_penalty=%.4f health_change=%.4f currency_change=%.4f "
-        "energy_change=%.4f score_change=%.4f siphon_collected=%.4f enemy_cleared=%.4f "
-        "phase_progress=%.4f map_clear_bonus=%.4f premature_exit_penalty=%.4f "
+        "energy_change=%.4f score_change=%.4f siphon_collected=%.4f enemy_damaged=%.4f enemy_cleared=%.4f "
+        "phase_progress=%.4f backtrack_penalty=%.4f map_clear_bonus=%.4f premature_exit_penalty=%.4f "
         "invalid_action_penalty=%.4f fail_penalty=%.4f safe_tile_bonus=%.4f danger_tile_penalty=%.4f "
         "resource_proximity=%.4f prog_collected=%.4f points_collected=%.4f damage_taken_penalty=%.4f "
+        "sector_advance=%.4f "
         "total=%.4f unclipped_total=%.4f done=%s health_delta=%.4f energy_delta=%.4f "
-        "currency_delta=%.4f score_delta=%.4f",
+        "currency_delta=%.4f score_delta=%.4f sector_delta=%.4f",
         breakdown.survival,
         breakdown.step_penalty,
         breakdown.health_change,
@@ -610,8 +822,10 @@ def compute_reward(
         breakdown.energy_change,
         breakdown.score_change,
         breakdown.siphon_collected,
+        breakdown.enemy_damaged,
         breakdown.enemy_cleared,
         breakdown.phase_progress,
+        breakdown.backtrack_penalty,
         breakdown.map_clear_bonus,
         breakdown.premature_exit_penalty,
         breakdown.invalid_action_penalty,
@@ -622,6 +836,7 @@ def compute_reward(
         breakdown.prog_collected,
         breakdown.points_collected,
         breakdown.damage_taken_penalty,
+        breakdown.sector_advance,
         total,
         unclipped_total,
         done,
@@ -629,6 +844,7 @@ def compute_reward(
         energy_delta,
         currency_delta,
         score_delta,
+        sector_delta,
     )
 
     return RewardResult(total=total, breakdown=breakdown)

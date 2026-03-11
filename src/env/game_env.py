@@ -9,7 +9,7 @@ import logging
 import os
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -17,6 +17,13 @@ from src.config.offsets import load_offset_registry
 from src.controller.action_api import ActionAPI, ActionConfig
 from src.controller.input_driver import InputDriver
 from src.controller.window_attach import WindowAttachError, attach_window, focus_window
+from src.env.enemy_spawn_suppression import EnemySpawnSuppressor
+from src.env.game_tick_speedup import (
+    BackgroundMotionDisablePatcher,
+    GameTickSpeedupPatcher,
+    IdleFrameDelayBypassPatcher,
+    TileAnimationFreezePatcher,
+)
 from src.env.reset_manager import NoopResetManager, ResetStrategy, SequenceResetManager
 from src.memory.process_attach import attach_process, close_attached_process
 from src.memory.reader import ProcessMemoryReader, ReadFailure, ReadResult
@@ -91,7 +98,7 @@ def _count_siphons(snapshot: GameStateSnapshot) -> int | None:
 def _count_live_enemies(snapshot: GameStateSnapshot) -> int | None:
     if snapshot.map.status != "ok":
         return None
-    return sum(1 for enemy in snapshot.map.enemies if enemy.in_bounds and enemy.type_id > 0)
+    return sum(1 for enemy in snapshot.map.enemies if enemy.in_bounds)
 
 
 def _player_on_exit(snapshot: GameStateSnapshot) -> bool:
@@ -100,6 +107,105 @@ def _player_on_exit(snapshot: GameStateSnapshot) -> bool:
     player = snapshot.map.player_position
     exit_position = snapshot.map.exit_position
     return player is not None and exit_position is not None and player == exit_position
+
+
+def _field_effect_signature(field: Any) -> tuple[str, Any | None]:
+    status = str(getattr(field, "status", "missing"))
+    if status != "ok":
+        return (status, None)
+    return ("ok", getattr(field, "value", None))
+
+
+def _clamp_action_press_duration_to_game_tick(
+    *,
+    action_config: ActionConfig,
+    game_tick_ms: int,
+) -> ActionConfig:
+    """Cap key press hold duration so it never exceeds the configured game tick."""
+    tick_seconds = max(float(game_tick_ms), 1.0) / 1000.0
+    current_press_seconds = max(float(action_config.timings.press_duration_seconds), 0.0)
+    clamped_press_seconds = min(current_press_seconds, tick_seconds)
+    if abs(clamped_press_seconds - current_press_seconds) <= 1e-9:
+        return action_config
+    return replace(
+        action_config,
+        timings=replace(
+            action_config.timings,
+            press_duration_seconds=clamped_press_seconds,
+        ),
+    )
+
+
+def _extra_fields_effect_signature(snapshot: GameStateSnapshot) -> tuple[tuple[str, tuple[str, Any | None]], ...]:
+    if not snapshot.extra_fields:
+        return ()
+    return tuple(
+        sorted(
+            (str(key), _field_effect_signature(field))
+            for key, field in snapshot.extra_fields.items()
+        )
+    )
+
+
+def _inventory_effect_signature(snapshot: GameStateSnapshot) -> tuple[Any, ...]:
+    inventory = snapshot.inventory
+    if inventory.status != "ok":
+        return (inventory.status,)
+    return (
+        "ok",
+        tuple(int(prog_id) for prog_id in inventory.raw_prog_ids),
+        tuple((int(item.prog_id), int(item.count)) for item in inventory.collected_progs),
+    )
+
+
+def _map_effect_signature(snapshot: GameStateSnapshot) -> tuple[Any, ...]:
+    map_state = snapshot.map
+    if map_state.status != "ok":
+        return (map_state.status,)
+    return (
+        "ok",
+        int(map_state.width),
+        int(map_state.height),
+        map_state.player_position,
+        map_state.exit_position,
+        tuple(map_state.cells),
+        tuple(map_state.siphons),
+        tuple(map_state.walls),
+        tuple(map_state.resource_cells),
+        tuple(map_state.enemies),
+    )
+
+
+def _state_effect_signature(snapshot: GameStateSnapshot) -> tuple[Any, ...]:
+    return (
+        _field_effect_signature(snapshot.health),
+        _field_effect_signature(snapshot.energy),
+        _field_effect_signature(snapshot.currency),
+        _field_effect_signature(snapshot.fail_state),
+        _inventory_effect_signature(snapshot),
+        _map_effect_signature(snapshot),
+        snapshot.can_siphon_now,
+        snapshot.prog_slots_available_mask,
+        _extra_fields_effect_signature(snapshot),
+    )
+
+
+def _state_has_effect_observability(snapshot: GameStateSnapshot) -> bool:
+    scalar_visible = any(
+        _field_effect_signature(field)[0] == "ok"
+        for field in (snapshot.health, snapshot.energy, snapshot.currency, snapshot.fail_state)
+    )
+    inventory_visible = snapshot.inventory.status == "ok"
+    map_visible = snapshot.map.status == "ok"
+    ui_visible = (
+        snapshot.can_siphon_now is not None
+        or snapshot.prog_slots_available_mask is not None
+    )
+    extra_visible = any(
+        _field_effect_signature(field)[0] == "ok"
+        for field in snapshot.extra_fields.values()
+    )
+    return scalar_visible or inventory_visible or map_visible or ui_visible or extra_visible
 
 
 class GameEnvError(RuntimeError):
@@ -641,7 +747,11 @@ class GameEnv:
             return False
         if snapshot.map.status != "ok" or snapshot.map.player_position is None:
             return False
-        return snapshot.map.player_position in set(snapshot.map.siphons)
+        player = snapshot.map.player_position
+        for siphon in snapshot.map.siphons:
+            if abs(player.x - siphon.x) + abs(player.y - siphon.y) <= 1:
+                return True
+        return False
 
     def _fallback_prog_slot_allowed(self, snapshot: GameStateSnapshot | None) -> bool:
         if snapshot is None:
@@ -666,25 +776,18 @@ class GameEnv:
         previous_state: GameStateSnapshot,
         current_state: GameStateSnapshot,
     ) -> tuple[bool, str | None]:
+        state_changed = self._transition_has_effect(
+            previous_state=previous_state,
+            current_state=current_state,
+        )
+
         if action == "space":
-            if self._transition_has_effect(previous_state=previous_state, current_state=current_state):
+            if state_changed:
                 return (True, None)
             return (False, "space_no_effect")
 
         if action.startswith("prog_slot_"):
-            energy_before = _state_numeric(previous_state.energy)
-            energy_after = _state_numeric(current_state.energy)
-            energy_spent: bool | None = None
-            if energy_before is not None and energy_after is not None:
-                energy_spent = energy_after < energy_before
-
-            state_changed = self._transition_has_effect(
-                previous_state=previous_state,
-                current_state=current_state,
-            )
-            if energy_spent is None and not state_changed:
-                return (False, "prog_no_effect")
-            if energy_spent is False and not state_changed:
+            if not state_changed:
                 return (False, "prog_no_effect")
         return (True, None)
 
@@ -694,45 +797,12 @@ class GameEnv:
         previous_state: GameStateSnapshot,
         current_state: GameStateSnapshot,
     ) -> bool:
-        numeric_changes: list[bool | None] = []
-        for before_field, after_field in (
-            (previous_state.energy, current_state.energy),
-            (previous_state.currency, current_state.currency),
-            (previous_state.health, current_state.health),
+        if (
+            not _state_has_effect_observability(previous_state)
+            and not _state_has_effect_observability(current_state)
         ):
-            before_value = _state_numeric(before_field)
-            after_value = _state_numeric(after_field)
-            if before_value is None or after_value is None:
-                numeric_changes.append(None)
-                continue
-            numeric_changes.append(after_value != before_value)
-
-        prev_siphons = _count_siphons(previous_state)
-        curr_siphons = _count_siphons(current_state)
-        siphon_change = None if prev_siphons is None or curr_siphons is None else (prev_siphons != curr_siphons)
-
-        prev_enemies = _count_live_enemies(previous_state)
-        curr_enemies = _count_live_enemies(current_state)
-        enemy_change = None if prev_enemies is None or curr_enemies is None else (prev_enemies != curr_enemies)
-
-        player_change: bool | None = None
-        if previous_state.map.status == "ok" and current_state.map.status == "ok":
-            player_change = previous_state.map.player_position != current_state.map.player_position
-
-        inventory_change: bool | None = None
-        if previous_state.inventory.status == "ok" and current_state.inventory.status == "ok":
-            inventory_change = previous_state.inventory.raw_prog_ids != current_state.inventory.raw_prog_ids
-
-        signals = (
-            *numeric_changes,
-            siphon_change,
-            enemy_change,
-            player_change,
-            inventory_change,
-        )
-        if any(signal is True for signal in signals):
             return True
-        return not any(signal is not None for signal in signals)
+        return _state_effect_signature(previous_state) != _state_effect_signature(current_state)
 
     @staticmethod
     def _bounded_attempts(value: int) -> int:
@@ -1060,9 +1130,17 @@ class GameEnv:
         focus_window_on_attach: bool = True,
         window_targeted_input: bool = False,
         action_config: ActionConfig | None = None,
+        pre_reset_hook: Callable[[], None] | None = None,
         reward_fn: RewardFunction = _default_reward_fn,
+        game_tick_ms: int = 16,
+        no_enemies_mode: bool = False,
+        disable_idle_frame_delay: bool = False,
+        disable_background_motion: bool = False,
+        disable_wall_animations: bool = False,
     ) -> GameEnv:
         """Create a live environment bound to running game process/window."""
+        if int(game_tick_ms) < 1 or int(game_tick_ms) > 16:
+            raise ValueError("game_tick_ms must be between 1 and 16.")
         registry = load_offset_registry(config_path=offsets_config_path)
         runtime_lock = threading.RLock()
         attach_retries = max(1, int(config.attach_retry_attempts))
@@ -1107,7 +1185,83 @@ class GameEnv:
             "attached_process": attached_process,
             "attached_window": attached_window,
         }
+        enemy_spawn_suppressor = EnemySpawnSuppressor(
+            enabled=bool(no_enemies_mode),
+            logger=LOGGER,
+        )
+        if enemy_spawn_suppressor.enabled:
+            LOGGER.info("no_enemies_mode_enabled: active enemy slots will be suppressed.")
+        no_enemy_map_root_address: int | None = None
         kernel32 = _get_kernel32()
+        tick_speedup = GameTickSpeedupPatcher(
+            game_tick_ms=int(game_tick_ms),
+            logger=LOGGER,
+        )
+        idle_frame_delay_bypass = IdleFrameDelayBypassPatcher(
+            enabled=bool(disable_idle_frame_delay),
+            logger=LOGGER,
+        )
+        background_motion_disable = BackgroundMotionDisablePatcher(
+            enabled=bool(disable_background_motion),
+            logger=LOGGER,
+        )
+        tile_animation_freeze = TileAnimationFreezePatcher(
+            enabled=bool(disable_wall_animations),
+            logger=LOGGER,
+        )
+        runtime_patchers: tuple[Any, ...] = (
+            tick_speedup,
+            idle_frame_delay_bypass,
+            background_motion_disable,
+            tile_animation_freeze,
+        )
+
+        def _resolve_module_base_for_process(process: Any) -> int | None:
+            module_name = str(getattr(process, "executable_name", executable_name)).strip()
+            if not module_name:
+                module_name = executable_name
+            try:
+                return _find_module_base(
+                    pid=int(process.pid),
+                    module_name=module_name,
+                    kernel32=kernel32,
+                )
+            except Exception as error:  # pragma: no cover - runtime integration path
+                LOGGER.warning(
+                    "Unable to resolve module base for runtime patches pid=%s module=%s error=%s",
+                    getattr(process, "pid", None),
+                    module_name,
+                    error,
+                )
+                return None
+
+        def _apply_runtime_patches(process: Any) -> None:
+            enabled_patchers = tuple(patcher for patcher in runtime_patchers if bool(patcher.enabled))
+            if not enabled_patchers:
+                return
+            module_base = _resolve_module_base_for_process(process)
+            if module_base is None:
+                return
+            for patcher in enabled_patchers:
+                patcher.apply(
+                    process_handle=int(process.handle),
+                    module_base=int(module_base),
+                )
+
+        def _restore_runtime_patches(process: Any) -> None:
+            enabled_patchers = tuple(patcher for patcher in runtime_patchers if bool(patcher.enabled))
+            if not enabled_patchers:
+                return
+            module_base = _resolve_module_base_for_process(process)
+            if module_base is None:
+                return
+            for patcher in enabled_patchers:
+                patcher.restore(
+                    process_handle=int(process.handle),
+                    module_base=int(module_base),
+                )
+
+        _apply_runtime_patches(attached_process)
 
         def module_base_resolver(module_name: str) -> ReadResult[int]:
             try:
@@ -1128,12 +1282,54 @@ class GameEnv:
                 )
             return ReadResult.ok(base)
 
-        def state_provider() -> GameStateSnapshot:
+        def _extract_live_state() -> GameStateSnapshot:
             return extract_state(
                 reader=reader,
                 registry=registry,
                 module_base_resolver=module_base_resolver,
             )
+
+        def _suppress_enemies_for_root(
+            *,
+            map_root_address: int,
+            slots: tuple[int, ...] | None = None,
+        ) -> None:
+            if not enemy_spawn_suppressor.enabled:
+                return
+            with runtime_lock:
+                active_process = runtime.get("attached_process")
+            if active_process is None:
+                return
+            enemy_spawn_suppressor.suppress(
+                process_handle=int(active_process.handle),
+                map_root_address=int(map_root_address),
+                slots=slots,
+            )
+
+        def state_provider() -> GameStateSnapshot:
+            nonlocal no_enemy_map_root_address
+            snapshot = _extract_live_state()
+            if not enemy_spawn_suppressor.enabled:
+                return snapshot
+
+            map_state = snapshot.map
+            if map_state.status != "ok" or map_state.address is None:
+                return snapshot
+
+            no_enemy_map_root_address = int(map_state.address)
+            enemy_slots = tuple(int(enemy.slot) for enemy in map_state.enemies if int(enemy.slot) > 0)
+            if not enemy_slots:
+                return snapshot
+
+            _suppress_enemies_for_root(
+                map_root_address=no_enemy_map_root_address,
+                slots=enemy_slots,
+            )
+            refreshed_snapshot = _extract_live_state()
+            refreshed_map = refreshed_snapshot.map
+            if refreshed_map.status == "ok" and refreshed_map.address is not None:
+                no_enemy_map_root_address = int(refreshed_map.address)
+            return refreshed_snapshot
 
         fail_entry = next(
             (entry for entry in registry.entries if entry.name in {"player_health", "health"}),
@@ -1163,6 +1359,7 @@ class GameEnv:
                 )
 
         def _swap_runtime_handles(*, new_process: Any, new_window: Any) -> None:
+            nonlocal no_enemy_map_root_address
             with runtime_lock:
                 previous_process = runtime["attached_process"]
                 runtime["attached_process"] = new_process
@@ -1170,7 +1367,9 @@ class GameEnv:
                 reader._process_handle = int(new_process.handle)  # type: ignore[attr-defined]
                 if window_targeted_input and action_api_holder["value"] is not None:
                     action_api_holder["value"].target_hwnd = int(new_window.hwnd)
+                no_enemy_map_root_address = None
 
+            _apply_runtime_patches(new_process)
             if int(previous_process.handle) != int(new_process.handle):
                 _close_process_handle_safe(previous_process)
 
@@ -1265,6 +1464,8 @@ class GameEnv:
             return refreshed_window.hwnd
 
         def before_action(action_name: str) -> None:
+            if enemy_spawn_suppressor.enabled and no_enemy_map_root_address is not None:
+                _suppress_enemies_for_root(map_root_address=no_enemy_map_root_address)
             if window_targeted_input or not focus_window_on_attach:
                 return
             with runtime_lock:
@@ -1278,9 +1479,22 @@ class GameEnv:
             except WindowAttachError as error:
                 _recover_live_bindings(f"focus_lost_before_action:{action_name}", error)
 
+        base_action_config = action_config or ActionConfig()
+        resolved_action_config = _clamp_action_press_duration_to_game_tick(
+            action_config=base_action_config,
+            game_tick_ms=int(game_tick_ms),
+        )
+        if resolved_action_config.timings.press_duration_seconds < base_action_config.timings.press_duration_seconds:
+            LOGGER.info(
+                "action_press_duration_clamped from=%s to=%s tick_ms=%s",
+                base_action_config.timings.press_duration_seconds,
+                resolved_action_config.timings.press_duration_seconds,
+                int(game_tick_ms),
+            )
+
         action_api = ActionAPI(
             input_driver=InputDriver(),
-            config=action_config or ActionConfig(),
+            config=resolved_action_config,
             target_hwnd=attached_window.hwnd if window_targeted_input else None,
             window_reacquire_hook=reacquire_window_handle if window_targeted_input else None,
         )
@@ -1289,6 +1503,7 @@ class GameEnv:
             reset_strategy: ResetStrategy = SequenceResetManager(
                 action_api=action_api,
                 sequence=reset_sequence,
+                before_sequence_hook=pre_reset_hook,
             )
         else:
             reset_strategy = NoopResetManager()
@@ -1301,7 +1516,11 @@ class GameEnv:
             config=config,
             telemetry_logger=telemetry_logger,
             recovery_hook=_recover_live_bindings,
-            before_action_hook=before_action if focus_window_on_attach else None,
+            before_action_hook=(
+                before_action
+                if (focus_window_on_attach or enemy_spawn_suppressor.enabled)
+                else None
+            ),
         )
 
         def _cleanup_live_bindings() -> None:
@@ -1312,6 +1531,15 @@ class GameEnv:
                 _close_process_handle_safe(active_process)
 
         env.add_cleanup_callback(_cleanup_live_bindings)
+
+        def _cleanup_runtime_patches() -> None:
+            with runtime_lock:
+                active_process = runtime.get("attached_process")
+            if active_process is None:
+                return
+            _restore_runtime_patches(active_process)
+
+        env.add_cleanup_callback(_cleanup_runtime_patches)
         return env
 
 

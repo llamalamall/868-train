@@ -71,6 +71,18 @@ def test_build_action_config_can_disable_prog_slot_actions() -> None:
     assert all(not action.startswith("prog_slot_") for action in config.action_key_bindings)
 
 
+def test_build_action_config_can_bind_siphon_to_z() -> None:
+    config = _build_action_config("arrows", siphon_key="z")
+
+    assert config.action_key_bindings["space"] == "Z"
+    assert config.key_codes["Z"] == 0x5A
+
+
+def test_build_action_config_rejects_unknown_siphon_key() -> None:
+    with pytest.raises(ValueError, match="siphon_key must be one of"):
+        _build_action_config("arrows", siphon_key="enter")
+
+
 def test_build_action_config_rejects_unknown_profile() -> None:
     with pytest.raises(ValueError, match="movement_keys must be one of"):
         _build_action_config("vim")
@@ -86,10 +98,12 @@ def test_random_runner_parser_prog_actions_defaults_to_enabled() -> None:
     assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.tui is True
+    assert args.game_tick_ms == 16
     assert args.post_action_delay == 0.2
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35
     assert args.action_ack_poll_interval == 0.05
+    assert args.reward_sector_advance == 1.0
 
 
 def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
@@ -102,6 +116,8 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
             "--step-through",
             "--no-require-non-terminal-reset",
             "--no-tui",
+            "--game-tick-ms",
+            "8",
             "--post-action-delay",
             "0.3",
             "--no-wait-for-action-processing",
@@ -118,10 +134,19 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
     assert args.step_through is True
     assert args.require_non_terminal_reset is False
     assert args.tui is False
+    assert args.game_tick_ms == 8
     assert args.post_action_delay == 0.3
     assert args.wait_for_action_processing is False
     assert args.action_ack_timeout == 1.2
     assert args.action_ack_poll_interval == 0.25
+
+
+def test_random_runner_parser_rejects_out_of_range_game_tick_ms() -> None:
+    parser = _build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--game-tick-ms", "0"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--game-tick-ms", "17"])
 
 
 def test_build_reward_fn_applies_configured_components_and_writes_breakdown() -> None:
@@ -133,8 +158,10 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
         reward_energy_delta=0.0,
         reward_score_delta=0.0,
         reward_siphon_collected=0.0,
+        reward_enemy_damaged=0.0,
         reward_enemy_cleared=0.0,
         reward_phase_progress=0.0,
+        reward_backtrack_penalty=0.0,
         reward_map_clear_bonus=0.0,
         reward_premature_exit_penalty=0.0,
         reward_invalid_action_penalty=0.0,
@@ -145,6 +172,7 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
         reward_prog_collected_base=0.0,
         reward_points_collected=0.0,
         reward_damage_taken_penalty=0.0,
+        reward_sector_advance=0.0,
         reward_clip_abs=5.0,
     )
     reward_config = _build_reward_config(args)
@@ -166,8 +194,10 @@ def test_build_reward_fn_applies_configured_components_and_writes_breakdown() ->
     assert breakdown["energy_change"] == 0.0
     assert breakdown["score_change"] == 0.0
     assert breakdown["siphon_collected"] == 0.0
+    assert breakdown["enemy_damaged"] == 0.0
     assert breakdown["enemy_cleared"] == 0.0
     assert breakdown["prog_collected"] == 0.0
     assert breakdown["resource_proximity"] == 0.0
     assert breakdown["fail_penalty"] == 0.0
+    assert breakdown["sector_advance"] == 0.0
     assert breakdown["total"] == pytest.approx(-0.3)

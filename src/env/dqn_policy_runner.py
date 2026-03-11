@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from statistics import mean
@@ -21,6 +24,16 @@ from src.training.rewards import RewardWeights
 from src.training.train import LearningEpisodeRolloutResult, run_dqn_training
 
 
+def _game_tick_ms_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:  # pragma: no cover - argparse emits user-facing error.
+        raise argparse.ArgumentTypeError("game tick must be an integer.") from error
+    if parsed < 1 or parsed > 16:
+        raise argparse.ArgumentTypeError("game tick ms must be between 1 and 16.")
+    return parsed
+
+
 def _format_monitor_actions(actions: object, *, limit: int = 8) -> str:
     if not isinstance(actions, (tuple, list)):
         return "-"
@@ -34,6 +47,59 @@ def _format_monitor_actions(actions: object, *, limit: int = 8) -> str:
         head=",".join(normalized[:limit]),
         remaining=remaining,
     )
+
+
+_FAIL_TERMINAL_REASON_TOKENS: tuple[str, ...] = ("fail", "loss", "dead", "start_screen")
+_APP_SAVE_FOLDER_NAME = "868-HACK"
+_APP_SAVE_FILE_NAME = "savegame_868"
+
+
+def _default_game_save_target_path() -> Path:
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / _APP_SAVE_FOLDER_NAME / _APP_SAVE_FILE_NAME
+    return Path.home() / "AppData" / "Roaming" / _APP_SAVE_FOLDER_NAME / _APP_SAVE_FILE_NAME
+
+
+def _resolve_restore_save_source_path(args: argparse.Namespace) -> Path | None:
+    if not args.restore_save_file:
+        return None
+    return Path(str(args.restore_save_file)).expanduser().resolve()
+
+
+def _reason_indicates_fail_terminal(reason: object) -> bool:
+    if not isinstance(reason, str):
+        return False
+    normalized = reason.strip().lower()
+    if not normalized:
+        return False
+    return any(token in normalized for token in _FAIL_TERMINAL_REASON_TOKENS)
+
+
+def _event_indicates_fail_terminal(event: dict[str, Any]) -> bool:
+    if not bool(event.get("done", False)):
+        return False
+    return _reason_indicates_fail_terminal(event.get("terminal_reason"))
+
+
+def _restore_selected_save_file(*, source_path: Path, target_path: Path) -> None:
+    source = source_path.expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"Selected restore save file does not exist: {source}")
+    if not source.is_file():
+        raise IsADirectoryError(f"Selected restore save file must be a file: {source}")
+
+    target = target_path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target.exists():
+        try:
+            if source.samefile(target):
+                return
+        except OSError:
+            pass
+
+    shutil.copy2(source, target)
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -55,14 +121,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Launch --exe when not already running before attempting attach.",
     )
-    parser.add_argument("--episodes", type=int, default=20, help="Number of episodes to run.")
-    parser.add_argument("--max-steps", type=int, default=500, help="Max steps per episode.")
+    parser.add_argument("--episodes", type=int, default=100, help="Number of episodes to run.")
+    parser.add_argument("--max-steps", type=int, default=1000, help="Max steps per episode.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed.")
     parser.add_argument(
         "--movement-keys",
         choices=("arrows", "wasd", "numpad"),
         default="arrows",
         help="Movement key mapping profile.",
+    )
+    parser.add_argument(
+        "--siphon-key",
+        choices=("space", "z"),
+        default="space",
+        help="Key used by the siphon action.",
     )
     parser.add_argument(
         "--prog-actions",
@@ -83,6 +155,20 @@ def _build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="In train mode, also save periodic checkpoints every N episodes (0 disables).",
+    )
+    parser.add_argument(
+        "--restore-save-file",
+        default=None,
+        help=(
+            "Optional source save file to restore before each new-game confirm/reset action. "
+            "When set, the file is copied to %APPDATA%\\868-hack\\savegame_868."
+        ),
+    )
+    parser.add_argument(
+        "--restore-save-delay",
+        type=float,
+        default=0.35,
+        help="Delay in seconds after restoring save file before the next episode reset/new game.",
     )
     parser.add_argument(
         "--reset-sequence",
@@ -106,7 +192,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tui",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Launch live state monitor TUI in a separate console window.",
     )
     parser.add_argument(
@@ -144,6 +230,30 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-step watchdog timeout in seconds.",
     )
     parser.add_argument(
+        "--game-tick-ms",
+        type=_game_tick_ms_arg,
+        default=1,
+        help="Target game loop tick size in milliseconds (1..16). Lower values speed up gameplay.",
+    )
+    parser.add_argument(
+        "--disable-idle-frame-delay",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Patch SDL_Delay(1) in the main loop to SDL_Delay(0) for faster runtime pacing.",
+    )
+    parser.add_argument(
+        "--disable-background-motion",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Disable animated background motion effect via runtime flag patching.",
+    )
+    parser.add_argument(
+        "--disable-wall-animations",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Freeze wall/tile palette animation counter in the renderer.",
+    )
+    parser.add_argument(
         "--reset-timeout",
         type=float,
         default=15.0,
@@ -152,7 +262,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--post-action-delay",
         type=float,
-        default=0.5,
+        default=0.01,
         help="Fixed delay after dispatching each action before reading state.",
     )
     parser.add_argument(
@@ -184,6 +294,15 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Require reset() to observe a non-terminal state before starting steps.",
+    )
+    parser.add_argument(
+        "--no-enemies",
+        action="store_true",
+        default=False,
+        help=(
+            "Suppress active enemy entities each step so training can focus on "
+            "phase progression without combat pressure."
+        ),
     )
 
     parser.add_argument(
@@ -284,6 +403,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reward per siphon removed from map.",
     )
     parser.add_argument(
+        "--reward-enemy-damaged",
+        type=float,
+        default=default_weights.enemy_damaged,
+        help="Reward per enemy HP point reduced when an enemy survives the step.",
+    )
+    parser.add_argument(
         "--reward-enemy-cleared",
         type=float,
         default=default_weights.enemy_cleared,
@@ -293,13 +418,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reward-phase-progress",
         type=float,
         default=default_weights.phase_progress,
-        help="Weight for progress toward active objective (siphon->enemy->exit).",
+        help="Weight for progress toward active objective (siphon->high-priority siphon target->enemy->exit).",
+    )
+    parser.add_argument(
+        "--reward-backtrack-penalty",
+        type=float,
+        default=default_weights.backtrack_penalty,
+        help="Penalty weight for increased distance from the active objective.",
     )
     parser.add_argument(
         "--reward-map-clear-bonus",
         type=float,
         default=default_weights.map_clear_bonus,
-        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+        help="Bonus when player reaches exit after siphons/enemies are cleared and high-priority targets are siphoned.",
     )
     parser.add_argument(
         "--reward-premature-exit-penalty",
@@ -356,6 +487,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Penalty multiplier applied to negative health deltas.",
     )
     parser.add_argument(
+        "--reward-sector-advance",
+        type=float,
+        default=default_weights.sector_advance,
+        help="Reward per positive sector index transition.",
+    )
+    parser.add_argument(
         "--reward-clip-abs",
         type=float,
         default=5.0,
@@ -379,6 +516,14 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--checkpoint-every must be >= 0.")
     if args.mode == "eval" and not args.checkpoint:
         parser.error("--checkpoint is required when --mode=eval.")
+    if float(args.restore_save_delay) < 0:
+        parser.error("--restore-save-delay must be >= 0.")
+    restore_source = _resolve_restore_save_source_path(args)
+    if restore_source is not None:
+        if not restore_source.exists():
+            parser.error(f"--restore-save-file not found: {restore_source}.")
+        if not restore_source.is_file():
+            parser.error(f"--restore-save-file must be a file: {restore_source}.")
 
 
 def _build_dqn_config(args: argparse.Namespace) -> DQNConfig:
@@ -462,6 +607,8 @@ def main() -> None:
             f"{mode} enabled: using window-targeted input so actions still go to the game "
             "while the TUI window has focus."
         )
+    if bool(args.no_enemies):
+        print("no_enemies_mode_enabled\tenemy entities will be suppressed.")
 
     reset_sequence = tuple(
         action.strip() for action in str(args.reset_sequence).split(",") if action.strip()
@@ -483,6 +630,39 @@ def main() -> None:
     )
 
     checkpoint_path = _resolve_checkpoint_path(args)
+    restore_save_source = _resolve_restore_save_source_path(args)
+    restore_save_delay_seconds = max(float(args.restore_save_delay), 0.0)
+    restore_save_target = (
+        _default_game_save_target_path()
+        if restore_save_source is not None
+        else None
+    )
+    if restore_save_source is not None and restore_save_target is not None:
+        print(
+            "savegame_restore_enabled\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+
+    def _restore_save_before_reset() -> None:
+        if restore_save_source is None or restore_save_target is None:
+            return
+        _restore_selected_save_file(
+            source_path=restore_save_source,
+            target_path=restore_save_target,
+        )
+        print(
+            "savegame_restored_before_reset\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+        if restore_save_delay_seconds > 0:
+            time.sleep(restore_save_delay_seconds)
+
     try:
         env = GameEnv.from_live_process(
             executable_name=args.exe,
@@ -503,12 +683,25 @@ def main() -> None:
             action_config=_build_action_config(
                 args.movement_keys,
                 include_prog_actions=bool(args.prog_actions),
+                siphon_key=str(args.siphon_key),
+            ),
+            pre_reset_hook=(
+                _restore_save_before_reset
+                if restore_save_source is not None and restore_save_target is not None
+                else None
             ),
             reward_fn=reward_fn,
+            game_tick_ms=int(args.game_tick_ms),
+            no_enemies_mode=bool(args.no_enemies),
+            disable_idle_frame_delay=bool(args.disable_idle_frame_delay),
+            disable_background_motion=bool(args.disable_background_motion),
+            disable_wall_animations=bool(args.disable_wall_animations),
         )
         tui.start()
 
         def _on_step(event: dict[str, Any]) -> None:
+            if not monitor_enabled:
+                return
             tui.consume_manual_step_flag()
             tui.update(
                 training_line=(
@@ -591,9 +784,63 @@ def main() -> None:
                     explore=True,
                     learn=True,
                     before_step_callback=_on_before_step if monitor_enabled else None,
-                    step_callback=_on_step if monitor_enabled else None,
+                    step_callback=(
+                        _on_step
+                        if monitor_enabled or restore_save_source is not None
+                        else None
+                    ),
                 )[0]
                 results.append(episode_result)
+
+                reached_step_limit_without_terminal = (
+                    not bool(episode_result.done)
+                    and int(episode_result.steps) >= int(args.max_steps)
+                )
+                if reached_step_limit_without_terminal:
+                    print(
+                        "episode_step_limit_reached\tepisode={episode}\tsteps={steps}\t"
+                        "action=cancel_then_reset".format(
+                            episode=episode_result.episode_id,
+                            steps=episode_result.steps,
+                        )
+                    )
+                    if "cancel" in env.action_space:
+                        try:
+                            env.step("cancel")
+                        except Exception as error:
+                            print(
+                                "episode_step_limit_cancel_failed\tepisode={episode}\terror={error}".format(
+                                    episode=episode_result.episode_id,
+                                    error=error,
+                                )
+                            )
+                    else:
+                        print(
+                            "episode_step_limit_cancel_unavailable\tepisode={episode}".format(
+                                episode=episode_result.episode_id,
+                            )
+                        )
+
+                    if restore_save_source is not None and restore_save_target is not None:
+                        try:
+                            _restore_save_before_reset()
+                        except Exception as error:
+                            print(
+                                "episode_step_limit_restore_failed\tepisode={episode}\terror={error}".format(
+                                    episode=episode_result.episode_id,
+                                    error=error,
+                                )
+                            )
+
+                    try:
+                        env.reset()
+                    except Exception as error:
+                        print(
+                            "episode_step_limit_reset_failed\tepisode={episode}\terror={error}".format(
+                                episode=episode_result.episode_id,
+                                error=error,
+                            )
+                        )
 
                 if args.checkpoint_every and episode_index % int(args.checkpoint_every) == 0:
                     periodic_path = _periodic_checkpoint_path(
@@ -628,7 +875,11 @@ def main() -> None:
                     explore=False,
                     learn=False,
                     before_step_callback=_on_before_step if monitor_enabled else None,
-                    step_callback=_on_step if monitor_enabled else None,
+                    step_callback=(
+                        _on_step
+                        if monitor_enabled or restore_save_source is not None
+                        else None
+                    ),
                 )
             )
     finally:

@@ -39,10 +39,29 @@ _PROG_SLOT_ACTION_BINDINGS = {
 }
 
 
-def _build_action_config(movement_keys: str, *, include_prog_actions: bool = True) -> ActionConfig:
+def _game_tick_ms_arg(value: str) -> int:
+    try:
+        parsed = int(value)
+    except ValueError as error:  # pragma: no cover - argparse emits user-facing error.
+        raise argparse.ArgumentTypeError("game tick must be an integer.") from error
+    if parsed < 1 or parsed > 16:
+        raise argparse.ArgumentTypeError("game tick ms must be between 1 and 16.")
+    return parsed
+
+
+def _build_action_config(
+    movement_keys: str,
+    *,
+    include_prog_actions: bool = True,
+    siphon_key: str = "space",
+) -> ActionConfig:
     default_config = ActionConfig()
     bindings = dict(default_config.action_key_bindings)
     key_codes = dict(default_config.key_codes)
+    normalized_siphon_key = str(siphon_key).strip().lower()
+    if normalized_siphon_key not in {"space", "z"}:
+        raise ValueError("siphon_key must be one of: space, z.")
+    bindings["space"] = "SPACE" if normalized_siphon_key == "space" else "Z"
 
     if movement_keys == "wasd":
         bindings.update(
@@ -95,8 +114,10 @@ def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
             energy_delta=float(args.reward_energy_delta),
             score_delta=float(args.reward_score_delta),
             siphon_collected=float(args.reward_siphon_collected),
+            enemy_damaged=float(args.reward_enemy_damaged),
             enemy_cleared=float(args.reward_enemy_cleared),
             phase_progress=float(args.reward_phase_progress),
+            backtrack_penalty=float(args.reward_backtrack_penalty),
             map_clear_bonus=float(args.reward_map_clear_bonus),
             premature_exit_penalty=float(args.reward_premature_exit_penalty),
             invalid_action_penalty=float(args.reward_invalid_action_penalty),
@@ -107,6 +128,7 @@ def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
             prog_collected_base=float(args.reward_prog_collected_base),
             points_collected=float(args.reward_points_collected),
             damage_taken_penalty=float(args.reward_damage_taken_penalty),
+            sector_advance=float(args.reward_sector_advance),
         ),
         reward_clip_abs=float(args.reward_clip_abs),
     )
@@ -138,8 +160,10 @@ def _build_reward_fn(
             "energy_change": result.breakdown.energy_change,
             "score_change": result.breakdown.score_change,
             "siphon_collected": result.breakdown.siphon_collected,
+            "enemy_damaged": result.breakdown.enemy_damaged,
             "enemy_cleared": result.breakdown.enemy_cleared,
             "phase_progress": result.breakdown.phase_progress,
+            "backtrack_penalty": result.breakdown.backtrack_penalty,
             "map_clear_bonus": result.breakdown.map_clear_bonus,
             "premature_exit_penalty": result.breakdown.premature_exit_penalty,
             "invalid_action_penalty": result.breakdown.invalid_action_penalty,
@@ -150,6 +174,7 @@ def _build_reward_fn(
             "prog_collected": result.breakdown.prog_collected,
             "points_collected": result.breakdown.points_collected,
             "damage_taken_penalty": result.breakdown.damage_taken_penalty,
+            "sector_advance": result.breakdown.sector_advance,
             "total": result.total,
         }
         if print_breakdown:
@@ -157,9 +182,11 @@ def _build_reward_fn(
                 "reward step={step} action={action} total={total:.3f} "
                 "survival={survival:.3f} step_penalty={step_penalty:.3f} health={health:.3f} "
                 "currency={currency:.3f} energy={energy:.3f} score={score:.3f} "
-                "siphon={siphon:.3f} enemy={enemy:.3f} "
+                "siphon={siphon:.3f} enemy_damage={enemy_damage:.3f} enemy={enemy:.3f} "
+                "phase={phase:.3f} backtrack={backtrack:.3f} "
                 "safe={safe:.3f} danger={danger:.3f} proximity={proximity:.3f} "
                 "prog={prog:.3f} points={points:.3f} damage_taken={damage:.3f} "
+                "sector_advance={sector_advance:.3f} "
                 "premature_exit={premature:.3f} invalid={invalid:.3f} "
                 "fail_penalty={fail_penalty:.3f} done={done}".format(
                     step=info.get("step_index"),
@@ -172,13 +199,17 @@ def _build_reward_fn(
                     energy=result.breakdown.energy_change,
                     score=result.breakdown.score_change,
                     siphon=result.breakdown.siphon_collected,
+                    enemy_damage=result.breakdown.enemy_damaged,
                     enemy=result.breakdown.enemy_cleared,
+                    phase=result.breakdown.phase_progress,
+                    backtrack=result.breakdown.backtrack_penalty,
                     safe=result.breakdown.safe_tile_bonus,
                     danger=result.breakdown.danger_tile_penalty,
                     proximity=result.breakdown.resource_proximity,
                     prog=result.breakdown.prog_collected,
                     points=result.breakdown.points_collected,
                     damage=result.breakdown.damage_taken_penalty,
+                    sector_advance=result.breakdown.sector_advance,
                     premature=result.breakdown.premature_exit_penalty,
                     invalid=result.breakdown.invalid_action_penalty,
                     fail_penalty=result.breakdown.fail_penalty,
@@ -212,9 +243,12 @@ def format_reward_breakdown_line(event: dict[str, Any]) -> str:
         ("energy_change", "energy"),
         ("score_change", "score"),
         ("siphon_collected", "siphon"),
+        ("enemy_damaged", "enemy_damage"),
         ("enemy_cleared", "enemy"),
         ("phase_progress", "phase"),
+        ("backtrack_penalty", "backtrack"),
         ("map_clear_bonus", "map_clear"),
+        ("sector_advance", "sector_advance"),
         ("safe_tile_bonus", "safe"),
         ("danger_tile_penalty", "danger"),
         ("resource_proximity", "proximity"),
@@ -311,6 +345,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Per-step watchdog timeout in seconds.",
     )
     parser.add_argument(
+        "--game-tick-ms",
+        type=_game_tick_ms_arg,
+        default=16,
+        help="Target game loop tick size in milliseconds (1..16). Lower values speed up gameplay.",
+    )
+    parser.add_argument(
         "--reset-timeout",
         type=float,
         default=15.0,
@@ -395,6 +435,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Reward per siphon removed from map.",
     )
     parser.add_argument(
+        "--reward-enemy-damaged",
+        type=float,
+        default=default_weights.enemy_damaged,
+        help="Reward per enemy HP point reduced when an enemy survives the step.",
+    )
+    parser.add_argument(
         "--reward-enemy-cleared",
         type=float,
         default=default_weights.enemy_cleared,
@@ -404,13 +450,19 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reward-phase-progress",
         type=float,
         default=default_weights.phase_progress,
-        help="Weight for progress toward active objective (siphon->enemy->exit).",
+        help="Weight for progress toward active objective (siphon->high-priority siphon target->enemy->exit).",
+    )
+    parser.add_argument(
+        "--reward-backtrack-penalty",
+        type=float,
+        default=default_weights.backtrack_penalty,
+        help="Penalty weight for increased distance from the active objective.",
     )
     parser.add_argument(
         "--reward-map-clear-bonus",
         type=float,
         default=default_weights.map_clear_bonus,
-        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+        help="Bonus when player reaches exit after siphons/enemies are cleared and high-priority targets are siphoned.",
     )
     parser.add_argument(
         "--reward-premature-exit-penalty",
@@ -465,6 +517,12 @@ def _build_parser() -> argparse.ArgumentParser:
         type=float,
         default=default_weights.damage_taken_penalty,
         help="Penalty multiplier applied to negative health deltas.",
+    )
+    parser.add_argument(
+        "--reward-sector-advance",
+        type=float,
+        default=default_weights.sector_advance,
+        help="Reward per positive sector index transition.",
     )
     parser.add_argument(
         "--reward-clip-abs",
@@ -536,6 +594,7 @@ def main() -> None:
             window_targeted_input=effective_window_input,
             action_config=action_config,
             reward_fn=reward_fn,
+            game_tick_ms=int(args.game_tick_ms),
         )
         tui.start()
 

@@ -59,6 +59,7 @@ class ActionConfig:
             "ENTER": 0x0D,
             "ESCAPE": 0x1B,
             "SPACE": 0x20,
+            "Z": 0x5A,
             "0": 0x30,
             "1": 0x31,
             "2": 0x32,

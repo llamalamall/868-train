@@ -5,11 +5,20 @@
     "version": "0.2.0",
     "configurations": [
         {
+            "name": "GUI",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/src/gui/dqn_runner_gui.py",
+            "console": "integratedTerminal"
+        },
+        {
             "name": "868-train",
             "type": "debugpy",
             "request": "launch",
             "module": "src.cli",
-            "args": ["run-heuristic"]
+            "args": [
+                "run-heuristic"
+            ]
         },
         {
             "name": "Monitor TUI",

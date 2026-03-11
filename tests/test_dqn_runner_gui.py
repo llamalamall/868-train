@@ -11,6 +11,7 @@ from src.gui.dqn_runner_gui import (
     _estimate_epsilon_eta_seconds,
     _format_duration_seconds,
     _initial_browse_dir,
+    _is_boolean_flag,
     _iter_parser_actions,
     _parse_episode_progress,
     _resolve_reward_metric_value,
@@ -23,8 +24,8 @@ from src.training.rewards import RewardWeights
 def test_sort_form_actions_prioritizes_exe_and_checkpoint() -> None:
     parser = dqn_policy_runner._build_parser()
     sorted_actions = _sort_form_actions(_iter_parser_actions(parser))
-    first_two_dests = [action.dest for action in sorted_actions[:2]]
-    assert first_two_dests == ["exe", "checkpoint"]
+    first_three_dests = [action.dest for action in sorted_actions[:3]]
+    assert first_three_dests == ["exe", "checkpoint", "restore_save_file"]
 
 
 def test_initial_browse_dir_uses_checkpoint_directory_for_checkpoint_fields() -> None:
@@ -33,14 +34,34 @@ def test_initial_browse_dir_uses_checkpoint_directory_for_checkpoint_fields() ->
     assert _initial_browse_dir(dest="checkpoint_b", current_value="") == _CHECKPOINT_DIR
 
 
+def test_no_enemies_action_is_treated_as_boolean_flag() -> None:
+    parser = dqn_policy_runner._build_parser()
+    action_by_dest = {action.dest: action for action in _iter_parser_actions(parser)}
+
+    assert _is_boolean_flag(action_by_dest["no_enemies"]) is True
+    assert _is_boolean_flag(action_by_dest["episodes"]) is False
+
+
 def test_run_dqn_presets_include_expected_profiles() -> None:
     presets = _run_dqn_preset_overrides()
     assert "defaults" in presets
     assert "reward survival" in presets
     assert "reward exploration" in presets
+    assert "phase progression (no enemies)" in presets
     assert "smoke test - siphon objective" in presets
     assert "smoke test - enemy objective" in presets
     assert "smoke test - exit objective" in presets
+
+
+def test_phase_progression_profile_ignores_enemy_rewards() -> None:
+    presets = _run_dqn_preset_overrides()
+    profile = presets["phase progression (no enemies)"]
+
+    assert profile["mode"] == "train"
+    assert profile["no_enemies"] is True
+    assert profile["reward_enemy_damaged"] == pytest.approx(0.0)
+    assert profile["reward_enemy_cleared"] == pytest.approx(0.0)
+    assert profile["reward_phase_progress"] > 0.0
 
 
 def test_smoke_test_presets_zero_all_rewards_except_target_objective() -> None:
