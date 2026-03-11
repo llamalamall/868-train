@@ -6,6 +6,7 @@ import pytest
 
 from src.env import dqn_policy_runner
 from src.gui.dqn_runner_gui import (
+    _HYBRID_CHECKPOINT_DIR,
     _SMOKE_TEST_REWARD_DESTS,
     _CHECKPOINT_DIR,
     _estimate_epsilon_eta_seconds,
@@ -16,6 +17,7 @@ from src.gui.dqn_runner_gui import (
     _parse_episode_progress,
     _resolve_reward_metric_value,
     _run_dqn_preset_overrides,
+    _run_hybrid_preset_overrides,
     _sort_form_actions,
 )
 from src.training.rewards import RewardWeights
@@ -32,6 +34,12 @@ def test_initial_browse_dir_uses_checkpoint_directory_for_checkpoint_fields() ->
     assert _initial_browse_dir(dest="checkpoint", current_value="") == _CHECKPOINT_DIR
     assert _initial_browse_dir(dest="checkpoint_a", current_value="") == _CHECKPOINT_DIR
     assert _initial_browse_dir(dest="checkpoint_b", current_value="") == _CHECKPOINT_DIR
+
+
+def test_initial_browse_dir_uses_hybrid_checkpoint_directory_for_hybrid_paths() -> None:
+    assert _initial_browse_dir(dest="checkpoint_root", current_value="") == _HYBRID_CHECKPOINT_DIR
+    assert _initial_browse_dir(dest="resume_checkpoint", current_value="") == _HYBRID_CHECKPOINT_DIR
+    assert _initial_browse_dir(dest="warmstart_checkpoint", current_value="") == _HYBRID_CHECKPOINT_DIR
 
 
 def test_no_enemies_action_is_treated_as_boolean_flag() -> None:
@@ -51,6 +59,22 @@ def test_run_dqn_presets_include_expected_profiles() -> None:
     assert "smoke test - siphon objective" in presets
     assert "smoke test - enemy objective" in presets
     assert "smoke test - exit objective" in presets
+
+
+def test_run_hybrid_presets_include_expected_profiles() -> None:
+    movement = _run_hybrid_preset_overrides(command_name="movement-test")
+    meta = _run_hybrid_preset_overrides(command_name="train-meta-no-enemies")
+    full = _run_hybrid_preset_overrides(command_name="train-full-hierarchical")
+    evaluate = _run_hybrid_preset_overrides(command_name="eval-hybrid")
+
+    assert "defaults" in movement
+    assert "gate a smoke" in movement
+    assert "defaults" in meta
+    assert "gate b baseline" in meta
+    assert "defaults" in full
+    assert "gate c baseline" in full
+    assert "defaults" in evaluate
+    assert "eval quick" in evaluate
 
 
 def test_phase_progression_profile_ignores_enemy_rewards() -> None:

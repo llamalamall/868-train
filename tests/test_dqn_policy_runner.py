@@ -26,8 +26,8 @@ def test_dqn_runner_parser_defaults() -> None:
 
     assert args.mode == "train"
     assert args.exe == "868-HACK.exe"
-    assert args.episodes == 20
-    assert args.max_steps == 500
+    assert args.episodes == 100
+    assert args.max_steps == 1000
     assert args.checkpoint is None
     assert args.checkpoint_every == 0
     assert args.movement_keys == "arrows"
@@ -37,12 +37,12 @@ def test_dqn_runner_parser_defaults() -> None:
     assert args.step_through is False
     assert args.require_non_terminal_reset is True
     assert args.no_enemies is False
-    assert args.tui is True
-    assert args.game_tick_ms == 16
-    assert args.disable_idle_frame_delay is False
-    assert args.disable_background_motion is False
-    assert args.disable_wall_animations is False
-    assert args.post_action_delay == 0.2
+    assert args.tui is False
+    assert args.game_tick_ms == 1
+    assert args.disable_idle_frame_delay is True
+    assert args.disable_background_motion is True
+    assert args.disable_wall_animations is True
+    assert args.post_action_delay == 0.01
     assert args.restore_save_delay == 0.35
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35

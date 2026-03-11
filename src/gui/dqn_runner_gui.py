@@ -1,4 +1,4 @@
-"""Simple Tkinter launcher for DQN run/evaluation workflows."""
+"""Simple Tkinter launcher for DQN and hybrid run/evaluation workflows."""
 
 from __future__ import annotations
 
@@ -20,6 +20,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from src.env import dqn_policy_runner
+from src.hybrid import runner as hybrid_runner
 from src.memory.state_monitor_tui import (
     CONTROL_MODE_AUTO,
     CONTROL_MODE_PAUSED,
@@ -36,12 +37,16 @@ _PATH_LIKE_DESTS = {
     "checkpoint",
     "checkpoint_a",
     "checkpoint_b",
+    "checkpoint_root",
+    "resume_checkpoint",
+    "warmstart_checkpoint",
     "json_out",
     "restore_save_file",
 }
 _HIDDEN_GUI_DESTS = {"external_status_file", "external_control_file"}
 _MAX_FORM_COLUMNS = 5
 _CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
+_HYBRID_CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "hybrid"
 _APPDATA_GAME_SAVE_DIR = (
     Path(os.environ["APPDATA"]) / "868-hack"
     if os.environ.get("APPDATA")
@@ -218,6 +223,8 @@ def _initial_browse_dir(*, dest: str, current_value: str) -> Path:
         return current_path
     if dest in {"checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}:
         return _CHECKPOINT_DIR
+    if dest in {"checkpoint_root", "resume_checkpoint", "warmstart_checkpoint"}:
+        return _HYBRID_CHECKPOINT_DIR
     if (
         dest == "restore_save_file"
         and _APPDATA_GAME_SAVE_DIR is not None
@@ -301,6 +308,80 @@ def _run_dqn_preset_overrides() -> dict[str, dict[str, object]]:
             reward_map_clear_bonus=default_weights.map_clear_bonus,
         ),
     }
+
+
+def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, object]]:
+    if command_name == "movement-test":
+        return {
+            "defaults": {},
+            "gate a smoke": {
+                "episodes": 3,
+                "max_steps": 180,
+                "no_enemies": True,
+                "threat_trigger_distance": 2,
+            },
+            "long route validation": {
+                "episodes": 10,
+                "max_steps": 320,
+                "no_enemies": True,
+                "threat_trigger_distance": 2,
+                "prog_actions": False,
+            },
+        }
+    if command_name == "train-meta-no-enemies":
+        return {
+            "defaults": {},
+            "gate b baseline": {
+                "episodes": 120,
+                "max_steps": 350,
+                "no_enemies": True,
+                "meta_epsilon_start": 0.6,
+                "meta_epsilon_end": 0.05,
+                "meta_epsilon_decay_steps": 5000,
+            },
+            "quick tune": {
+                "episodes": 60,
+                "max_steps": 280,
+                "no_enemies": True,
+                "meta_learning_rate": 0.0005,
+                "meta_epsilon_decay_steps": 3000,
+            },
+        }
+    if command_name == "train-full-hierarchical":
+        return {
+            "defaults": {},
+            "gate c baseline": {
+                "episodes": 200,
+                "max_steps": 450,
+                "no_enemies": False,
+                "meta_freeze_episodes": 25,
+                "joint_finetune": True,
+                "threat_trigger_distance": 2,
+            },
+            "threat warmup heavy": {
+                "episodes": 240,
+                "max_steps": 450,
+                "no_enemies": False,
+                "meta_freeze_episodes": 60,
+                "joint_finetune": True,
+                "threat_learning_rate": 0.0007,
+            },
+        }
+    if command_name == "eval-hybrid":
+        return {
+            "defaults": {},
+            "eval quick": {
+                "episodes": 10,
+                "max_steps": 300,
+                "no_enemies": False,
+            },
+            "eval stress": {
+                "episodes": 25,
+                "max_steps": 500,
+                "no_enemies": False,
+            },
+        }
+    return {"defaults": {}}
 
 
 def _validate_text_input(action: argparse.Action, *, value: str, field_name: str) -> None:
@@ -723,6 +804,8 @@ class _ArgForm(ttk.Frame):
     def _browse_path(self, variable: tk.StringVar, dest: str) -> None:
         current_value = variable.get().strip()
         initial_dir = str(_initial_browse_dir(dest=dest, current_value=current_value))
+        if dest == "checkpoint" and self._profile_id.startswith("hybrid-") and not current_value:
+            initial_dir = str(_HYBRID_CHECKPOINT_DIR)
         if dest == "exe":
             path = filedialog.askopenfilename(
                 parent=self,
@@ -736,6 +819,24 @@ class _ArgForm(ttk.Frame):
                 title="Select checkpoint",
                 initialdir=initial_dir,
                 filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+            )
+        elif dest == "checkpoint" and self._profile_id == "hybrid-eval":
+            path = filedialog.askdirectory(
+                parent=self,
+                title="Select hybrid checkpoint directory",
+                initialdir=initial_dir,
+            )
+        elif dest in {"resume_checkpoint", "warmstart_checkpoint"}:
+            path = filedialog.askdirectory(
+                parent=self,
+                title="Select hybrid checkpoint directory",
+                initialdir=initial_dir,
+            )
+        elif dest == "checkpoint_root":
+            path = filedialog.askdirectory(
+                parent=self,
+                title="Select checkpoint root directory",
+                initialdir=initial_dir,
             )
         elif dest == "checkpoint" and self._profile_id != "run-dqn":
             path = filedialog.askopenfilename(
@@ -1049,7 +1150,12 @@ class DqnRunnerGui(tk.Tk):
 
     def _build_profiles(self) -> None:
         run_parser = dqn_policy_runner._build_parser()
+        hybrid_parser = hybrid_runner._build_parser()
         evaluate_parser = evaluate._build_parser()
+        hybrid_movement_parser = _get_subparser(hybrid_parser, command_name="movement-test")
+        hybrid_train_meta_parser = _get_subparser(hybrid_parser, command_name="train-meta-no-enemies")
+        hybrid_train_full_parser = _get_subparser(hybrid_parser, command_name="train-full-hierarchical")
+        hybrid_eval_parser = _get_subparser(hybrid_parser, command_name="eval-hybrid")
         eval_run_parser = _get_subparser(evaluate_parser, command_name="run")
         eval_compare_parser = _get_subparser(evaluate_parser, command_name="compare")
 
@@ -1060,6 +1166,34 @@ class DqnRunnerGui(tk.Tk):
                 run_parser,
                 ("-m", "src.env.dqn_policy_runner"),
                 _run_dqn_preset_overrides(),
+            ),
+            (
+                "hybrid-movement",
+                "Hybrid Movement Test",
+                hybrid_movement_parser,
+                ("-m", "src.hybrid.runner", "movement-test"),
+                _run_hybrid_preset_overrides(command_name="movement-test"),
+            ),
+            (
+                "hybrid-train-meta",
+                "Hybrid Meta Train (No Enemies)",
+                hybrid_train_meta_parser,
+                ("-m", "src.hybrid.runner", "train-meta-no-enemies"),
+                _run_hybrid_preset_overrides(command_name="train-meta-no-enemies"),
+            ),
+            (
+                "hybrid-train-full",
+                "Hybrid Full Train",
+                hybrid_train_full_parser,
+                ("-m", "src.hybrid.runner", "train-full-hierarchical"),
+                _run_hybrid_preset_overrides(command_name="train-full-hierarchical"),
+            ),
+            (
+                "hybrid-eval",
+                "Hybrid Evaluate",
+                hybrid_eval_parser,
+                ("-m", "src.hybrid.runner", "eval-hybrid"),
+                _run_hybrid_preset_overrides(command_name="eval-hybrid"),
             ),
             (
                 "eval-run",
@@ -1334,13 +1468,24 @@ class DqnRunnerGui(tk.Tk):
         if total_episodes is not None and total_episodes >= 1:
             self._monitor_total_episodes = total_episodes
 
-        is_train_mode = str(form.value_for_dest("mode") or "train").strip().lower() == "train"
-        if form.profile_id != "run-dqn" or not is_train_mode:
+        epsilon_start: float | None = None
+        epsilon_end: float | None = None
+        epsilon_decay_steps: int | None = None
+
+        if form.profile_id == "run-dqn":
+            is_train_mode = str(form.value_for_dest("mode") or "train").strip().lower() == "train"
+            if not is_train_mode:
+                return
+            epsilon_start = self._parse_float_or_none(form.value_for_dest("epsilon_start"))
+            epsilon_end = self._parse_float_or_none(form.value_for_dest("epsilon_end"))
+            epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("epsilon_decay_steps"))
+        elif form.profile_id in {"hybrid-train-meta", "hybrid-train-full"}:
+            epsilon_start = self._parse_float_or_none(form.value_for_dest("meta_epsilon_start"))
+            epsilon_end = self._parse_float_or_none(form.value_for_dest("meta_epsilon_end"))
+            epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("meta_epsilon_decay_steps"))
+        else:
             return
 
-        epsilon_start = self._parse_float_or_none(form.value_for_dest("epsilon_start"))
-        epsilon_end = self._parse_float_or_none(form.value_for_dest("epsilon_end"))
-        epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("epsilon_decay_steps"))
         if epsilon_start is None or epsilon_end is None or epsilon_decay_steps is None:
             return
         if epsilon_decay_steps <= 0:
@@ -1384,8 +1529,9 @@ class DqnRunnerGui(tk.Tk):
             self._reset_monitor_estimates()
             return command
         is_dqn_runner = command[1:3] == ["-m", "src.env.dqn_policy_runner"]
+        is_hybrid_runner = command[1:3] == ["-m", "src.hybrid.runner"]
         is_eval_compare = command[1:4] == ["-m", "src.training.evaluate", "compare"]
-        if not is_dqn_runner and not is_eval_compare:
+        if not is_dqn_runner and not is_hybrid_runner and not is_eval_compare:
             self._clear_monitor_files()
             self._reset_monitor_estimates()
             return command
@@ -1393,7 +1539,7 @@ class DqnRunnerGui(tk.Tk):
         self._clear_monitor_files()
         status_file = self._create_status_file()
         self._external_status_file = status_file
-        control_file = self._create_control_file() if is_dqn_runner else None
+        control_file = self._create_control_file() if (is_dqn_runner or is_hybrid_runner) else None
         self._external_control_file = control_file
         self._status_snapshot = ("", "", "", "")
         self._monitor_training_line.set("training=starting")
@@ -1432,10 +1578,10 @@ class DqnRunnerGui(tk.Tk):
                 continue
             filtered.append(token)
 
-        if is_dqn_runner or is_eval_compare:
+        if is_dqn_runner or is_hybrid_runner or is_eval_compare:
             filtered.append("--no-tui")
         filtered.extend(["--external-status-file", str(status_file)])
-        if is_dqn_runner and control_file is not None:
+        if (is_dqn_runner or is_hybrid_runner) and control_file is not None:
             filtered.extend(["--external-control-file", str(control_file)])
         return filtered
 

@@ -261,6 +261,7 @@ Available subcommands:
 - `run-random`: random baseline runner (`src.env.random_policy_runner`)
 - `run-heuristic`: heuristic baseline runner (`src.env.heuristic_policy_runner`)
 - `run-dqn`: DQN train/eval runner with checkpoint save/load (`src.env.dqn_policy_runner`)
+- `run-hybrid`: hybrid hierarchical runner (`src.hybrid.runner`)
 - `dqn-gui`: GUI launcher for DQN run/eval/compare settings (`src.gui.dqn_runner_gui`)
 - `evaluate`: fixed-seed DQN KPI harness and checkpoint comparison (`src.training.evaluate`)
 
@@ -296,6 +297,18 @@ python -m src.cli run-dqn --episodes 20 --max-steps 200
 
 # Evaluate from a saved DQN checkpoint
 python -m src.cli run-dqn --mode eval --checkpoint artifacts/checkpoints/dqn-latest.json --episodes 5
+
+# Hybrid gate A movement test
+python -m src.cli run-hybrid movement-test --episodes 5 --max-steps 250
+
+# Hybrid gate B meta-controller training (no enemies)
+python -m src.cli run-hybrid train-meta-no-enemies --episodes 120 --max-steps 350
+
+# Hybrid gate C full hierarchical training (warmstart from gate B bundle)
+python -m src.cli run-hybrid train-full-hierarchical --warmstart-checkpoint artifacts/hybrid/20260311-01-gateb --episodes 200 --max-steps 450
+
+# Hybrid checkpoint evaluation
+python -m src.cli run-hybrid eval-hybrid --checkpoint artifacts/hybrid/20260311-02-gatec --episodes 20
 
 # Launch GUI to run DQN/evaluate with all available flags
 python -m src.cli dqn-gui

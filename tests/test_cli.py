@@ -57,6 +57,15 @@ def test_master_cli_dispatches_run_dqn_with_passthrough(monkeypatch) -> None:
     ]
 
 
+def test_master_cli_dispatches_run_hybrid_with_passthrough(monkeypatch) -> None:
+    captured: list[tuple[str, list[str]]] = []
+    _install_stub(monkeypatch, "src.cli.hybrid_runner_main", captured)
+
+    cli.main(["run-hybrid", "movement-test", "--episodes", "2", "--max-steps", "80"])
+
+    assert captured == [("hybrid_runner_main", ["movement-test", "--episodes", "2", "--max-steps", "80"])]
+
+
 def test_master_cli_dispatches_evaluate_with_passthrough(monkeypatch) -> None:
     captured: list[tuple[str, list[str]]] = []
     _install_stub(monkeypatch, "src.cli.evaluate_main", captured)
