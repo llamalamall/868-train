@@ -7,6 +7,7 @@ from typing import Any
 
 from src.controller.action_api import ActionConfig
 from src.env.game_env import GameEnv, GameEnvConfig
+from src.state.schema import GameStateSnapshot, GridPosition
 
 _WASD_KEY_CODES = {
     "W": 0x57,
@@ -34,6 +35,13 @@ _PROG_SLOT_ACTION_BINDINGS = {
     "prog_slot_9": "9",
     "prog_slot_10": "0",
 }
+_SIPHON_REACH_DELTAS: tuple[tuple[int, int], ...] = (
+    (0, 0),
+    (0, 1),
+    (1, 0),
+    (0, -1),
+    (-1, 0),
+)
 
 
 def _zero_reward(
@@ -43,6 +51,52 @@ def _zero_reward(
     _info: dict[str, Any],
 ) -> float:
     return 0.0
+
+
+def _resource_value_present(*, credits: int, energy: int, points: int) -> bool:
+    return int(credits) > 0 or int(energy) > 0 or int(points) > 0
+
+
+def _siphon_candidates_near_player(player_position: GridPosition) -> set[GridPosition]:
+    return {
+        GridPosition(x=player_position.x + dx, y=player_position.y + dy)
+        for dx, dy in _SIPHON_REACH_DELTAS
+    }
+
+
+def _hybrid_resource_siphon_available(snapshot: GameStateSnapshot | None) -> bool:
+    if snapshot is None or snapshot.map.status != "ok" or snapshot.map.player_position is None:
+        return False
+    nearby = _siphon_candidates_near_player(snapshot.map.player_position)
+
+    for resource in snapshot.map.resource_cells:
+        if resource.position in nearby and _resource_value_present(
+            credits=int(resource.credits),
+            energy=int(resource.energy),
+            points=int(resource.points),
+        ):
+            return True
+
+    for cell in snapshot.map.cells:
+        if cell.position not in nearby:
+            continue
+        if _resource_value_present(
+            credits=int(cell.credits),
+            energy=int(cell.energy),
+            points=int(cell.points),
+        ):
+            return True
+        if cell.prog_id is not None and int(cell.prog_id) > 0:
+            return True
+
+    for wall in snapshot.map.walls:
+        if wall.position not in nearby:
+            continue
+        if int(wall.points) > 0:
+            return True
+        if wall.prog_id is not None and int(wall.prog_id) > 0:
+            return True
+    return False
 
 
 def _build_action_config(
@@ -105,16 +159,16 @@ class HybridLiveEnvConfig:
 
     step_timeout_seconds: float = 3.0
     reset_timeout_seconds: float = 15.0
-    post_action_delay_seconds: float = 0.2
+    post_action_delay_seconds: float = 0.01
     wait_for_action_processing: bool = True
     action_ack_timeout_seconds: float = 0.35
     action_ack_poll_interval_seconds: float = 0.05
     prog_slot_backoff_steps: int = 3
     require_non_terminal_on_reset: bool = True
-    game_tick_ms: int = 16
-    disable_idle_frame_delay: bool = False
-    disable_background_motion: bool = False
-    disable_wall_animations: bool = False
+    game_tick_ms: int = 1
+    disable_idle_frame_delay: bool = True
+    disable_background_motion: bool = True
+    disable_wall_animations: bool = True
 
     def to_game_env_config(self) -> GameEnvConfig:
         return GameEnvConfig(
@@ -151,7 +205,20 @@ class HybridLiveEnv:
         return self._game_env.step(action)
 
     def available_actions(self, state: Any | None = None) -> tuple[str, ...]:
-        return self._game_env.available_actions(state)
+        actions = self._game_env.available_actions(state)
+        if "space" not in self._game_env.action_space or "space" in actions:
+            return actions
+
+        snapshot: GameStateSnapshot | None
+        if isinstance(state, GameStateSnapshot):
+            snapshot = state
+        else:
+            current_state = getattr(self._game_env, "_current_state", None)
+            snapshot = current_state if isinstance(current_state, GameStateSnapshot) else None
+
+        if _hybrid_resource_siphon_available(snapshot):
+            return (*actions, "space")
+        return actions
 
     def close(self) -> None:
         self._game_env.close()
@@ -192,4 +259,3 @@ class HybridLiveEnv:
             disable_wall_animations=bool(config.disable_wall_animations),
         )
         return cls(game_env=game_env, no_enemies_mode=bool(no_enemies_mode))
-

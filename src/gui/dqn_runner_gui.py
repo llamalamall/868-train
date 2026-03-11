@@ -24,6 +24,8 @@ from src.hybrid import runner as hybrid_runner
 from src.memory.state_monitor_tui import (
     CONTROL_MODE_AUTO,
     CONTROL_MODE_PAUSED,
+    MemoryStateMonitor,
+    PollSnapshot,
     load_external_control_snapshot,
     set_external_control_mode,
     step_external_control,
@@ -53,6 +55,7 @@ _APPDATA_GAME_SAVE_DIR = (
     else None
 )
 _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
+_TEXTUAL_MARKUP_PATTERN = re.compile(r"\[[^\]]+\]")
 _REWARD_HISTORY_LIMIT = 30
 _PALETTE = {
     "bg": "#0b0f14",
@@ -406,6 +409,10 @@ def _format_command(command: list[str]) -> str:
 
 def _parse_status_values(line: str) -> dict[str, str]:
     return {key: value for key, value in _STATUS_KV_PATTERN.findall(line)}
+
+
+def _strip_textual_markup(text: str) -> str:
+    return _TEXTUAL_MARKUP_PATTERN.sub("", text)
 
 
 def _resolve_reward_metric_value(
@@ -950,6 +957,16 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_episode_duration_sum = 0.0
         self._monitor_episode_duration_count = 0
         self._monitor_last_reward_step_key: tuple[int, int] | None = None
+        self._state_monitor: MemoryStateMonitor | None = None
+        self._state_monitor_error = tk.StringVar(value="")
+        self._state_monitor_status = tk.StringVar(value="state_monitor=idle")
+        self._state_monitor_timestamp = tk.StringVar(value="last_snapshot=-")
+        self._state_monitor_pid = tk.StringVar(value="pid=-")
+        self._state_tab_widget: ttk.Frame | None = None
+        self._state_fields_tree: ttk.Treeview | None = None
+        self._state_board_text: tk.Text | None = None
+        self._state_last_poll_monotonic = 0.0
+        self._state_poll_interval_seconds = 0.5
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=4)
@@ -1068,6 +1085,7 @@ class DqnRunnerGui(tk.Tk):
         self.after(120, self._animate_status)
         self.after(100, self._drain_event_queue)
         self.after(200, self._poll_external_status)
+        self.after(300, self._poll_state_monitor)
         self._refresh_tab_visuals()
         self._refresh_preview()
 
@@ -1131,6 +1149,32 @@ class DqnRunnerGui(tk.Tk):
         style.configure("TEntry", fieldbackground="#0f1620", foreground=_PALETTE["text"], borderwidth=1)
         style.configure("TCombobox", fieldbackground="#0f1620", foreground=_PALETTE["text"])
         style.configure("TSpinbox", fieldbackground="#0f1620", foreground=_PALETTE["text"])
+        style.configure(
+            "State.Treeview",
+            background="#0f1620",
+            fieldbackground="#0f1620",
+            foreground=_PALETTE["text"],
+            bordercolor="#243244",
+            rowheight=22,
+        )
+        style.map(
+            "State.Treeview",
+            background=[("selected", "#1b2a3b")],
+            foreground=[("selected", _PALETTE["text"])],
+        )
+        style.configure(
+            "State.Treeview.Heading",
+            background="#1a2533",
+            foreground=_PALETTE["accent"],
+            bordercolor="#243244",
+            relief="flat",
+            font=("Segoe UI Semibold", 9),
+        )
+        style.map(
+            "State.Treeview.Heading",
+            background=[("active", "#223246")],
+            foreground=[("active", _PALETTE["accent"])],
+        )
         style.configure(
             "MonitorEpsilon.Horizontal.TProgressbar",
             troughcolor="#0f1620",
@@ -1225,6 +1269,7 @@ class DqnRunnerGui(tk.Tk):
             if self._last_form is None:
                 self._last_form = form
         self._build_monitor_tab()
+        self._build_state_tab()
         self._refresh_tab_visuals()
 
     def _build_monitor_tab(self) -> None:
@@ -1401,6 +1446,10 @@ class DqnRunnerGui(tk.Tk):
     def _on_tab_changed(self) -> None:
         self._refresh_tab_visuals()
         self._refresh_preview()
+        selected_tab = self._notebook.select()
+        current_widget = self.nametowidget(selected_tab)
+        if self._state_tab_widget is not None and current_widget == self._state_tab_widget:
+            self._ensure_state_monitor_started()
 
     def _current_form(self) -> _ArgForm:
         selected_tab = self._notebook.select()
@@ -1629,6 +1678,235 @@ class DqnRunnerGui(tk.Tk):
                     self._update_monitor_metrics(training_line, reward_line=reward_line)
         self._refresh_monitor_control_state()
         self.after(200, self._poll_external_status)
+
+    def _poll_state_monitor(self) -> None:
+        try:
+            now = time.monotonic()
+            if now - self._state_last_poll_monotonic < self._state_poll_interval_seconds:
+                return
+            self._state_last_poll_monotonic = now
+            if self._state_tab_widget is None or self._state_monitor is None:
+                return
+            selected_tab = self._notebook.select()
+            current_widget = self.nametowidget(selected_tab)
+            if current_widget != self._state_tab_widget:
+                return
+            self._refresh_state_snapshot()
+        finally:
+            self.after(300, self._poll_state_monitor)
+
+    def _resolve_monitor_executable_name(self) -> str:
+        try:
+            form = self._current_form()
+            value = str(form.value_for_dest("exe") or "").strip()
+            if value:
+                return value
+        except Exception:
+            pass
+        return "868-HACK.exe"
+
+    def _ensure_state_monitor_started(self) -> None:
+        if self._state_monitor is not None:
+            return
+        executable_name = self._resolve_monitor_executable_name()
+        try:
+            monitor = MemoryStateMonitor(
+                executable_name=executable_name,
+                config_path=None,
+                fields_filter="",
+                resolve_each_poll=False,
+            )
+            monitor.start()
+        except Exception as error:
+            self._state_monitor_error.set(str(error))
+            self._state_monitor_status.set("state_monitor=error")
+            self._state_monitor_pid.set("pid=-")
+            return
+        self._state_monitor = monitor
+        self._state_monitor_error.set("")
+        self._state_monitor_status.set(f"state_monitor=attached exe={executable_name}")
+        self._state_monitor_pid.set(f"pid={monitor.attached.pid}")
+        self._refresh_state_snapshot()
+
+    def _stop_state_monitor(self) -> None:
+        if self._state_monitor is not None:
+            try:
+                self._state_monitor.stop()
+            except Exception:
+                pass
+        self._state_monitor = None
+        self._state_monitor_status.set("state_monitor=stopped")
+        self._state_monitor_pid.set("pid=-")
+        self._state_monitor_timestamp.set("last_snapshot=-")
+        self._state_monitor_error.set("")
+        if self._state_fields_tree is not None:
+            for item_id in self._state_fields_tree.get_children():
+                self._state_fields_tree.delete(item_id)
+        if self._state_board_text is not None:
+            self._state_board_text.configure(state="normal")
+            self._state_board_text.delete("1.0", "end")
+            self._state_board_text.insert("1.0", "board snapshot unavailable")
+            self._state_board_text.configure(state="disabled")
+
+    def _refresh_state_snapshot(self) -> None:
+        monitor = self._state_monitor
+        if monitor is None:
+            return
+        try:
+            snapshot = monitor.poll()
+        except Exception as error:
+            self._state_monitor_error.set(str(error))
+            self._state_monitor_status.set("state_monitor=poll_error")
+            return
+        self._state_monitor_error.set("")
+        self._state_monitor_status.set("state_monitor=ok")
+        self._state_monitor_timestamp.set(f"last_snapshot={snapshot.timestamp}")
+        self._render_state_snapshot(snapshot=snapshot)
+
+    def _render_state_snapshot(self, *, snapshot: PollSnapshot) -> None:
+        if self._state_fields_tree is not None:
+            for item_id in self._state_fields_tree.get_children():
+                self._state_fields_tree.delete(item_id)
+            for row in snapshot.fields:
+                self._state_fields_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row.name,
+                        row.data_type,
+                        row.confidence,
+                        row.address,
+                        row.value,
+                        row.status,
+                        row.error,
+                    ),
+                )
+        if self._state_board_text is not None:
+            board_text = _strip_textual_markup(snapshot.board_stats or "board snapshot unavailable")
+            self._state_board_text.configure(state="normal")
+            self._state_board_text.delete("1.0", "end")
+            self._state_board_text.insert("1.0", board_text)
+            self._state_board_text.configure(state="disabled")
+
+    def _build_state_tab(self) -> None:
+        state_tab = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
+        state_tab.columnconfigure(0, weight=1)
+        state_tab.rowconfigure(3, weight=2)
+        state_tab.rowconfigure(5, weight=1)
+
+        ttk.Label(state_tab, text="Game State Inspector", style="SectionLabel.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+
+        controls = ttk.Frame(state_tab, style="Surface.TFrame")
+        controls.grid(row=1, column=0, sticky="ew", pady=(8, 6))
+        controls.columnconfigure(0, weight=0)
+        controls.columnconfigure(1, weight=0)
+        controls.columnconfigure(2, weight=1)
+        ttk.Button(
+            controls,
+            text="Attach",
+            command=self._ensure_state_monitor_started,
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            controls,
+            text="Detach",
+            command=self._stop_state_monitor,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(
+            controls,
+            textvariable=self._state_monitor_status,
+            style="FormHelp.TLabel",
+        ).grid(row=0, column=2, sticky="e")
+
+        meta = ttk.Frame(state_tab, style="Surface.TFrame")
+        meta.grid(row=2, column=0, sticky="ew")
+        meta.columnconfigure(0, weight=1)
+        meta.columnconfigure(1, weight=1)
+        meta.columnconfigure(2, weight=1)
+        ttk.Label(meta, textvariable=self._state_monitor_pid, style="FormHelp.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        ttk.Label(meta, textvariable=self._state_monitor_timestamp, style="FormHelp.TLabel").grid(
+            row=0,
+            column=1,
+            sticky="w",
+        )
+        ttk.Label(meta, textvariable=self._state_monitor_error, style="FormHelp.TLabel").grid(
+            row=0,
+            column=2,
+            sticky="e",
+        )
+
+        table_frame = ttk.Frame(state_tab, style="Surface.TFrame")
+        table_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 8))
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        columns = ("field", "type", "confidence", "address", "value", "status", "error")
+        tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            style="State.Treeview",
+        )
+        tree.heading("field", text="Field")
+        tree.heading("type", text="Type")
+        tree.heading("confidence", text="Confidence")
+        tree.heading("address", text="Address")
+        tree.heading("value", text="Value")
+        tree.heading("status", text="Status")
+        tree.heading("error", text="Error")
+        tree.column("field", width=180, anchor="w")
+        tree.column("type", width=90, anchor="w")
+        tree.column("confidence", width=90, anchor="w")
+        tree.column("address", width=130, anchor="w")
+        tree.column("value", width=280, anchor="w")
+        tree.column("status", width=100, anchor="w")
+        tree.column("error", width=240, anchor="w")
+        tree.grid(row=0, column=0, sticky="nsew")
+        tree_scroll_y = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree_scroll_y.grid(row=0, column=1, sticky="ns")
+        tree_scroll_x = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree_scroll_x.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set)
+        self._state_fields_tree = tree
+
+        ttk.Label(state_tab, text="Decoded Board State", style="FormLabel.TLabel").grid(
+            row=4,
+            column=0,
+            sticky="w",
+        )
+        board_text = tk.Text(
+            state_tab,
+            wrap="none",
+            height=10,
+            bg=_PALETTE["terminal_bg"],
+            fg=_PALETTE["terminal_fg"],
+            insertbackground=_PALETTE["terminal_fg"],
+            relief="flat",
+            padx=8,
+            pady=8,
+            font=_FONTS["mono"],
+        )
+        board_text.grid(row=5, column=0, sticky="nsew")
+        board_scroll_y = ttk.Scrollbar(state_tab, orient="vertical", command=board_text.yview)
+        board_scroll_y.grid(row=5, column=1, sticky="ns")
+        board_scroll_x = ttk.Scrollbar(state_tab, orient="horizontal", command=board_text.xview)
+        board_scroll_x.grid(row=6, column=0, sticky="ew")
+        board_text.configure(yscrollcommand=board_scroll_y.set, xscrollcommand=board_scroll_x.set)
+        board_text.insert("1.0", "board snapshot unavailable")
+        board_text.configure(state="disabled")
+        self._state_board_text = board_text
+        self._state_tab_widget = state_tab
+
+        self._notebook.add(state_tab, text="Game State")
 
     def _set_monitor_controls_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -1961,6 +2239,7 @@ class DqnRunnerGui(tk.Tk):
     def _on_close(self) -> None:
         if self._process is not None:
             self._stop_process()
+        self._stop_state_monitor()
         self._clear_monitor_files()
         self.destroy()
 

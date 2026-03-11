@@ -55,6 +55,33 @@ def _terminal_is_fail(reason: object) -> bool:
     return any(token in normalized for token in ("fail", "loss", "dead", "start_screen"))
 
 
+def _format_monitor_target(target: object) -> str:
+    if target is None:
+        return "none"
+    target_x = getattr(target, "x", None)
+    target_y = getattr(target, "y", None)
+    if isinstance(target_x, int) and isinstance(target_y, int):
+        return f"({target_x},{target_y})"
+    return "none"
+
+
+def _format_monitor_action_line(
+    *,
+    action: str,
+    reason: str,
+    phase: ObjectivePhase,
+    target: object,
+) -> str:
+    return (
+        "action={action} phase={phase} next_target={target} reason={reason}"
+    ).format(
+        action=action,
+        phase=phase.value,
+        target=_format_monitor_target(target),
+        reason=reason,
+    )
+
+
 @dataclass(frozen=True)
 class HybridEpisodeSummary:
     """Per-episode rollout summary."""
@@ -163,7 +190,7 @@ def _add_common_runner_args(
     parser.add_argument(
         "--game-tick-ms",
         type=_game_tick_ms_arg,
-        default=16,
+        default=1,
         help="Target game loop tick size in milliseconds (1..16).",
     )
     parser.add_argument(
@@ -175,7 +202,7 @@ def _add_common_runner_args(
     parser.add_argument(
         "--post-action-delay",
         type=float,
-        default=0.2,
+        default=0.01,
         help="Fixed delay after dispatching each action before reading state.",
     )
     parser.add_argument(
@@ -211,19 +238,19 @@ def _add_common_runner_args(
     parser.add_argument(
         "--disable-idle-frame-delay",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Patch idle frame delay for faster runtime pacing.",
     )
     parser.add_argument(
         "--disable-background-motion",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Disable animated background motion effect.",
     )
     parser.add_argument(
         "--disable-wall-animations",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Freeze wall/tile animation counter.",
     )
     parser.add_argument(
@@ -636,8 +663,10 @@ def _run_rollouts(
                             updates=updates_applied,
                         )
                     ),
-                    action_line="action={action} reason={reason}".format(
+                    action_line=_format_monitor_action_line(
                         action=trace.decision.action,
+                        phase=trace.decision.objective.phase,
+                        target=target,
                         reason=trace.decision.reason,
                     ),
                 )
@@ -742,8 +771,10 @@ def _run_rollouts(
                             terminal=terminal_reason or "-",
                         )
                     ),
-                    action_line="action={action} reason={reason}".format(
+                    action_line=_format_monitor_action_line(
                         action=trace.decision.action,
+                        phase=trace.decision.objective.phase,
+                        target=target,
                         reason=trace.decision.reason,
                     ),
                     reward_line=_format_reward_line(
@@ -820,13 +851,15 @@ def main() -> None:
 
         command = str(args.command)
         reward_suite = HybridRewardSuite()
+        coordinator_config = HybridCoordinatorConfig(
+            threat_trigger_distance=max(int(args.threat_trigger_distance), 1),
+            exit_after_siphons_when_scripted=False,
+        )
         coordinator = HybridCoordinator(
             meta_controller=MetaControllerDQN(config=_build_meta_config(args), seed=args.seed),
             threat_controller=ThreatControllerDRQN(config=_build_threat_config(args), seed=args.seed),
             movement_controller=AStarMovementController(),
-            config=HybridCoordinatorConfig(
-                threat_trigger_distance=max(int(args.threat_trigger_distance), 1),
-            ),
+            config=coordinator_config,
         )
 
         if command == "eval-hybrid":
@@ -837,9 +870,7 @@ def main() -> None:
                 meta_controller=loaded_meta,
                 threat_controller=loaded_threat,
                 movement_controller=AStarMovementController(),
-                config=HybridCoordinatorConfig(
-                    threat_trigger_distance=max(int(args.threat_trigger_distance), 1),
-                ),
+                config=coordinator_config,
             )
         elif getattr(args, "resume_checkpoint", None):
             loaded_meta, loaded_threat, _bundle_config, _training_state = HybridCheckpointManager.load_bundle(
@@ -849,9 +880,7 @@ def main() -> None:
                 meta_controller=loaded_meta,
                 threat_controller=loaded_threat,
                 movement_controller=AStarMovementController(),
-                config=HybridCoordinatorConfig(
-                    threat_trigger_distance=max(int(args.threat_trigger_distance), 1),
-                ),
+                config=coordinator_config,
             )
         elif command == "train-full-hierarchical" and getattr(args, "warmstart_checkpoint", None):
             loaded_meta, _loaded_threat, _bundle_config, _training_state = HybridCheckpointManager.load_bundle(
@@ -861,9 +890,7 @@ def main() -> None:
                 meta_controller=loaded_meta,
                 threat_controller=ThreatControllerDRQN(config=_build_threat_config(args), seed=args.seed),
                 movement_controller=AStarMovementController(),
-                config=HybridCoordinatorConfig(
-                    threat_trigger_distance=max(int(args.threat_trigger_distance), 1),
-                ),
+                config=coordinator_config,
             )
 
         if command == "movement-test":

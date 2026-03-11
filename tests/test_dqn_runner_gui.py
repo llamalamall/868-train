@@ -18,6 +18,7 @@ from src.gui.dqn_runner_gui import (
     _resolve_reward_metric_value,
     _run_dqn_preset_overrides,
     _run_hybrid_preset_overrides,
+    _strip_textual_markup,
     _sort_form_actions,
 )
 from src.training.rewards import RewardWeights
@@ -142,3 +143,8 @@ def test_resolve_reward_metric_value_uses_reward_line_total_when_training_waits(
         previous_value="-",
     )
     assert reward_value == "+0.420"
+
+
+def test_strip_textual_markup_removes_color_tokens_from_board_text() -> None:
+    raw = "map [yellow]#[/] [bright_white]P[/] [magenta]E[/]"
+    assert _strip_textual_markup(raw) == "map # P E"

@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import pytest
 
-from src.hybrid.runner import _build_parser, _validate_args
+from src.hybrid.runner import _build_parser, _format_monitor_action_line, _validate_args
+from src.hybrid.types import ObjectivePhase
+from src.state.schema import GridPosition
 
 
 def test_hybrid_parser_movement_defaults() -> None:
@@ -17,6 +19,11 @@ def test_hybrid_parser_movement_defaults() -> None:
     assert args.no_enemies is True
     assert args.tui is True
     assert args.step_through is False
+    assert args.game_tick_ms == 1
+    assert args.post_action_delay == pytest.approx(0.01)
+    assert args.disable_idle_frame_delay is True
+    assert args.disable_background_motion is True
+    assert args.disable_wall_animations is True
 
 
 def test_hybrid_parser_train_meta_defaults() -> None:
@@ -28,6 +35,11 @@ def test_hybrid_parser_train_meta_defaults() -> None:
     assert args.max_steps == 350
     assert args.no_enemies is True
     assert args.meta_epsilon_start == pytest.approx(0.60)
+    assert args.game_tick_ms == 1
+    assert args.post_action_delay == pytest.approx(0.01)
+    assert args.disable_idle_frame_delay is True
+    assert args.disable_background_motion is True
+    assert args.disable_wall_animations is True
 
 
 def test_hybrid_parser_train_full_requires_warmstart_when_not_resuming() -> None:
@@ -60,3 +72,15 @@ def test_hybrid_parser_eval_requires_checkpoint() -> None:
     with pytest.raises(SystemExit):
         parser.parse_args(["eval-hybrid"])
 
+
+def test_format_monitor_action_line_includes_phase_and_target_coordinates() -> None:
+    line = _format_monitor_action_line(
+        action="move_right",
+        reason="scripted_phase_only",
+        phase=ObjectivePhase.COLLECT_SIPHONS,
+        target=GridPosition(x=3, y=4),
+    )
+    assert line == (
+        "action=move_right phase=collect_siphons next_target=(3,4) "
+        "reason=scripted_phase_only"
+    )

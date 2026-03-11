@@ -403,8 +403,8 @@ def render_ascii_map(map_state: MapState) -> str:
                 row_chars.append(_styled(symbol, "bright_white"))
             else:
                 row_chars.append(_styled(symbol, "bright_black"))
-        lines.append(f"{y}|{''.join(row_chars)}")
-    lines.append(f"  {''.join(str(index % 10) for index in range(map_state.width))}")
+        lines.append(f"{y}|{' '.join(row_chars)}")
+    lines.append(f"  {' '.join(str(index % 10) for index in range(map_state.width))}")
     return "\n".join(lines)
 
 

@@ -344,12 +344,12 @@ def test_render_ascii_map_shows_key_board_features() -> None:
     rendered = render_ascii_map(map_state)
     assert "map  [bright_black]\u00b7[/] empty  [yellow]\u2593[/] wall" in rendered
     assert "[red]\u2620[/] enemy  [bright_white]\u263a[/] player" in rendered
-    assert "1|[bright_black]\u00b7[/][bright_white]\u263a[/][bright_black]\u00b7[/]" in rendered
-    assert "0|[yellow]\u2593[/][cyan]\u00a4[/][magenta]\u21e9[/]" in rendered
-    assert rendered.index("1|[bright_black]\u00b7[/][bright_white]\u263a[/][bright_black]\u00b7[/]") < rendered.index(
-        "0|[yellow]\u2593[/][cyan]\u00a4[/][magenta]\u21e9[/]"
+    assert "1|[bright_black]\u00b7[/] [bright_white]\u263a[/] [bright_black]\u00b7[/]" in rendered
+    assert "0|[yellow]\u2593[/] [cyan]\u00a4[/] [magenta]\u21e9[/]" in rendered
+    assert rendered.index("1|[bright_black]\u00b7[/] [bright_white]\u263a[/] [bright_black]\u00b7[/]") < rendered.index(
+        "0|[yellow]\u2593[/] [cyan]\u00a4[/] [magenta]\u21e9[/]"
     )
-    assert "  012" in rendered
+    assert "  0 1 2" in rendered
 
 
 def test_render_ascii_map_reports_non_ok_status() -> None:
