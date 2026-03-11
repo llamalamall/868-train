@@ -1017,7 +1017,14 @@ def test_compute_reward_phase_progress_routes_objectives_in_order() -> None:
     assert siphon_result.breakdown.phase_progress == pytest.approx(1.0)
     assert siphon_result.breakdown.backtrack_penalty == 0.0
 
-    # 2) Harvest phase (takes priority over enemies once siphons are gone).
+    # 2) High-priority siphon-spend phase (takes priority over enemies once siphons are gone).
+    high_priority_prog = MapCellState(
+        position=GridPosition(2, 0),
+        cell_type=0,
+        tile_variant=0,
+        wall_state=0,
+        prog_id=10,
+    )
     harvest_before = _snapshot(
         health=_ok_field(10),
         currency=_ok_field(0),
@@ -1029,7 +1036,7 @@ def test_compute_reward_phase_progress_routes_objectives_in_order() -> None:
             player_position=GridPosition(0, 0),
             siphons=(),
             enemies=(EnemyState(slot=1, type_id=2, position=GridPosition(0, 1), hp=1, state=0, in_bounds=True),),
-            resource_cells=(ResourceCellState(position=GridPosition(2, 0), credits=1),),
+            cells=(high_priority_prog,),
             exit_position=GridPosition(2, 1),
         ),
     )
@@ -1044,7 +1051,7 @@ def test_compute_reward_phase_progress_routes_objectives_in_order() -> None:
             player_position=GridPosition(1, 0),
             siphons=(),
             enemies=(EnemyState(slot=1, type_id=2, position=GridPosition(0, 1), hp=1, state=0, in_bounds=True),),
-            resource_cells=(ResourceCellState(position=GridPosition(2, 0), credits=1),),
+            cells=(high_priority_prog,),
             exit_position=GridPosition(2, 1),
         ),
     )
@@ -1132,6 +1139,128 @@ def test_compute_reward_phase_progress_routes_objectives_in_order() -> None:
     )
     assert exit_result.breakdown.phase_progress == pytest.approx(1.0)
     assert exit_result.breakdown.backtrack_penalty == 0.0
+
+    # 5) Low-priority siphon targets do not block exit phase progression.
+    low_priority_prog = MapCellState(
+        position=GridPosition(0, 1),
+        cell_type=0,
+        tile_variant=0,
+        wall_state=0,
+        prog_id=31,
+    )
+    low_priority_before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(0, 0),
+            siphons=(),
+            enemies=(),
+            cells=(low_priority_prog,),
+            exit_position=GridPosition(2, 0),
+        ),
+    )
+    low_priority_after = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(),
+            cells=(low_priority_prog,),
+            exit_position=GridPosition(2, 0),
+        ),
+    )
+    low_priority_result = compute_reward(
+        previous_state=low_priority_before,
+        current_state=low_priority_after,
+        done=False,
+        config=config,
+    )
+    assert low_priority_result.breakdown.phase_progress == pytest.approx(1.0)
+    assert low_priority_result.breakdown.backtrack_penalty == 0.0
+
+
+def test_compute_reward_phase_progress_blocks_exit_until_high_priority_targets_are_siphoned() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            energy_delta=0.0,
+            score_delta=0.0,
+            siphon_collected=0.0,
+            enemy_cleared=0.0,
+            phase_progress=1.0,
+            backtrack_penalty=1.0,
+            map_clear_bonus=0.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+            safe_tile_bonus=0.0,
+            danger_tile_penalty=0.0,
+            resource_proximity=0.0,
+            prog_collected_base=0.0,
+            points_collected=0.0,
+            damage_taken_penalty=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    high_priority_prog = MapCellState(
+        position=GridPosition(0, 1),
+        cell_type=0,
+        tile_variant=0,
+        wall_state=0,
+        prog_id=10,
+    )
+    before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(0, 0),
+            siphons=(),
+            enemies=(),
+            cells=(high_priority_prog,),
+            exit_position=GridPosition(2, 0),
+        ),
+    )
+    after = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=2,
+            player_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(),
+            cells=(high_priority_prog,),
+            exit_position=GridPosition(2, 0),
+        ),
+    )
+
+    result = compute_reward(
+        previous_state=before,
+        current_state=after,
+        done=False,
+        config=config,
+    )
+
+    assert result.breakdown.phase_progress == 0.0
+    assert result.breakdown.backtrack_penalty == pytest.approx(-1.0)
 
 
 def test_compute_reward_adds_sector_advance_reward_for_positive_deltas_only() -> None:
@@ -1271,3 +1400,79 @@ def test_compute_reward_applies_map_clear_bonus_only_on_entering_cleared_exit() 
 
     assert first.breakdown.map_clear_bonus == pytest.approx(8.0)
     assert second.breakdown.map_clear_bonus == 0.0
+
+
+def test_compute_reward_withholds_map_clear_bonus_while_high_priority_targets_remain() -> None:
+    config = RewardConfig(
+        weights=RewardWeights(
+            survival=0.0,
+            step_penalty=0.0,
+            health_delta=0.0,
+            currency_delta=0.0,
+            energy_delta=0.0,
+            score_delta=0.0,
+            siphon_collected=0.0,
+            enemy_damaged=0.0,
+            enemy_cleared=0.0,
+            phase_progress=0.0,
+            backtrack_penalty=0.0,
+            map_clear_bonus=8.0,
+            premature_exit_penalty=0.0,
+            invalid_action_penalty=0.0,
+            fail_penalty=0.0,
+            safe_tile_bonus=0.0,
+            danger_tile_penalty=0.0,
+            resource_proximity=0.0,
+            prog_collected_base=0.0,
+            points_collected=0.0,
+            damage_taken_penalty=0.0,
+            sector_advance=0.0,
+        ),
+        reward_clip_abs=100.0,
+    )
+    high_priority_prog = MapCellState(
+        position=GridPosition(0, 0),
+        cell_type=0,
+        tile_variant=0,
+        wall_state=0,
+        prog_id=10,
+    )
+    before = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(),
+            cells=(high_priority_prog,),
+        ),
+    )
+    at_exit_with_target_remaining = _snapshot(
+        health=_ok_field(10),
+        currency=_ok_field(0),
+        fail_state=_ok_field(False),
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(1, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+            enemies=(),
+            cells=(high_priority_prog,),
+        ),
+    )
+
+    result = compute_reward(
+        previous_state=before,
+        current_state=at_exit_with_target_remaining,
+        done=False,
+        config=config,
+    )
+
+    assert result.breakdown.map_clear_bonus == 0.0

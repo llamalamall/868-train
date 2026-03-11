@@ -203,13 +203,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reward-phase-progress",
         type=float,
         default=default_weights.phase_progress,
-        help="Weight for progress toward active objective (siphon->enemy->exit).",
+        help="Weight for progress toward active objective (siphon->high-priority siphon target->enemy->exit).",
     )
     parser.add_argument(
         "--reward-map-clear-bonus",
         type=float,
         default=default_weights.map_clear_bonus,
-        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+        help="Bonus when player reaches exit after siphons/enemies are cleared and high-priority targets are siphoned.",
     )
     parser.add_argument(
         "--reward-premature-exit-penalty",

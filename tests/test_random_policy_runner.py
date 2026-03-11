@@ -71,6 +71,18 @@ def test_build_action_config_can_disable_prog_slot_actions() -> None:
     assert all(not action.startswith("prog_slot_") for action in config.action_key_bindings)
 
 
+def test_build_action_config_can_bind_siphon_to_z() -> None:
+    config = _build_action_config("arrows", siphon_key="z")
+
+    assert config.action_key_bindings["space"] == "Z"
+    assert config.key_codes["Z"] == 0x5A
+
+
+def test_build_action_config_rejects_unknown_siphon_key() -> None:
+    with pytest.raises(ValueError, match="siphon_key must be one of"):
+        _build_action_config("arrows", siphon_key="enter")
+
+
 def test_build_action_config_rejects_unknown_profile() -> None:
     with pytest.raises(ValueError, match="movement_keys must be one of"):
         _build_action_config("vim")

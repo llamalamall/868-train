@@ -351,6 +351,82 @@ def _nearest_siphon_distance(state: GameStateSnapshot) -> int | None:
     )
 
 
+def _high_priority_prog_ids(config: RewardConfig) -> set[int]:
+    priority_ids: set[int] = set()
+    for prog_id, bonus in config.prog_priority_bonus_by_id.items():
+        try:
+            normalized_prog_id = int(prog_id)
+            normalized_bonus = float(bonus)
+        except (TypeError, ValueError):
+            continue
+        if normalized_bonus > 0.0:
+            priority_ids.add(normalized_prog_id)
+    return priority_ids
+
+
+def _high_priority_siphon_targets(
+    state: GameStateSnapshot,
+    *,
+    config: RewardConfig,
+) -> tuple[GridPosition, ...]:
+    if state.map.status != "ok":
+        return ()
+
+    priority_prog_ids = _high_priority_prog_ids(config)
+    if not priority_prog_ids:
+        return ()
+
+    targets: set[GridPosition] = set()
+    width = int(state.map.width)
+    height = int(state.map.height)
+    walls = _wall_positions(state)
+
+    def _add_adjacent_walkable_positions(position: GridPosition) -> None:
+        for dx, dy in _MOVE_VECTORS:
+            candidate = GridPosition(x=position.x + dx, y=position.y + dy)
+            if not _is_in_bounds(candidate, width=width, height=height):
+                continue
+            if candidate in walls:
+                continue
+            targets.add(candidate)
+
+    for cell in state.map.cells:
+        if cell.prog_id is None or int(cell.prog_id) not in priority_prog_ids:
+            continue
+        if cell.is_wall:
+            _add_adjacent_walkable_positions(cell.position)
+        else:
+            targets.add(cell.position)
+
+    for wall in state.map.walls:
+        if wall.prog_id is None or int(wall.prog_id) not in priority_prog_ids:
+            continue
+        _add_adjacent_walkable_positions(wall.position)
+
+    return tuple(targets)
+
+
+def _has_high_priority_siphon_targets(
+    state: GameStateSnapshot,
+    *,
+    config: RewardConfig,
+) -> bool:
+    return bool(_high_priority_siphon_targets(state, config=config))
+
+
+def _nearest_high_priority_siphon_target_distance(
+    state: GameStateSnapshot,
+    *,
+    config: RewardConfig,
+) -> int | None:
+    if state.map.status != "ok" or state.map.player_position is None:
+        return None
+    targets = _high_priority_siphon_targets(state, config=config)
+    if not targets:
+        return None
+    return _nearest_path_distance_to_targets(state=state, targets=targets)
+
+
 def _nearest_enemy_distance(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
@@ -378,15 +454,23 @@ def _phase_progress_delta(
     *,
     previous_state: GameStateSnapshot,
     current_state: GameStateSnapshot,
+    config: RewardConfig,
 ) -> float:
     previous_siphons = _count_siphons(previous_state)
     previous_enemies = _count_live_enemies(previous_state)
+    previous_high_priority_distance = _nearest_high_priority_siphon_target_distance(
+        previous_state,
+        config=config,
+    )
     if previous_siphons is not None and previous_siphons > 0:
         previous_distance = _nearest_siphon_distance(previous_state)
         current_distance = _nearest_siphon_distance(current_state)
-    elif _nearest_harvest_target_distance(previous_state) is not None:
-        previous_distance = _nearest_harvest_target_distance(previous_state)
-        current_distance = _nearest_harvest_target_distance(current_state)
+    elif previous_high_priority_distance is not None:
+        previous_distance = previous_high_priority_distance
+        current_distance = _nearest_high_priority_siphon_target_distance(
+            current_state,
+            config=config,
+        )
     elif previous_enemies is not None and previous_enemies > 0:
         previous_distance = _nearest_enemy_distance(previous_state)
         current_distance = _nearest_enemy_distance(current_state)
@@ -520,17 +604,26 @@ def _sector_index(state: GameStateSnapshot) -> int | None:
     return int(sector)
 
 
-def _is_map_clear_exit_state(state: GameStateSnapshot) -> bool:
+def _is_map_clear_exit_state(
+    state: GameStateSnapshot,
+    *,
+    config: RewardConfig,
+) -> bool:
     on_exit = _player_on_exit(state)
     if not on_exit:
         return False
     siphons_remaining = _count_siphons(state)
     enemies_remaining = _count_live_enemies(state)
+    high_priority_targets_remaining = _has_high_priority_siphon_targets(
+        state,
+        config=config,
+    )
     return (
         siphons_remaining is not None
         and siphons_remaining == 0
         and enemies_remaining is not None
         and enemies_remaining == 0
+        and not high_priority_targets_remaining
     )
 
 
@@ -628,6 +721,7 @@ def compute_reward(
     phase_delta = _phase_progress_delta(
         previous_state=previous_state,
         current_state=current_state,
+        config=active_config,
     )
     phase_progress_component = max(phase_delta, 0.0) * abs(weights.phase_progress)
     backtrack_component = -max(-phase_delta, 0.0) * abs(weights.backtrack_penalty)
@@ -651,7 +745,8 @@ def compute_reward(
 
     map_clear_component = (
         abs(weights.map_clear_bonus)
-        if _is_map_clear_exit_state(current_state) and not _is_map_clear_exit_state(previous_state)
+        if _is_map_clear_exit_state(current_state, config=active_config)
+        and not _is_map_clear_exit_state(previous_state, config=active_config)
         else 0.0
     )
 

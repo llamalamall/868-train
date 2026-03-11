@@ -747,7 +747,11 @@ class GameEnv:
             return False
         if snapshot.map.status != "ok" or snapshot.map.player_position is None:
             return False
-        return snapshot.map.player_position in set(snapshot.map.siphons)
+        player = snapshot.map.player_position
+        for siphon in snapshot.map.siphons:
+            if abs(player.x - siphon.x) + abs(player.y - siphon.y) <= 1:
+                return True
+        return False
 
     def _fallback_prog_slot_allowed(self, snapshot: GameStateSnapshot | None) -> bool:
         if snapshot is None:

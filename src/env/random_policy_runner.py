@@ -49,10 +49,19 @@ def _game_tick_ms_arg(value: str) -> int:
     return parsed
 
 
-def _build_action_config(movement_keys: str, *, include_prog_actions: bool = True) -> ActionConfig:
+def _build_action_config(
+    movement_keys: str,
+    *,
+    include_prog_actions: bool = True,
+    siphon_key: str = "space",
+) -> ActionConfig:
     default_config = ActionConfig()
     bindings = dict(default_config.action_key_bindings)
     key_codes = dict(default_config.key_codes)
+    normalized_siphon_key = str(siphon_key).strip().lower()
+    if normalized_siphon_key not in {"space", "z"}:
+        raise ValueError("siphon_key must be one of: space, z.")
+    bindings["space"] = "SPACE" if normalized_siphon_key == "space" else "Z"
 
     if movement_keys == "wasd":
         bindings.update(
@@ -441,7 +450,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reward-phase-progress",
         type=float,
         default=default_weights.phase_progress,
-        help="Weight for progress toward active objective (siphon->enemy->exit).",
+        help="Weight for progress toward active objective (siphon->high-priority siphon target->enemy->exit).",
     )
     parser.add_argument(
         "--reward-backtrack-penalty",
@@ -453,7 +462,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reward-map-clear-bonus",
         type=float,
         default=default_weights.map_clear_bonus,
-        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+        help="Bonus when player reaches exit after siphons/enemies are cleared and high-priority targets are siphoned.",
     )
     parser.add_argument(
         "--reward-premature-exit-penalty",

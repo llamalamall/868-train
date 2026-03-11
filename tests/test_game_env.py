@@ -738,6 +738,28 @@ def test_available_actions_adds_space_only_when_player_can_siphon() -> None:
     assert env.available_actions() == ("space",)
 
 
+def test_available_actions_adds_space_when_adjacent_to_siphon_without_ui_flag() -> None:
+    state = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=3,
+            height=3,
+            player_position=GridPosition(0, 0),
+            siphons=(GridPosition(1, 0),),
+        )
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([state]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_up", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+    env.reset()
+
+    assert env.available_actions() == ("move_up", "space")
+
+
 def test_available_actions_allows_space_from_ui_flag_even_when_not_on_tile() -> None:
     state = _snapshot(
         map_state=MapState(

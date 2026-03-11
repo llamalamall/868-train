@@ -121,14 +121,20 @@ def _build_parser() -> argparse.ArgumentParser:
         default=True,
         help="Launch --exe when not already running before attempting attach.",
     )
-    parser.add_argument("--episodes", type=int, default=20, help="Number of episodes to run.")
-    parser.add_argument("--max-steps", type=int, default=500, help="Max steps per episode.")
+    parser.add_argument("--episodes", type=int, default=100, help="Number of episodes to run.")
+    parser.add_argument("--max-steps", type=int, default=1000, help="Max steps per episode.")
     parser.add_argument("--seed", type=int, default=None, help="Optional random seed.")
     parser.add_argument(
         "--movement-keys",
         choices=("arrows", "wasd", "numpad"),
         default="arrows",
         help="Movement key mapping profile.",
+    )
+    parser.add_argument(
+        "--siphon-key",
+        choices=("space", "z"),
+        default="space",
+        help="Key used by the siphon action.",
     )
     parser.add_argument(
         "--prog-actions",
@@ -186,7 +192,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--tui",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Launch live state monitor TUI in a separate console window.",
     )
     parser.add_argument(
@@ -226,25 +232,25 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--game-tick-ms",
         type=_game_tick_ms_arg,
-        default=16,
+        default=1,
         help="Target game loop tick size in milliseconds (1..16). Lower values speed up gameplay.",
     )
     parser.add_argument(
         "--disable-idle-frame-delay",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Patch SDL_Delay(1) in the main loop to SDL_Delay(0) for faster runtime pacing.",
     )
     parser.add_argument(
         "--disable-background-motion",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Disable animated background motion effect via runtime flag patching.",
     )
     parser.add_argument(
         "--disable-wall-animations",
         action=argparse.BooleanOptionalAction,
-        default=False,
+        default=True,
         help="Freeze wall/tile palette animation counter in the renderer.",
     )
     parser.add_argument(
@@ -256,7 +262,7 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--post-action-delay",
         type=float,
-        default=0.2,
+        default=0.01,
         help="Fixed delay after dispatching each action before reading state.",
     )
     parser.add_argument(
@@ -412,7 +418,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reward-phase-progress",
         type=float,
         default=default_weights.phase_progress,
-        help="Weight for progress toward active objective (siphon->enemy->exit).",
+        help="Weight for progress toward active objective (siphon->high-priority siphon target->enemy->exit).",
     )
     parser.add_argument(
         "--reward-backtrack-penalty",
@@ -424,7 +430,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "--reward-map-clear-bonus",
         type=float,
         default=default_weights.map_clear_bonus,
-        help="Bonus when player reaches exit after all siphons/enemies are cleared.",
+        help="Bonus when player reaches exit after siphons/enemies are cleared and high-priority targets are siphoned.",
     )
     parser.add_argument(
         "--reward-premature-exit-penalty",
@@ -677,6 +683,7 @@ def main() -> None:
             action_config=_build_action_config(
                 args.movement_keys,
                 include_prog_actions=bool(args.prog_actions),
+                siphon_key=str(args.siphon_key),
             ),
             pre_reset_hook=(
                 _restore_save_before_reset
@@ -784,6 +791,56 @@ def main() -> None:
                     ),
                 )[0]
                 results.append(episode_result)
+
+                reached_step_limit_without_terminal = (
+                    not bool(episode_result.done)
+                    and int(episode_result.steps) >= int(args.max_steps)
+                )
+                if reached_step_limit_without_terminal:
+                    print(
+                        "episode_step_limit_reached\tepisode={episode}\tsteps={steps}\t"
+                        "action=cancel_then_reset".format(
+                            episode=episode_result.episode_id,
+                            steps=episode_result.steps,
+                        )
+                    )
+                    if "cancel" in env.action_space:
+                        try:
+                            env.step("cancel")
+                        except Exception as error:
+                            print(
+                                "episode_step_limit_cancel_failed\tepisode={episode}\terror={error}".format(
+                                    episode=episode_result.episode_id,
+                                    error=error,
+                                )
+                            )
+                    else:
+                        print(
+                            "episode_step_limit_cancel_unavailable\tepisode={episode}".format(
+                                episode=episode_result.episode_id,
+                            )
+                        )
+
+                    if restore_save_source is not None and restore_save_target is not None:
+                        try:
+                            _restore_save_before_reset()
+                        except Exception as error:
+                            print(
+                                "episode_step_limit_restore_failed\tepisode={episode}\terror={error}".format(
+                                    episode=episode_result.episode_id,
+                                    error=error,
+                                )
+                            )
+
+                    try:
+                        env.reset()
+                    except Exception as error:
+                        print(
+                            "episode_step_limit_reset_failed\tepisode={episode}\terror={error}".format(
+                                episode=episode_result.episode_id,
+                                error=error,
+                            )
+                        )
 
                 if args.checkpoint_every and episode_index % int(args.checkpoint_every) == 0:
                     periodic_path = _periodic_checkpoint_path(
