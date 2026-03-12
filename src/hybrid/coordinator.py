@@ -215,7 +215,7 @@ class HybridCoordinator:
         siphons_remaining = len(state.map.siphons)
         if siphons_remaining > 0:
             return (ObjectivePhase.COLLECT_SIPHONS,)
-        if self.config.exit_after_siphons_when_scripted or state.extra_fields.get("siphons").value <= 0:
+        if self.config.exit_after_siphons_when_scripted:
             return (ObjectivePhase.EXIT_SECTOR,)
         if _resource_targets(state):
             return (

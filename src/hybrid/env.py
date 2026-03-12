@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from src.controller.action_api import ActionConfig
 from src.env.game_env import GameEnv, GameEnvConfig
@@ -237,6 +237,7 @@ class HybridLiveEnv:
         focus_window_on_attach: bool,
         window_targeted_input: bool,
         no_enemies_mode: bool,
+        pre_reset_hook: Callable[[], None] | None = None,
     ) -> HybridLiveEnv:
         action_config = _build_action_config(
             movement_keys,
@@ -251,6 +252,7 @@ class HybridLiveEnv:
             focus_window_on_attach=bool(focus_window_on_attach),
             window_targeted_input=bool(window_targeted_input),
             action_config=action_config,
+            pre_reset_hook=pre_reset_hook,
             reward_fn=_zero_reward,
             game_tick_ms=int(config.game_tick_ms),
             no_enemies_mode=bool(no_enemies_mode),

@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 from src.env import dqn_policy_runner
+from src.hybrid import runner as hybrid_runner
 from src.gui.dqn_runner_gui import (
     _HYBRID_CHECKPOINT_DIR,
     _SMOKE_TEST_REWARD_DESTS,
@@ -13,6 +14,7 @@ from src.gui.dqn_runner_gui import (
     _format_duration_seconds,
     _initial_browse_dir,
     _is_boolean_flag,
+    _get_subparser,
     _iter_parser_actions,
     _parse_episode_progress,
     _resolve_reward_metric_value,
@@ -148,3 +150,17 @@ def test_resolve_reward_metric_value_uses_reward_line_total_when_training_waits(
 def test_strip_textual_markup_removes_color_tokens_from_board_text() -> None:
     raw = "map [yellow]#[/] [bright_white]P[/] [magenta]E[/]"
     assert _strip_textual_markup(raw) == "map # P E"
+
+
+def test_hybrid_gui_action_discovery_includes_meta_reward_weight_flags() -> None:
+    parser = hybrid_runner._build_parser()
+    movement_parser = _get_subparser(parser, command_name="movement-test")
+    discovered = {action.dest for action in _iter_parser_actions(movement_parser)}
+
+    assert "restore_save_file" in discovered
+    assert "restore_save_delay" in discovered
+    assert "meta_reward_objective_complete" in discovered
+    assert "meta_reward_phase_progress" in discovered
+    assert "meta_reward_step_cost" in discovered
+    assert "meta_reward_premature_exit_penalty" in discovered
+    assert "meta_reward_sector_advance" in discovered

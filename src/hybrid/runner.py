@@ -4,19 +4,25 @@ from __future__ import annotations
 
 import argparse
 import re
-from dataclasses import dataclass
+import time
+from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 from statistics import mean
-from typing import Any
+from typing import Any, Callable
 
 from src.env.runner_tui import RunnerTuiSession
+from src.env.random_policy_runner import (
+    _default_game_save_target_path,
+    _resolve_restore_save_source_path,
+    _restore_selected_save_file,
+)
 from src.hybrid.astar_controller import AStarMovementController
 from src.hybrid.checkpoint import HybridCheckpointManager
 from src.hybrid.coordinator import HybridCoordinator, HybridCoordinatorConfig
 from src.hybrid.env import HybridLiveEnv, HybridLiveEnvConfig
 from src.hybrid.meta_controller import MetaControllerDQN, MetaDQNConfig
-from src.hybrid.rewards import HybridRewardSuite
+from src.hybrid.rewards import HybridMetaRewardWeights, HybridRewardSuite
 from src.hybrid.threat_controller import ThreatControllerDRQN, ThreatDRQNConfig
 from src.hybrid.types import ObjectivePhase, ThreatOverride
 
@@ -270,6 +276,20 @@ def _add_common_runner_args(
         help="Root directory for saved hybrid checkpoint bundles.",
     )
     parser.add_argument(
+        "--restore-save-file",
+        default=None,
+        help=(
+            "Optional source save file to restore before each new-game confirm/reset action. "
+            "When set, the file is copied to %APPDATA%\\868-hack\\savegame_868."
+        ),
+    )
+    parser.add_argument(
+        "--restore-save-delay",
+        type=float,
+        default=0.35,
+        help="Delay in seconds after restoring save file before the next episode reset/new game.",
+    )
+    parser.add_argument(
         "--threat-trigger-distance",
         type=int,
         default=2,
@@ -280,6 +300,36 @@ def _add_common_runner_args(
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Print per-step split reward components.",
+    )
+    parser.add_argument(
+        "--meta-reward-objective-complete",
+        type=float,
+        default=1.50,
+        help="Meta reward: objective completion bonus.",
+    )
+    parser.add_argument(
+        "--meta-reward-phase-progress",
+        type=float,
+        default=0.25,
+        help="Meta reward: distance progress shaping coefficient.",
+    )
+    parser.add_argument(
+        "--meta-reward-step-cost",
+        type=float,
+        default=0.01,
+        help="Meta reward: per-step cost coefficient.",
+    )
+    parser.add_argument(
+        "--meta-reward-premature-exit-penalty",
+        type=float,
+        default=1.25,
+        help="Meta reward: premature-exit penalty.",
+    )
+    parser.add_argument(
+        "--meta-reward-sector-advance",
+        type=float,
+        default=1.00,
+        help="Meta reward: sector-advance bonus coefficient.",
     )
 
 
@@ -416,10 +466,18 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--action-ack-poll-interval must be >= 0.")
     if float(args.action_ack_timeout) < 0:
         parser.error("--action-ack-timeout must be >= 0.")
+    if float(args.restore_save_delay) < 0:
+        parser.error("--restore-save-delay must be >= 0.")
     if int(args.prog_backoff_steps) < 0:
         parser.error("--prog-backoff-steps must be >= 0.")
     if bool(args.step_through) and not bool(args.tui):
         parser.error("--step-through requires --tui.")
+    restore_source = _resolve_restore_save_source_path(args)
+    if restore_source is not None:
+        if not restore_source.exists():
+            parser.error(f"--restore-save-file not found: {restore_source}.")
+        if not restore_source.is_file():
+            parser.error(f"--restore-save-file must be a file: {restore_source}.")
     if args.command == "train-full-hierarchical" and not args.resume_checkpoint and not args.warmstart_checkpoint:
         parser.error(
             "--warmstart-checkpoint is required for train-full-hierarchical "
@@ -459,6 +517,16 @@ def _build_threat_config(args: argparse.Namespace) -> ThreatDRQNConfig:
     )
 
 
+def _build_meta_reward_weights(args: argparse.Namespace) -> HybridMetaRewardWeights:
+    return HybridMetaRewardWeights(
+        objective_complete=float(getattr(args, "meta_reward_objective_complete", 1.50)),
+        phase_progress=float(getattr(args, "meta_reward_phase_progress", 0.25)),
+        step_cost=float(getattr(args, "meta_reward_step_cost", 0.01)),
+        premature_exit_penalty=float(getattr(args, "meta_reward_premature_exit_penalty", 1.25)),
+        sector_advance=float(getattr(args, "meta_reward_sector_advance", 1.00)),
+    )
+
+
 def _next_run_directory(*, root: Path, tag: str) -> Path:
     root.mkdir(parents=True, exist_ok=True)
     day_prefix = datetime.now().strftime("%Y%m%d")
@@ -475,7 +543,12 @@ def _next_run_directory(*, root: Path, tag: str) -> Path:
     return root / run_id
 
 
-def _build_hybrid_env(args: argparse.Namespace, *, effective_window_input: bool) -> HybridLiveEnv:
+def _build_hybrid_env(
+    args: argparse.Namespace,
+    *,
+    effective_window_input: bool,
+    pre_reset_hook: Callable[[], None] | None = None,
+) -> HybridLiveEnv:
     reset_sequence = tuple(
         action.strip()
         for action in str(args.reset_sequence).split(",")
@@ -506,6 +579,7 @@ def _build_hybrid_env(args: argparse.Namespace, *, effective_window_input: bool)
         focus_window_on_attach=bool(args.focus_window),
         window_targeted_input=bool(effective_window_input),
         no_enemies_mode=bool(args.no_enemies),
+        pre_reset_hook=pre_reset_hook,
     )
 
 
@@ -834,6 +908,38 @@ def main() -> None:
         )
     if bool(args.no_enemies):
         print("no_enemies_mode_enabled\tenemy entities will be suppressed.")
+    restore_save_source = _resolve_restore_save_source_path(args)
+    restore_save_delay_seconds = max(float(args.restore_save_delay), 0.0)
+    restore_save_target = (
+        _default_game_save_target_path()
+        if restore_save_source is not None
+        else None
+    )
+    if restore_save_source is not None and restore_save_target is not None:
+        print(
+            "savegame_restore_enabled\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+
+    def _restore_save_before_reset() -> None:
+        if restore_save_source is None or restore_save_target is None:
+            return
+        _restore_selected_save_file(
+            source_path=restore_save_source,
+            target_path=restore_save_target,
+        )
+        print(
+            "savegame_restored_before_reset\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+        if restore_save_delay_seconds > 0:
+            time.sleep(restore_save_delay_seconds)
 
     env: HybridLiveEnv | None = None
     tui = RunnerTuiSession(
@@ -846,11 +952,20 @@ def main() -> None:
         external_control_file=(str(args.external_control_file) if args.external_control_file else None),
     )
     try:
-        env = _build_hybrid_env(args, effective_window_input=effective_window_input)
+        env = _build_hybrid_env(
+            args,
+            effective_window_input=effective_window_input,
+            pre_reset_hook=(
+                _restore_save_before_reset
+                if restore_save_source is not None and restore_save_target is not None
+                else None
+            ),
+        )
         tui.start()
 
         command = str(args.command)
-        reward_suite = HybridRewardSuite()
+        meta_reward_weights = _build_meta_reward_weights(args)
+        reward_suite = HybridRewardSuite(meta_weights=meta_reward_weights)
         coordinator_config = HybridCoordinatorConfig(
             threat_trigger_distance=max(int(args.threat_trigger_distance), 1),
             exit_after_siphons_when_scripted=False,
@@ -1001,7 +1116,14 @@ def main() -> None:
                     "movement_keys": str(args.movement_keys),
                     "siphon_key": str(args.siphon_key),
                     "prog_actions": bool(args.prog_actions),
+                    "restore_save_file": (
+                        str(restore_save_source)
+                        if restore_save_source is not None
+                        else None
+                    ),
+                    "restore_save_delay": float(args.restore_save_delay),
                     "threat_trigger_distance": int(args.threat_trigger_distance),
+                    "meta_reward_weights": asdict(meta_reward_weights),
                     "meta_config": vars(_build_meta_config(args)),
                     "threat_config": vars(_build_threat_config(args)),
                 },
