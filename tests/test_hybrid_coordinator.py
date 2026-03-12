@@ -14,6 +14,7 @@ from src.state.schema import (
     GridPosition,
     InventoryState,
     MapCellState,
+    MapLayersState,
     MapState,
     ResourceCellState,
     WallCellState,
@@ -33,7 +34,9 @@ def _build_state(
     cells: tuple[MapCellState, ...] | None = None,
     resource_cells: tuple[ResourceCellState, ...] = (),
     walls: tuple[WallCellState, ...] = (),
+    map_layers: MapLayersState | None = None,
     can_siphon_now: bool | None = True,
+    player_siphons: int | None = None,
 ) -> GameStateSnapshot:
     map_cells = cells or tuple(
         MapCellState(
@@ -65,8 +68,10 @@ def _build_state(
             player_position=player,
             exit_position=exit_position,
             enemies=enemies,
+            layers=map_layers or MapLayersState(),
         ),
         can_siphon_now=can_siphon_now,
+        extra_fields={"siphons": _ok_field(player_siphons)} if player_siphons is not None else {},
     )
 
 
@@ -237,7 +242,45 @@ def test_resource_target_lock_persists_until_target_invalidates() -> None:
     assert second_trace.decision.objective.target_position == first_target
 
 
-def test_resource_target_arrival_prefers_space_then_z_siphon() -> None:
+def test_resource_targets_use_precomputed_energy_credit_layers() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    zero_row = (0, 0, 0, 0, 0, 0)
+    credits_grid = (
+        zero_row,
+        (0, 0, 5, 0, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    energy_grid = (
+        zero_row,
+        (0, 0, 2, 0, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        resource_cells=(),
+        map_layers=MapLayersState(
+            credits_map=credits_grid,
+            energy_map=energy_grid,
+        ),
+    )
+
+    target = coordinator.resolve_target_for_phase(
+        state=state,
+        phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+    )
+    assert target == GridPosition(2, 1)
+
+
+def test_resource_target_arrival_avoids_siphon_when_siphons_depleted() -> None:
     space_coordinator = HybridCoordinator(
         meta_controller=_StubMetaController(),
         threat_controller=_StubThreatController(),
@@ -246,6 +289,42 @@ def test_resource_target_arrival_prefers_space_then_z_siphon() -> None:
     at_target_state = _build_state(
         player=GridPosition(1, 1),
         resource_cells=resource_cells,
+        player_siphons=0,
+    )
+    space_trace = space_coordinator.decide(
+        state=at_target_state,
+        available_actions=("move_up", "space"),
+        use_meta_controller=False,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+    assert space_trace.decision.action == "move_up"
+
+    z_coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    z_trace = z_coordinator.decide(
+        state=at_target_state,
+        available_actions=("move_up", "z"),
+        use_meta_controller=False,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+    assert z_trace.decision.action == "move_up"
+
+
+def test_collect_siphon_target_arrival_prefers_space_then_z() -> None:
+    space_coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    at_target_state = _build_state(
+        player=GridPosition(1, 1),
+        siphons=(GridPosition(1, 1),),
+        player_siphons=2,
     )
     space_trace = space_coordinator.decide(
         state=at_target_state,
@@ -311,7 +390,7 @@ def test_prog_and_point_wall_targets_resolve_to_adjacent_walkable_tiles() -> Non
     }
 
 
-def test_scripted_run_excludes_already_siphoned_resource_target_tiles() -> None:
+def test_scripted_run_does_not_select_siphon_when_siphons_are_depleted() -> None:
     coordinator = HybridCoordinator(
         meta_controller=_StubMetaController(),
         threat_controller=_StubThreatController(),
@@ -324,6 +403,7 @@ def test_scripted_run_excludes_already_siphoned_resource_target_tiles() -> None:
             ResourceCellState(position=GridPosition(2, 1), credits=3),
         ),
         exit_position=GridPosition(5, 5),
+        player_siphons=0,
     )
 
     first_trace = coordinator.decide(
@@ -335,11 +415,33 @@ def test_scripted_run_excludes_already_siphoned_resource_target_tiles() -> None:
         explore_threat=False,
     )
     assert first_trace.decision.objective.target_position == GridPosition(1, 1)
-    assert first_trace.decision.action == "space"
+    assert first_trace.decision.action == "move_right"
 
     second_target = coordinator.resolve_target_for_phase(
         state=state,
         phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
         scripted_mode=True,
     )
-    assert second_target == GridPosition(2, 1)
+    assert second_target == GridPosition(1, 1)
+
+
+def test_resource_target_arrival_can_siphon_when_player_has_siphons_even_if_map_has_none() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    state = _build_state(
+        player=GridPosition(1, 1),
+        siphons=(),
+        resource_cells=(ResourceCellState(position=GridPosition(1, 1), credits=3),),
+        player_siphons=1,
+    )
+    trace = coordinator.decide(
+        state=state,
+        available_actions=("move_up", "space"),
+        use_meta_controller=False,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+    assert trace.decision.action == "space"

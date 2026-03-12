@@ -588,3 +588,95 @@ def test_extract_state_layer_refresh_reuses_static_layers_when_only_player_moves
     assert second_snapshot.map.layer_refresh.goals_updated is True
     assert second_snapshot.map.layers.obstacle_map is first_snapshot.map.layers.obstacle_map
     assert second_snapshot.map.layers.energy_map is first_snapshot.map.layers.energy_map
+
+
+def test_extract_state_rebuilds_progs_map_when_prog_wall_state_changes() -> None:
+    root = 0x610000
+    pointer_base = 0x100200
+    player_x_offset = 0x19C8
+    cell_base_offset = 0x11B8
+    cell_stride = 0x38
+    entity_base_offset = 0x0C
+    entity_stride = 0x44
+
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x220000),
+            _entry("player_energy", "int32", 0x220004),
+            _entry("player_credits", "int32", 0x220008),
+            _chained_entry(
+                "player_x",
+                "int32",
+                base_address=pointer_base,
+                pointer_chain=(0,),
+                read_offset=player_x_offset,
+            ),
+        ),
+    )
+
+    memory: dict[int, bytes] = {
+        0x220000: struct.pack("<i", 10),
+        0x220004: struct.pack("<i", 6),
+        0x220008: struct.pack("<i", 21),
+        pointer_base: struct.pack("<Q", root),
+        root + player_x_offset: struct.pack("<i", 2),
+    }
+
+    default_cell_values = {
+        0x00: 0,
+        0x04: 0,
+        0x08: 0,
+        0x0C: 0,
+        0x10: 0,
+        0x14: -1,
+        0x18: 0,
+        0x1C: 0,
+        0x20: 0,
+        0x24: 0,
+        0x28: 0,
+        0x2C: 0,
+        0x30: 0,
+        0x34: 0,
+    }
+    for index in range(36):
+        base = root + cell_base_offset + index * cell_stride
+        for offset, value in default_cell_values.items():
+            memory[base + offset] = struct.pack("<i", value)
+
+    def _cell_index(x: int, y: int) -> int:
+        return x * 6 + y
+
+    def _write_cell(x: int, y: int, values: dict[int, int]) -> None:
+        base = root + cell_base_offset + _cell_index(x, y) * cell_stride
+        for offset, value in values.items():
+            memory[base + offset] = struct.pack("<i", value)
+
+    _write_cell(1, 2, {0x00: 1, 0x14: 4, 0x18: 2})
+
+    for slot in range(64):
+        memory[root + entity_base_offset + slot * entity_stride] = b"\x00"
+    player0 = root + entity_base_offset
+    memory[player0] = b"\x01"
+    memory[player0 + 0x08] = struct.pack("<i", 2)
+    memory[player0 + 0x0C] = struct.pack("<i", 5)
+    memory[player0 + 0x18] = struct.pack("<i", 1)
+    memory[player0 + 0x34] = struct.pack("<i", 1)
+    memory[player0 + 0x38] = struct.pack("<i", 1)
+
+    backend = FakeMemoryBackend(memory_by_address=memory)
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+    first_snapshot = extract_state(reader=reader, registry=registry)
+    assert first_snapshot.map.layers.progs_map[1][1] == (4,)
+
+    # Simulate siphon depletion encoded by wall_state transition while prog_id remains populated.
+    _write_cell(1, 2, {0x00: 1, 0x14: 4, 0x18: 0})
+    second_snapshot = extract_state(
+        reader=reader,
+        registry=registry,
+        previous_map_state=first_snapshot.map,
+    )
+
+    assert second_snapshot.map.layer_refresh.siphon_outcomes_updated is True
+    assert second_snapshot.map.layers.progs_map is not first_snapshot.map.layers.progs_map
+    assert second_snapshot.map.layers.progs_map[1][1] == ()

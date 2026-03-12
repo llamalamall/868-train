@@ -570,6 +570,7 @@ def _build_siphon_outcome_signature(cells: tuple[MapCellState, ...]) -> tuple[tu
             int(cell.position.x),
             int(cell.position.y),
             1 if cell.is_wall else 0,
+            int(cell.wall_state),
             max(int(cell.credits), 0),
             max(int(cell.energy), 0),
             max(int(cell.points), 0),
@@ -740,7 +741,7 @@ def _build_siphon_outcome_layers(
                     points_grid[y][x] += max(int(target_cell.points), 0)
                     penalty_grid[y][x] += max(int(target_cell.threat), 0)
                     prog_id = int(target_cell.prog_id) if target_cell.prog_id is not None else -1
-                    if prog_id > 0:
+                    if prog_id > 0 and int(target_cell.wall_state) > 0:
                         progs_grid[y][x].append(prog_id)
                     continue
                 credits_grid[y][x] += max(int(target_cell.credits), 0)
