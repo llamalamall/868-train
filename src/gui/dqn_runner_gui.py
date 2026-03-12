@@ -56,6 +56,7 @@ _APPDATA_GAME_SAVE_DIR = (
 )
 _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
 _TEXTUAL_MARKUP_PATTERN = re.compile(r"\[[^\]]+\]")
+_TEXTUAL_MARKUP_SEGMENT_PATTERN = re.compile(r"\[([a-zA-Z0-9_]+)\](.*?)\[/\]", re.DOTALL)
 _REWARD_HISTORY_LIMIT = 30
 _PALETTE = {
     "bg": "#0b0f14",
@@ -76,6 +77,16 @@ _FONTS = {
     "body": ("Segoe UI", 9),
     "mono": ("Consolas", 9),
     "small": ("Segoe UI", 8),
+}
+_TEXTUAL_STYLE_COLORS = {
+    "bright_black": "#7f8d99",
+    "yellow": "#f7b955",
+    "cyan": "#5bd1c2",
+    "green": "#5acc6f",
+    "magenta": "#d48ef7",
+    "red": "#ff7078",
+    "bright_white": "#f5f9ff",
+    "white": "#d7e0ea",
 }
 
 
@@ -963,8 +974,9 @@ class DqnRunnerGui(tk.Tk):
         self._state_monitor_timestamp = tk.StringVar(value="last_snapshot=-")
         self._state_monitor_pid = tk.StringVar(value="pid=-")
         self._state_tab_widget: ttk.Frame | None = None
+        self._ascii_maps_tab_widget: ttk.Frame | None = None
         self._state_fields_tree: ttk.Treeview | None = None
-        self._state_board_text: tk.Text | None = None
+        self._ascii_maps_text: tk.Text | None = None
         self._state_last_poll_monotonic = 0.0
         self._state_poll_interval_seconds = 0.5
 
@@ -1270,6 +1282,7 @@ class DqnRunnerGui(tk.Tk):
                 self._last_form = form
         self._build_monitor_tab()
         self._build_state_tab()
+        self._build_ascii_maps_tab()
         self._refresh_tab_visuals()
 
     def _build_monitor_tab(self) -> None:
@@ -1448,7 +1461,10 @@ class DqnRunnerGui(tk.Tk):
         self._refresh_preview()
         selected_tab = self._notebook.select()
         current_widget = self.nametowidget(selected_tab)
-        if self._state_tab_widget is not None and current_widget == self._state_tab_widget:
+        if (
+            (self._state_tab_widget is not None and current_widget == self._state_tab_widget)
+            or (self._ascii_maps_tab_widget is not None and current_widget == self._ascii_maps_tab_widget)
+        ):
             self._ensure_state_monitor_started()
 
     def _current_form(self) -> _ArgForm:
@@ -1685,11 +1701,16 @@ class DqnRunnerGui(tk.Tk):
             if now - self._state_last_poll_monotonic < self._state_poll_interval_seconds:
                 return
             self._state_last_poll_monotonic = now
-            if self._state_tab_widget is None or self._state_monitor is None:
+            if self._state_monitor is None:
                 return
             selected_tab = self._notebook.select()
             current_widget = self.nametowidget(selected_tab)
-            if current_widget != self._state_tab_widget:
+            state_selected = self._state_tab_widget is not None and current_widget == self._state_tab_widget
+            ascii_selected = (
+                self._ascii_maps_tab_widget is not None
+                and current_widget == self._ascii_maps_tab_widget
+            )
+            if not state_selected and not ascii_selected:
                 return
             self._refresh_state_snapshot()
         finally:
@@ -1742,11 +1763,32 @@ class DqnRunnerGui(tk.Tk):
         if self._state_fields_tree is not None:
             for item_id in self._state_fields_tree.get_children():
                 self._state_fields_tree.delete(item_id)
-        if self._state_board_text is not None:
-            self._state_board_text.configure(state="normal")
-            self._state_board_text.delete("1.0", "end")
-            self._state_board_text.insert("1.0", "board snapshot unavailable")
-            self._state_board_text.configure(state="disabled")
+        self._set_ascii_maps_text("board snapshot unavailable")
+
+    def _insert_textual_markup(self, widget: tk.Text, text: str) -> None:
+        cursor = 0
+        for match in _TEXTUAL_MARKUP_SEGMENT_PATTERN.finditer(text):
+            if match.start() > cursor:
+                widget.insert("end", text[cursor:match.start()])
+            style_name = str(match.group(1)).strip().lower()
+            segment = str(match.group(2))
+            tag_name = f"textual_{style_name}"
+            if tag_name in widget.tag_names():
+                widget.insert("end", segment, tag_name)
+            else:
+                widget.insert("end", segment)
+            cursor = match.end()
+        if cursor < len(text):
+            widget.insert("end", text[cursor:])
+
+    def _set_ascii_maps_text(self, text: str) -> None:
+        widget = self._ascii_maps_text
+        if widget is None:
+            return
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        self._insert_textual_markup(widget, text)
+        widget.configure(state="disabled")
 
     def _refresh_state_snapshot(self) -> None:
         monitor = self._state_monitor
@@ -1781,18 +1823,13 @@ class DqnRunnerGui(tk.Tk):
                         row.error,
                     ),
                 )
-        if self._state_board_text is not None:
-            board_text = _strip_textual_markup(snapshot.board_stats or "board snapshot unavailable")
-            self._state_board_text.configure(state="normal")
-            self._state_board_text.delete("1.0", "end")
-            self._state_board_text.insert("1.0", board_text)
-            self._state_board_text.configure(state="disabled")
+        if self._ascii_maps_text is not None:
+            self._set_ascii_maps_text(snapshot.board_stats or "board snapshot unavailable")
 
     def _build_state_tab(self) -> None:
         state_tab = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
         state_tab.columnconfigure(0, weight=1)
-        state_tab.rowconfigure(3, weight=2)
-        state_tab.rowconfigure(5, weight=1)
+        state_tab.rowconfigure(3, weight=1)
 
         ttk.Label(state_tab, text="Game State Inspector", style="SectionLabel.TLabel").grid(
             row=0,
@@ -1878,15 +1915,59 @@ class DqnRunnerGui(tk.Tk):
         tree.configure(yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set)
         self._state_fields_tree = tree
 
-        ttk.Label(state_tab, text="Decoded Board State", style="FormLabel.TLabel").grid(
-            row=4,
+        self._state_tab_widget = state_tab
+
+        self._notebook.add(state_tab, text="Game State")
+
+    def _build_ascii_maps_tab(self) -> None:
+        maps_tab = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
+        maps_tab.columnconfigure(0, weight=1)
+        maps_tab.rowconfigure(2, weight=1)
+
+        ttk.Label(maps_tab, text="ASCII Maps", style="SectionLabel.TLabel").grid(
+            row=0,
             column=0,
             sticky="w",
         )
-        board_text = tk.Text(
-            state_tab,
+
+        meta = ttk.Frame(maps_tab, style="Surface.TFrame")
+        meta.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+        meta.columnconfigure(0, weight=0)
+        meta.columnconfigure(1, weight=0)
+        meta.columnconfigure(2, weight=1)
+        meta.columnconfigure(3, weight=1)
+        meta.columnconfigure(4, weight=1)
+        ttk.Button(
+            meta,
+            text="Attach",
+            command=self._ensure_state_monitor_started,
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            meta,
+            text="Detach",
+            command=self._stop_state_monitor,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, sticky="w", padx=(8, 12))
+        ttk.Label(meta, textvariable=self._state_monitor_status, style="FormHelp.TLabel").grid(
+            row=0,
+            column=2,
+            sticky="w",
+        )
+        ttk.Label(meta, textvariable=self._state_monitor_pid, style="FormHelp.TLabel").grid(
+            row=0,
+            column=3,
+            sticky="w",
+        )
+        ttk.Label(meta, textvariable=self._state_monitor_timestamp, style="FormHelp.TLabel").grid(
+            row=0,
+            column=4,
+            sticky="e",
+        )
+
+        maps_text = tk.Text(
+            maps_tab,
             wrap="none",
-            height=10,
             bg=_PALETTE["terminal_bg"],
             fg=_PALETTE["terminal_fg"],
             insertbackground=_PALETTE["terminal_fg"],
@@ -1895,18 +1976,20 @@ class DqnRunnerGui(tk.Tk):
             pady=8,
             font=_FONTS["mono"],
         )
-        board_text.grid(row=5, column=0, sticky="nsew")
-        board_scroll_y = ttk.Scrollbar(state_tab, orient="vertical", command=board_text.yview)
-        board_scroll_y.grid(row=5, column=1, sticky="ns")
-        board_scroll_x = ttk.Scrollbar(state_tab, orient="horizontal", command=board_text.xview)
-        board_scroll_x.grid(row=6, column=0, sticky="ew")
-        board_text.configure(yscrollcommand=board_scroll_y.set, xscrollcommand=board_scroll_x.set)
-        board_text.insert("1.0", "board snapshot unavailable")
-        board_text.configure(state="disabled")
-        self._state_board_text = board_text
-        self._state_tab_widget = state_tab
+        maps_text.grid(row=2, column=0, sticky="nsew")
+        maps_scroll_y = ttk.Scrollbar(maps_tab, orient="vertical", command=maps_text.yview)
+        maps_scroll_y.grid(row=2, column=1, sticky="ns")
+        maps_scroll_x = ttk.Scrollbar(maps_tab, orient="horizontal", command=maps_text.xview)
+        maps_scroll_x.grid(row=3, column=0, sticky="ew")
+        maps_text.configure(yscrollcommand=maps_scroll_y.set, xscrollcommand=maps_scroll_x.set)
+        for style_name, color in _TEXTUAL_STYLE_COLORS.items():
+            maps_text.tag_configure(f"textual_{style_name}", foreground=color)
+        maps_text.insert("1.0", "board snapshot unavailable")
+        maps_text.configure(state="disabled")
 
-        self._notebook.add(state_tab, text="Game State")
+        self._ascii_maps_text = maps_text
+        self._ascii_maps_tab_widget = maps_tab
+        self._notebook.add(maps_tab, text="ASCII Maps")
 
     def _set_monitor_controls_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"

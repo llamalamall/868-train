@@ -29,7 +29,7 @@ from src.memory.process_attach import attach_process, close_attached_process
 from src.memory.reader import ProcessMemoryReader, ReadFailure, ReadResult
 from src.state.extractor import extract_state
 from src.state.fail_detector import MemoryFailDetector
-from src.state.schema import GameStateSnapshot, GridPosition
+from src.state.schema import GameStateSnapshot, GridPosition, MapState
 
 LOGGER = logging.getLogger(__name__)
 TH32CS_SNAPMODULE = 0x00000008
@@ -1192,6 +1192,7 @@ class GameEnv:
         if enemy_spawn_suppressor.enabled:
             LOGGER.info("no_enemies_mode_enabled: active enemy slots will be suppressed.")
         no_enemy_map_root_address: int | None = None
+        previous_map_state: MapState | None = None
         kernel32 = _get_kernel32()
         tick_speedup = GameTickSpeedupPatcher(
             game_tick_ms=int(game_tick_ms),
@@ -1283,11 +1284,18 @@ class GameEnv:
             return ReadResult.ok(base)
 
         def _extract_live_state() -> GameStateSnapshot:
-            return extract_state(
+            nonlocal previous_map_state
+            snapshot = extract_state(
                 reader=reader,
                 registry=registry,
                 module_base_resolver=module_base_resolver,
+                previous_map_state=previous_map_state,
             )
+            if snapshot.map.status == "ok":
+                previous_map_state = snapshot.map
+            else:
+                previous_map_state = None
+            return snapshot
 
         def _suppress_enemies_for_root(
             *,
@@ -1359,7 +1367,7 @@ class GameEnv:
                 )
 
         def _swap_runtime_handles(*, new_process: Any, new_window: Any) -> None:
-            nonlocal no_enemy_map_root_address
+            nonlocal no_enemy_map_root_address, previous_map_state
             with runtime_lock:
                 previous_process = runtime["attached_process"]
                 runtime["attached_process"] = new_process
@@ -1368,6 +1376,7 @@ class GameEnv:
                 if window_targeted_input and action_api_holder["value"] is not None:
                     action_api_holder["value"].target_hwnd = int(new_window.hwnd)
                 no_enemy_map_root_address = None
+                previous_map_state = None
 
             _apply_runtime_patches(new_process)
             if int(previous_process.handle) != int(new_process.handle):

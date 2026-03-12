@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from src.state.schema import EnemyState, GridPosition, MapCellState, MapState, ResourceCellState
+from src.state.schema import EnemyState, GridPosition, MapCellState, MapLayersState, MapState, ResourceCellState
 from src.memory.state_monitor_tui import (
     CONTROL_MODE_AUTO,
     CONTROL_MODE_PAUSED,
@@ -16,6 +16,7 @@ from src.memory.state_monitor_tui import (
     load_external_status_snapshot,
     map_tui_key_to_passthrough_key,
     render_ascii_map,
+    render_ascii_layer_maps,
     set_external_control_mode,
     step_external_control,
     summarize_board_state,
@@ -354,6 +355,45 @@ def test_render_ascii_map_shows_key_board_features() -> None:
 
 def test_render_ascii_map_reports_non_ok_status() -> None:
     assert render_ascii_map(MapState(status="missing")) == "map unavailable (missing)"
+
+
+def test_render_ascii_layer_maps_reports_non_ok_status() -> None:
+    assert render_ascii_layer_maps(MapState(status="missing")) == "layer maps unavailable (missing)"
+
+
+def test_render_ascii_layer_maps_lists_expected_layer_sections() -> None:
+    zero_grid = ((0, 0), (0, 0))
+    empty_nested = (
+        ((), ()),
+        ((), ()),
+    )
+    map_state = MapState(
+        status="ok",
+        width=2,
+        height=2,
+        layers=MapLayersState(
+            obstacle_map=zero_grid,
+            player_position_map=zero_grid,
+            enemy_position_map=empty_nested,
+            goal_map=zero_grid,
+            energy_map=zero_grid,
+            credits_map=zero_grid,
+            progs_map=empty_nested,
+            points_map=zero_grid,
+            siphon_penalty_map=zero_grid,
+        ),
+    )
+    rendered = render_ascii_layer_maps(map_state)
+    assert "obstacle_map:" in rendered
+    assert "player_position_map:" in rendered
+    assert "enemy_position_map:" in rendered
+    assert "goal_map:" in rendered
+    assert "energy_map:" in rendered
+    assert "credits_map:" in rendered
+    assert "progs_map:" in rendered
+    assert "points_map:" in rendered
+    assert "siphon_penalty_map:" in rendered
+    assert "layer_refresh " in rendered
 
 
 def test_load_external_status_snapshot_returns_empty_for_missing_file(tmp_path) -> None:
