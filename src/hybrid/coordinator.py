@@ -79,12 +79,58 @@ def _resource_value_index(state: GameStateSnapshot) -> dict[GridPosition, tuple[
     return values
 
 
+def _read_layer_cell(
+    layer: tuple[tuple[int, ...], ...],
+    *,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+) -> int | None:
+    if x < 0 or y < 0 or x >= width or y >= height:
+        return None
+    if len(layer) != height:
+        return None
+    row = layer[y]
+    if len(row) != width:
+        return None
+    try:
+        return int(row[x])
+    except (TypeError, ValueError):
+        return None
+
+
 def _credit_energy_cluster_total(
     *,
     position: GridPosition,
     cell_index: dict[GridPosition, object],
     resource_values: dict[GridPosition, tuple[int, int, int]],
+    width: int,
+    height: int,
+    credits_map: tuple[tuple[int, ...], ...],
+    energy_map: tuple[tuple[int, ...], ...],
 ) -> int:
+    # Prefer precomputed outcome layers: they already include adjacent siphon reach.
+    x = int(position.x)
+    y = int(position.y)
+    layer_credits = _read_layer_cell(
+        credits_map,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+    )
+    layer_energy = _read_layer_cell(
+        energy_map,
+        x=x,
+        y=y,
+        width=width,
+        height=height,
+    )
+    if layer_credits is not None and layer_energy is not None:
+        return max(layer_credits, 0) + max(layer_energy, 0)
+
+    # Fallback for synthetic states that do not populate map layers.
     total = 0
     for candidate in (position, *_adjacent_positions(position)):
         cell = cell_index.get(candidate)
@@ -109,6 +155,7 @@ def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
         return ()
     width = int(state.map.width)
     height = int(state.map.height)
+    layers = state.map.layers
     walls = _wall_positions(state)
     cells = _cell_index(state)
     resource_values = _resource_value_index(state)
@@ -129,6 +176,10 @@ def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
             position=cell.position,
             cell_index=cells,
             resource_values=resource_values,
+            width=width,
+            height=height,
+            credits_map=layers.credits_map,
+            energy_map=layers.energy_map,
         )
         points_total = max(int(cell.points), 0)
         if cluster_total <= 0 and points_total <= 0:
@@ -140,6 +191,10 @@ def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
             position=cell.position,
             cell_index=cells,
             resource_values=resource_values,
+            width=width,
+            height=height,
+            credits_map=layers.credits_map,
+            energy_map=layers.energy_map,
         )
         has_prog = bool(cell.prog_id is not None and cell.prog_id > 0)
         points_total = max(int(cell.points), 0)
@@ -159,6 +214,10 @@ def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
                 position=adjacent,
                 cell_index=cells,
                 resource_values=resource_values,
+                width=width,
+                height=height,
+                credits_map=layers.credits_map,
+                energy_map=layers.energy_map,
             )
             add_target(adjacent, weight=adjacent_cluster + wall_weight)
 
@@ -173,6 +232,10 @@ def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
                 position=adjacent,
                 cell_index=cells,
                 resource_values=resource_values,
+                width=width,
+                height=height,
+                credits_map=layers.credits_map,
+                energy_map=layers.energy_map,
             )
             add_target(adjacent, weight=adjacent_cluster + wall_weight)
 
@@ -381,9 +444,15 @@ class HybridCoordinator:
         explore_meta: bool,
         explore_threat: bool,
     ) -> HybridDecisionTrace:
-        actions = tuple(str(action) for action in available_actions)
-        if not actions:
+        raw_actions = tuple(str(action) for action in available_actions)
+        if not raw_actions:
             raise ValueError("available_actions cannot be empty.")
+        actions = self._filter_actions_for_siphon_depletion(
+            state=state,
+            actions=raw_actions,
+        )
+        if not actions:
+            raise ValueError("No non-siphon actions available while siphons are depleted.")
         scripted_mode = not bool(use_meta_controller)
 
         allowed_phases = self.allowed_meta_phases(state)
@@ -624,6 +693,30 @@ class HybridCoordinator:
             walls=_wall_positions(state),
             available_actions=available_actions,
         )
+
+    @staticmethod
+    def _filter_actions_for_siphon_depletion(
+        *,
+        state: GameStateSnapshot,
+        actions: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        player_siphons = HybridCoordinator._player_siphon_count(state)
+        if player_siphons is None or player_siphons > 0:
+            return actions
+        return tuple(action for action in actions if action not in {"space", "z"})
+
+    @staticmethod
+    def _player_siphon_count(state: GameStateSnapshot) -> int | None:
+        """Return player's current siphon count when extracted as a scalar field."""
+        for key in ("siphons", "player_siphons", "siphon_count"):
+            field = state.extra_fields.get(key)
+            if field is None or field.status != "ok" or field.value is None:
+                continue
+            try:
+                return int(float(field.value))
+            except (TypeError, ValueError):
+                continue
+        return None
 
     def _allowed_threat_overrides(self, *, actions: tuple[str, ...]) -> tuple[ThreatOverride, ...]:
         overrides = [ThreatOverride.ROUTE_DEFAULT, ThreatOverride.EVADE, ThreatOverride.ENGAGE]
