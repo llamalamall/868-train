@@ -1177,6 +1177,7 @@ def _simulate_enemy_turn(
                 hp=enemy.hp,
                 state=enemy.state,
                 in_bounds=enemy.in_bounds,
+                incubation_timer=enemy.incubation_timer,
             )
         )
 

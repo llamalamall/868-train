@@ -61,7 +61,7 @@ _MAP_CELL_STRIDE = 0x38
 _MAP_ENTITIES_BASE_OFFSET = 0x0C
 _MAP_ENTITY_STRIDE = 0x44
 _MAP_ENTITY_COUNT = 64
-_ENEMY_STATE_EGG = 0
+_ENEMY_VISIBLE_INCUBATION_TIMER = 0
 _SIPHON_REACH_DELTAS: tuple[tuple[int, int], ...] = (
     (0, 0),
     (-1, 0),
@@ -943,13 +943,13 @@ def _read_required_bool(reader: ProcessMemoryReader, address: int) -> ReadResult
     return ReadResult.ok(bool(result.value))
 
 
-def _mask_enemy_type_for_visibility(*, raw_type_id: int, enemy_state: int, in_bounds: bool) -> int:
-    """Hide enemy type for non-visible entities (egg mode or off-board)."""
+def _mask_enemy_type_for_visibility(*, raw_type_id: int, incubation_timer: int, in_bounds: bool) -> int:
+    """Hide enemy type for off-board or incubating entities."""
     if raw_type_id <= 0:
         return 0
     if not in_bounds:
         return 0
-    if enemy_state == _ENEMY_STATE_EGG:
+    if incubation_timer > _ENEMY_VISIBLE_INCUBATION_TIMER:
         return 0
     return raw_type_id
 
@@ -1134,7 +1134,7 @@ def _extract_map_state(
         enemy_y = int(y_result.value or 0)
         enemy_position = GridPosition(x=enemy_x, y=enemy_y)
         in_bounds = 0 <= enemy_x < _MAP_WIDTH and 0 <= enemy_y < _MAP_HEIGHT
-        enemy_state = int(state_result.value or 0)
+        incubation_timer = int(state_result.value or 0)
         if slot == 0:
             player_position = enemy_position
             continue
@@ -1144,13 +1144,14 @@ def _extract_map_state(
                 slot=slot,
                 type_id=_mask_enemy_type_for_visibility(
                     raw_type_id=int(type_result.value or 0),
-                    enemy_state=enemy_state,
+                    incubation_timer=incubation_timer,
                     in_bounds=in_bounds,
                 ),
                 position=enemy_position,
                 hp=int(hp_result.value or 0),
-                state=enemy_state,
+                state=incubation_timer,
                 in_bounds=in_bounds,
+                incubation_timer=incubation_timer,
             )
         )
 

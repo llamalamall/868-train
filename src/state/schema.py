@@ -108,6 +108,7 @@ class EnemyState:
     hp: int
     state: int
     in_bounds: bool
+    incubation_timer: int = 0
 
 
 @dataclass(frozen=True)
