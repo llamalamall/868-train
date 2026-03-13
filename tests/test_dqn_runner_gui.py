@@ -11,6 +11,7 @@ from src.gui.dqn_runner_gui import (
     _SMOKE_TEST_REWARD_DESTS,
     _CHECKPOINT_DIR,
     _estimate_epsilon_eta_seconds,
+    _format_epsilon_progress_text,
     _format_duration_seconds,
     _initial_browse_dir,
     _is_boolean_flag,
@@ -136,6 +137,14 @@ def test_estimate_epsilon_eta_seconds_computes_linear_decay_remaining_time() -> 
         seconds_per_step=0.5,
     )
     assert eta == pytest.approx(150.0)
+
+
+def test_format_epsilon_progress_text_includes_end_target() -> None:
+    assert _format_epsilon_progress_text(current_epsilon=0.6, epsilon_end=0.05) == "60.0% -> 5.0%"
+
+
+def test_format_epsilon_progress_text_falls_back_to_end_target_when_current_missing() -> None:
+    assert _format_epsilon_progress_text(current_epsilon=None, epsilon_end=0.05) == "end 5.0%"
 
 
 def test_resolve_reward_metric_value_uses_reward_line_total_when_training_waits() -> None:

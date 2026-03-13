@@ -540,6 +540,25 @@ def _estimate_epsilon_eta_seconds(
     return remaining_steps * seconds_per_step
 
 
+def _format_epsilon_progress_text(
+    *,
+    current_epsilon: float | None,
+    epsilon_end: float | None,
+) -> str:
+    if current_epsilon is None:
+        if epsilon_end is None:
+            return "-"
+        clamped_end = max(0.0, min(1.0, epsilon_end))
+        return f"end {clamped_end * 100.0:.1f}%"
+
+    clamped_current = max(0.0, min(1.0, current_epsilon))
+    current_text = f"{clamped_current * 100.0:.1f}%"
+    if epsilon_end is None:
+        return current_text
+    clamped_end = max(0.0, min(1.0, epsilon_end))
+    return f"{current_text} -> {clamped_end * 100.0:.1f}%"
+
+
 @dataclass
 class _FormField:
     action: argparse.Action
@@ -1308,6 +1327,7 @@ class DqnRunnerGui(tk.Tk):
             ("Reward", "reward"),
             ("Total", "total"),
             ("Epsilon", "epsilon"),
+            ("Threat Epsilon", "threat_epsilon"),
             ("Updates", "updates"),
             ("Done", "done"),
             ("Terminal", "terminal"),
@@ -2123,6 +2143,7 @@ class DqnRunnerGui(tk.Tk):
             "reward": reward_value,
             "total": status_values.get("total", "-"),
             "epsilon": status_values.get("epsilon", "-"),
+            "threat_epsilon": status_values.get("threat_epsilon", "-"),
             "updates": status_values.get("updates", "-"),
             "done": status_values.get("done", "-"),
             "terminal": status_values.get("terminal", "-"),
@@ -2136,11 +2157,21 @@ class DqnRunnerGui(tk.Tk):
 
         if epsilon_value is None:
             self._epsilon_progress_value.set(0.0)
-            self._epsilon_progress_text.set("-")
+            self._epsilon_progress_text.set(
+                _format_epsilon_progress_text(
+                    current_epsilon=None,
+                    epsilon_end=self._monitor_epsilon_end,
+                )
+            )
         else:
             clamped_epsilon = max(0.0, min(1.0, epsilon_value))
             self._epsilon_progress_value.set(clamped_epsilon * 100.0)
-            self._epsilon_progress_text.set(f"{clamped_epsilon * 100.0:.1f}%")
+            self._epsilon_progress_text.set(
+                _format_epsilon_progress_text(
+                    current_epsilon=clamped_epsilon,
+                    epsilon_end=self._monitor_epsilon_end,
+                )
+            )
 
         reward_step_key: tuple[int, int] | None = None
         if current_episode is not None and current_step is not None:

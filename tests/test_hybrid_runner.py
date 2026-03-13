@@ -9,6 +9,7 @@ from src.hybrid.runner import (
     _build_meta_reward_weights,
     _build_parser,
     _format_monitor_action_line,
+    _format_monitor_training_line,
     _validate_args,
 )
 from src.hybrid.types import ObjectivePhase
@@ -208,4 +209,23 @@ def test_format_monitor_action_line_includes_phase_and_target_coordinates() -> N
     assert line == (
         "action=move_right phase=collect_siphons next_target=(3,4) "
         "reason=scripted_phase_only"
+    )
+
+
+def test_format_monitor_training_line_includes_threat_epsilon_when_available() -> None:
+    line = _format_monitor_training_line(
+        episode_id="episode-00001",
+        step=7,
+        reward=1.25,
+        total_reward=3.5,
+        meta_epsilon=0.4,
+        threat_epsilon=0.2,
+        updates_applied=9,
+        done=False,
+        terminal_reason=None,
+    )
+
+    assert line == (
+        "episode=episode-00001 step=7 reward=1.250 total=3.500 epsilon=0.4000 "
+        "threat_epsilon=0.2000 updates=9 done=False terminal=-"
     )

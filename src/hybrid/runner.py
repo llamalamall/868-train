@@ -88,6 +88,38 @@ def _format_monitor_action_line(
     )
 
 
+def _format_monitor_training_line(
+    *,
+    episode_id: str,
+    step: int,
+    total_reward: float,
+    meta_epsilon: float,
+    updates_applied: int,
+    threat_epsilon: float | None = None,
+    reward: float | None = None,
+    waiting: bool = False,
+    done: bool | None = None,
+    terminal_reason: str | None = None,
+) -> str:
+    parts = [
+        f"episode={episode_id}",
+        f"step={step}",
+    ]
+    if reward is not None:
+        parts.append(f"reward={reward:.3f}")
+    parts.append(f"total={total_reward:.3f}")
+    parts.append(f"epsilon={meta_epsilon:.4f}")
+    if threat_epsilon is not None:
+        parts.append(f"threat_epsilon={threat_epsilon:.4f}")
+    parts.append(f"updates={updates_applied}")
+    if waiting:
+        parts.append("waiting=step")
+    else:
+        parts.append(f"done={bool(done)}")
+        parts.append(f"terminal={terminal_reason or '-'}")
+    return " ".join(parts)
+
+
 @dataclass(frozen=True)
 class HybridEpisodeSummary:
     """Per-episode rollout summary."""
@@ -732,17 +764,21 @@ def _run_rollouts(
                     route_replans += 1
                 last_target_signature = target_signature
 
+            threat_monitor_epsilon = (
+                coordinator.threat_controller.epsilon
+                if use_threat
+                else None
+            )
             if monitor_enabled:
                 tui.wait_for_step_gate(
-                    training_line=(
-                        "episode={episode} step={step} total={total:.3f} epsilon={epsilon:.4f} "
-                        "updates={updates} waiting=step".format(
-                            episode=episode_id,
-                            step=steps + 1,
-                            total=total_reward,
-                            epsilon=coordinator.meta_controller.epsilon,
-                            updates=updates_applied,
-                        )
+                    training_line=_format_monitor_training_line(
+                        episode_id=episode_id,
+                        step=steps + 1,
+                        total_reward=total_reward,
+                        meta_epsilon=coordinator.meta_controller.epsilon,
+                        threat_epsilon=threat_monitor_epsilon,
+                        updates_applied=updates_applied,
+                        waiting=True,
                     ),
                     action_line=_format_monitor_action_line(
                         action=trace.decision.action,
@@ -840,18 +876,16 @@ def _run_rollouts(
             if monitor_enabled:
                 tui.consume_manual_step_flag()
                 tui.update(
-                    training_line=(
-                        "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
-                        "epsilon={epsilon:.4f} updates={updates} done={done} terminal={terminal}".format(
-                            episode=episode_id,
-                            step=steps + 1,
-                            reward=step_reward,
-                            total=total_reward,
-                            epsilon=coordinator.meta_controller.epsilon,
-                            updates=updates_applied,
-                            done=done,
-                            terminal=terminal_reason or "-",
-                        )
+                    training_line=_format_monitor_training_line(
+                        episode_id=episode_id,
+                        step=steps + 1,
+                        reward=step_reward,
+                        total_reward=total_reward,
+                        meta_epsilon=coordinator.meta_controller.epsilon,
+                        threat_epsilon=threat_monitor_epsilon,
+                        updates_applied=updates_applied,
+                        done=done,
+                        terminal_reason=terminal_reason,
                     ),
                     action_line=_format_monitor_action_line(
                         action=trace.decision.action,
