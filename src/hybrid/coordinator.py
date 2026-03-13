@@ -60,6 +60,10 @@ def _adjacent_positions(position: GridPosition) -> tuple[GridPosition, ...]:
     )
 
 
+def _siphon_reach_positions(position: GridPosition) -> tuple[GridPosition, ...]:
+    return (position, *_adjacent_positions(position))
+
+
 def _cell_index(state: GameStateSnapshot) -> dict[GridPosition, object]:
     if state.map.status != "ok":
         return {}
@@ -263,14 +267,14 @@ class HybridCoordinator:
         self.config = config
         self._locked_phase: ObjectivePhase | None = None
         self._locked_target: GridPosition | None = None
-        self._scripted_siphoned_targets: set[GridPosition] = set()
+        self._completed_resource_targets: set[GridPosition] = set()
 
     def start_episode(self) -> None:
         self.meta_controller.start_episode()
         self.threat_controller.start_episode()
         self._locked_phase = None
         self._locked_target = None
-        self._scripted_siphoned_targets.clear()
+        self._completed_resource_targets.clear()
 
     def allowed_meta_phases(self, state: GameStateSnapshot) -> tuple[ObjectivePhase, ...]:
         if state.map.status != "ok":
@@ -280,7 +284,7 @@ class HybridCoordinator:
             return (ObjectivePhase.COLLECT_SIPHONS,)
         if self.config.exit_after_siphons_when_scripted:
             return (ObjectivePhase.EXIT_SECTOR,)
-        if _resource_targets(state):
+        if self._available_resource_targets(state=state):
             return (
                 ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
                 ObjectivePhase.EXIT_SECTOR,
@@ -303,11 +307,7 @@ class HybridCoordinator:
                 candidates=tuple(state.map.siphons),
             )
         if phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
-            candidates = _resource_targets(state)
-            if scripted_mode and self._scripted_siphoned_targets:
-                candidates = tuple(
-                    candidate for candidate in candidates if candidate not in self._scripted_siphoned_targets
-                )
+            candidates = self._available_resource_targets(state=state)
             return self._nearest_target(
                 state=state,
                 candidates=candidates,
@@ -330,7 +330,7 @@ class HybridCoordinator:
         sector = self._state_extra_numeric(state, key="current_sector") or 0.0
         siphons = float(len(state.map.siphons)) if state.map.status == "ok" else 0.0
         enemies = float(_count_enemies(state))
-        resource_count = float(len(_resource_targets(state)))
+        resource_count = float(len(self._available_resource_targets(state=state)))
         exit_known = (
             1.0
             if state.map.status == "ok" and state.map.exit_position is not None
@@ -487,7 +487,7 @@ class HybridCoordinator:
             scripted_mode=scripted_mode,
         )
         objective_distance = self.objective_distance(state=state, target=objective_target)
-        if scripted_mode and selected_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS and objective_target is None:
+        if selected_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS and objective_target is None:
             selected_phase = ObjectivePhase.EXIT_SECTOR
             objective_target = self.resolve_target_for_phase(
                 state=state,
@@ -525,12 +525,6 @@ class HybridCoordinator:
             route_action=route_action,
             override=override,
         )
-        self._record_scripted_siphon_target(
-            scripted_mode=scripted_mode,
-            phase=selected_phase,
-            target=objective_target,
-            action=action,
-        )
         combined_reason = f"{meta_reason}|{threat_reason}"
         if invalid_override:
             combined_reason = f"{combined_reason}|invalid_override_fallback"
@@ -555,6 +549,25 @@ class HybridCoordinator:
             threat_active=threat_active,
             available_actions=actions,
         )
+
+    def observe_step_result(
+        self,
+        *,
+        trace: HybridDecisionTrace,
+        info: dict[str, object] | None = None,
+    ) -> None:
+        if trace.decision.objective.phase != ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
+            return
+        target = trace.decision.objective.target_position
+        if target is None:
+            return
+        if trace.decision.action not in {"space", "z"}:
+            return
+        if not bool((info or {}).get("action_effective", False)):
+            return
+        self._completed_resource_targets.update(_siphon_reach_positions(target))
+        if self._locked_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS and self._locked_target == target:
+            self._locked_target = None
 
     def _target_for_decision_phase(
         self,
@@ -600,30 +613,10 @@ class HybridCoordinator:
         if phase == ObjectivePhase.COLLECT_SIPHONS:
             return target in state.map.siphons
         if phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
-            if scripted_mode and target in self._scripted_siphoned_targets:
-                return False
-            return target in _resource_targets(state)
+            return target in self._available_resource_targets(state=state)
         if phase == ObjectivePhase.EXIT_SECTOR:
             return bool(state.map.exit_position is not None and state.map.exit_position == target)
         return False
-
-    def _record_scripted_siphon_target(
-        self,
-        *,
-        scripted_mode: bool,
-        phase: ObjectivePhase,
-        target: GridPosition | None,
-        action: str,
-    ) -> None:
-        if not scripted_mode:
-            return
-        if phase != ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
-            return
-        if target is None:
-            return
-        if action not in {"space", "z"}:
-            return
-        self._scripted_siphoned_targets.add(target)
 
     def _nearest_target(
         self,
@@ -651,6 +644,14 @@ class HybridCoordinator:
                 best_distance = plan.distance
                 best_target = candidate
         return best_target
+
+    def _available_resource_targets(self, *, state: GameStateSnapshot) -> tuple[GridPosition, ...]:
+        candidates = _resource_targets(state)
+        if not self._completed_resource_targets:
+            return candidates
+        return tuple(
+            candidate for candidate in candidates if candidate not in self._completed_resource_targets
+        )
 
     def _nearest_distance_to_targets(
         self,

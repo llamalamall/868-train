@@ -794,6 +794,7 @@ def _run_rollouts(
                 invalid_actions += 1
             if bool(info.get("premature_exit_attempt", False)):
                 premature_exit_attempts += 1
+            coordinator.observe_step_result(trace=trace, info=info)
 
             meta_breakdown = reward_suite.compute_meta_reward(
                 previous_state=state,

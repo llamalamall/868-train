@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 import random
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -105,7 +105,8 @@ class _ThreatQNetwork:
 class ThreatControllerDRQN:
     """Threat controller with recurrent state and DQN updates."""
 
-    CHECKPOINT_VERSION = 1
+    CHECKPOINT_VERSION = 2
+    SUPPORTED_CHECKPOINT_VERSIONS = frozenset({1, 2})
 
     def __init__(
         self,
@@ -298,9 +299,10 @@ class ThreatControllerDRQN:
 
     def load_checkpoint_payload(self, payload: dict[str, Any]) -> None:
         version = int(payload.get("version", -1))
-        if version != self.CHECKPOINT_VERSION:
+        if version not in self.SUPPORTED_CHECKPOINT_VERSIONS:
             raise ValueError(
-                f"Unsupported threat checkpoint version {version}. Expected {self.CHECKPOINT_VERSION}."
+                "Unsupported threat checkpoint version "
+                f"{version}. Expected one of {sorted(self.SUPPORTED_CHECKPOINT_VERSIONS)}."
             )
         self._online.load_state_dict(payload["online_state_dict"])
         self._target.load_state_dict(payload["target_state_dict"])
@@ -346,6 +348,14 @@ class ThreatControllerDRQN:
         self._torch.save(self.checkpoint_payload(), target)
         return target
 
+    @staticmethod
+    def _config_from_payload(config_payload: dict[str, Any]) -> ThreatDRQNConfig:
+        valid_field_names = {field.name for field in fields(ThreatDRQNConfig)}
+        filtered_payload = {
+            key: value for key, value in config_payload.items() if key in valid_field_names
+        }
+        return ThreatDRQNConfig(**filtered_payload)
+
     @classmethod
     def load(
         cls,
@@ -363,7 +373,7 @@ class ThreatControllerDRQN:
         config_payload = payload.get("config", {})
         if not isinstance(config_payload, dict):
             raise ValueError("Threat checkpoint config must be an object.")
-        config = config_override or ThreatDRQNConfig(**config_payload)
+        config = config_override or cls._config_from_payload(config_payload)
         controller = cls(config=config, seed=payload.get("seed"))
         controller.load_checkpoint_payload(payload)
         return controller

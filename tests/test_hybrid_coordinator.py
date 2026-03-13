@@ -242,6 +242,110 @@ def test_resource_target_lock_persists_until_target_invalidates() -> None:
     assert second_trace.decision.objective.target_position == first_target
 
 
+def test_effective_resource_siphon_blacklists_completed_target_in_meta_mode() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    state = _build_state(
+        player=GridPosition(1, 1),
+        resource_cells=(
+            ResourceCellState(position=GridPosition(1, 1), credits=3),
+            ResourceCellState(position=GridPosition(4, 1), credits=3),
+        ),
+        exit_position=GridPosition(5, 5),
+        player_siphons=1,
+    )
+
+    first_trace = coordinator.decide(
+        state=state,
+        available_actions=("move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert first_trace.decision.objective.phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS
+    assert first_trace.decision.objective.target_position == GridPosition(1, 1)
+    assert first_trace.decision.action == "space"
+
+    coordinator.observe_step_result(trace=first_trace, info={"action_effective": True})
+
+    second_trace = coordinator.decide(
+        state=state,
+        available_actions=("move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert second_trace.decision.objective.target_position == GridPosition(3, 1)
+
+
+def test_effective_resource_siphon_removes_collect_resources_phase_when_no_targets_remain() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    state = _build_state(
+        player=GridPosition(1, 1),
+        resource_cells=(ResourceCellState(position=GridPosition(1, 1), credits=3),),
+        exit_position=GridPosition(5, 5),
+        player_siphons=1,
+    )
+
+    first_trace = coordinator.decide(
+        state=state,
+        available_actions=("move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+    coordinator.observe_step_result(trace=first_trace, info={"action_effective": True})
+
+    assert coordinator.allowed_meta_phases(state) == (ObjectivePhase.EXIT_SECTOR,)
+
+
+def test_ineffective_resource_siphon_keeps_target_available() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    state = _build_state(
+        player=GridPosition(1, 1),
+        resource_cells=(
+            ResourceCellState(position=GridPosition(1, 1), credits=3),
+            ResourceCellState(position=GridPosition(4, 1), credits=3),
+        ),
+        exit_position=GridPosition(5, 5),
+        player_siphons=1,
+    )
+
+    first_trace = coordinator.decide(
+        state=state,
+        available_actions=("move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+    coordinator.observe_step_result(trace=first_trace, info={"action_effective": False})
+
+    second_trace = coordinator.decide(
+        state=state,
+        available_actions=("move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert second_trace.decision.objective.target_position == GridPosition(1, 1)
+
+
 def test_resource_targets_use_precomputed_energy_credit_layers() -> None:
     coordinator = HybridCoordinator(
         meta_controller=_StubMetaController(),
