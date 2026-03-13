@@ -109,6 +109,19 @@ def _player_on_exit(snapshot: GameStateSnapshot) -> bool:
     return player is not None and exit_position is not None and player == exit_position
 
 
+def _state_extra_bool(snapshot: GameStateSnapshot, *, key: str) -> bool | None:
+    field = snapshot.extra_fields.get(key)
+    if field is None or field.status != "ok":
+        return None
+    value = field.value
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
 def _field_effect_signature(field: Any) -> tuple[str, Any | None]:
     status = str(getattr(field, "status", "missing"))
     if status != "ok":
@@ -355,8 +368,20 @@ def _default_reward_fn(
     return 0.0
 
 
+def _state_indicates_victory(snapshot: GameStateSnapshot) -> bool:
+    return _state_extra_bool(snapshot, key="victory_active") is True
+
+
+def _state_terminal_reason(snapshot: GameStateSnapshot) -> str | None:
+    if snapshot.fail_state.status == "ok" and bool(snapshot.fail_state.value):
+        return "state:fail_state"
+    if _state_indicates_victory(snapshot):
+        return "state:victory"
+    return None
+
+
 def _state_is_terminal(snapshot: GameStateSnapshot) -> bool:
-    return snapshot.fail_state.status == "ok" and bool(snapshot.fail_state.value)
+    return _state_terminal_reason(snapshot) is not None
 
 
 def _is_terminal_health_value(value: Any) -> bool:
@@ -588,10 +613,12 @@ class GameEnv:
             action=action,
             previous_state=previous_state,
         )
-        done = _state_is_terminal(current_state)
-        terminal_reason = "state:fail_state" if done else None
+        terminal_reason = _state_terminal_reason(current_state)
+        done = terminal_reason is not None
 
         detector_info: dict[str, Any] = {}
+        if terminal_reason == "state:victory":
+            detector_info["victory_detected"] = True
         if self._fail_detector is not None:
             detector_result = self._run_with_timeout(
                 self._fail_detector.check,
@@ -1058,7 +1085,7 @@ class GameEnv:
             if _state_is_terminal(state):
                 if not require_non_terminal:
                     return state
-                self._dispatch_reset_recovery_actions(reason="terminal_fail_state")
+                self._dispatch_reset_recovery_actions(reason="terminal_state")
                 self._sleep_fn(self._config.state_poll_interval_seconds)
                 continue
             return state

@@ -62,6 +62,9 @@ _MAP_ENTITIES_BASE_OFFSET = 0x0C
 _MAP_ENTITY_STRIDE = 0x44
 _MAP_ENTITY_COUNT = 64
 _ENEMY_VISIBLE_INCUBATION_TIMER = 0
+_CAN_SIPHON_NOW_DERIVED_OFFSET = 0x1BD2
+_PROG_SLOTS_AVAILABLE_BASE_OFFSET = 0x1BC8
+_PROG_SLOT_COUNT = 10
 _SIPHON_REACH_DELTAS: tuple[tuple[int, int], ...] = (
     (0, 0),
     (-1, 0),
@@ -379,6 +382,37 @@ def _extract_optional_uint32_mask(
     if value < 0:
         return None
     return int(value & 0xFFFFFFFF)
+
+
+def _derive_optional_bool_from_root(
+    *,
+    reader: ProcessMemoryReader,
+    root_address: int | None,
+    offset: int,
+) -> bool | None:
+    if root_address is None:
+        return None
+    result = reader.read_bool(int(root_address) + int(offset))
+    if not result.is_ok:
+        return None
+    return bool(result.value)
+
+
+def _derive_prog_slots_available_mask_from_root(
+    *,
+    reader: ProcessMemoryReader,
+    root_address: int | None,
+) -> int | None:
+    if root_address is None:
+        return None
+    mask = 0
+    for slot_index in range(_PROG_SLOT_COUNT):
+        result = reader.read_bool(int(root_address) + _PROG_SLOTS_AVAILABLE_BASE_OFFSET + slot_index)
+        if not result.is_ok:
+            return None
+        if bool(result.value):
+            mask |= 1 << slot_index
+    return mask
 
 
 def _log_unknown_prog_ids_once(unknown_prog_ids: tuple[int, ...]) -> None:
@@ -1254,6 +1288,24 @@ def extract_state(
         entry=prog_slots_available_mask_entry,
         module_base_resolver=module_base_resolver,
     )
+    root_address = int(map_state.address) if map_state.address is not None else None
+    if root_address is None:
+        root_address, _root_source_field, _root_failure = _resolve_game_state_root(
+            reader=reader,
+            entries_by_name=entries,
+            module_base_resolver=module_base_resolver,
+        )
+    if can_siphon_now is None:
+        can_siphon_now = _derive_optional_bool_from_root(
+            reader=reader,
+            root_address=root_address,
+            offset=_CAN_SIPHON_NOW_DERIVED_OFFSET,
+        )
+    if prog_slots_available_mask is None:
+        prog_slots_available_mask = _derive_prog_slots_available_mask_from_root(
+            reader=reader,
+            root_address=root_address,
+        )
     fail_state = _derive_fail_state(
         health,
         terminal_health_value,

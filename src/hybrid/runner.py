@@ -331,6 +331,12 @@ def _add_common_runner_args(
         default=1.00,
         help="Meta reward: sector-advance bonus coefficient.",
     )
+    parser.add_argument(
+        "--meta-reward-final-sector-win",
+        type=float,
+        default=25.00,
+        help="Meta reward: large bonus for exiting sector 8 and winning the run.",
+    )
 
 
 def _add_meta_model_args(parser: argparse.ArgumentParser) -> None:
@@ -524,6 +530,7 @@ def _build_meta_reward_weights(args: argparse.Namespace) -> HybridMetaRewardWeig
         step_cost=float(getattr(args, "meta_reward_step_cost", 0.01)),
         premature_exit_penalty=float(getattr(args, "meta_reward_premature_exit_penalty", 1.25)),
         sector_advance=float(getattr(args, "meta_reward_sector_advance", 1.00)),
+        final_sector_win=float(getattr(args, "meta_reward_final_sector_win", 25.00)),
     )
 
 
@@ -756,6 +763,7 @@ def _run_rollouts(
                 previous_state=state,
                 current_state=next_state,
                 objective_phase=trace.decision.objective.phase,
+                done=done,
                 info={
                     **info,
                     "objective_target": target,

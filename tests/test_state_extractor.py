@@ -125,6 +125,112 @@ def test_extract_state_decodes_optional_action_availability_fields() -> None:
     assert snapshot.prog_slots_available_mask == 0b101
 
 
+def test_extract_state_includes_victory_flag_in_extra_fields() -> None:
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x200000),
+            _entry("player_energy", "int32", 0x200004),
+            _entry("player_credits", "int32", 0x200008),
+            _entry("victory_active", "bool", 0x20000C),
+        ),
+    )
+    backend = FakeMemoryBackend(
+        memory_by_address={
+            0x200000: struct.pack("<i", 12),
+            0x200004: struct.pack("<i", 5),
+            0x200008: struct.pack("<i", 41),
+            0x20000C: b"\x01",
+        }
+    )
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    snapshot = extract_state(reader=reader, registry=registry)
+
+    assert snapshot.extra_fields["victory_active"].status == "ok"
+    assert snapshot.extra_fields["victory_active"].value is True
+
+
+def test_extract_state_derives_action_availability_from_game_state_root_when_offsets_absent() -> None:
+    root = 0x280000
+    pointer_base = 0x110000
+    player_x_offset = 0x19C8
+    cell_base_offset = 0x11B8
+    cell_stride = 0x38
+    entity_base_offset = 0x0C
+    entity_stride = 0x44
+
+    registry = OffsetRegistry(
+        version=1,
+        entries=(
+            _entry("player_health", "int32", 0x200000),
+            _entry("player_energy", "int32", 0x200004),
+            _entry("player_credits", "int32", 0x200008),
+            _chained_entry(
+                "player_x",
+                "int32",
+                base_address=pointer_base,
+                pointer_chain=(0,),
+                read_offset=player_x_offset,
+            ),
+        ),
+    )
+
+    memory: dict[int, bytes] = {
+        0x200000: struct.pack("<i", 12),
+        0x200004: struct.pack("<i", 5),
+        0x200008: struct.pack("<i", 41),
+        pointer_base: struct.pack("<Q", root),
+        root + player_x_offset: struct.pack("<i", 2),
+        root + 0x1BD2: b"\x01",
+    }
+
+    default_cell_values = {
+        0x00: 0,
+        0x04: 0,
+        0x08: 0,
+        0x0C: 0,
+        0x10: 0,
+        0x14: -1,
+        0x18: 0,
+        0x1C: 0,
+        0x20: 0,
+        0x24: 0,
+        0x28: 0,
+        0x2C: 0,
+        0x30: 0,
+        0x34: 0,
+    }
+    for index in range(36):
+        base = root + cell_base_offset + index * cell_stride
+        for offset, value in default_cell_values.items():
+            memory[base + offset] = struct.pack("<i", value)
+
+    for slot in range(64):
+        memory[root + entity_base_offset + slot * entity_stride] = b"\x00"
+
+    player_entity = root + entity_base_offset
+    memory[player_entity] = b"\x01"
+    memory[player_entity + 0x08] = struct.pack("<i", 1)
+    memory[player_entity + 0x0C] = struct.pack("<i", 5)
+    memory[player_entity + 0x18] = struct.pack("<i", 0)
+    memory[player_entity + 0x34] = struct.pack("<i", 2)
+    memory[player_entity + 0x38] = struct.pack("<i", 3)
+
+    slot_flags = (1, 0, 1, 0, 0, 1, 0, 0, 0, 0)
+    for slot_index, flag in enumerate(slot_flags):
+        memory[root + 0x1BC8 + slot_index] = bytes((flag,))
+
+    backend = FakeMemoryBackend(memory_by_address=memory)
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+
+    snapshot = extract_state(reader=reader, registry=registry)
+
+    assert snapshot.map.status == "ok"
+    assert snapshot.can_siphon_now is True
+    assert snapshot.prog_slots_available_mask == 0b100101
+
+
 def test_extract_state_marks_missing_core_field_with_explicit_metadata() -> None:
     registry = OffsetRegistry(
         version=1,

@@ -37,6 +37,7 @@ def test_hybrid_parser_movement_defaults() -> None:
     assert args.meta_reward_step_cost == pytest.approx(0.01)
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
+    assert args.meta_reward_final_sector_win == pytest.approx(25.00)
 
 
 def test_hybrid_parser_train_meta_defaults() -> None:
@@ -60,6 +61,7 @@ def test_hybrid_parser_train_meta_defaults() -> None:
     assert args.meta_reward_step_cost == pytest.approx(0.01)
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
+    assert args.meta_reward_final_sector_win == pytest.approx(25.00)
     assert args.restore_save_file is None
     assert args.restore_save_delay == pytest.approx(0.35)
 
@@ -73,6 +75,7 @@ def test_hybrid_parser_train_full_meta_reward_defaults() -> None:
     assert args.meta_reward_step_cost == pytest.approx(0.01)
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
+    assert args.meta_reward_final_sector_win == pytest.approx(25.00)
     assert args.restore_save_file is None
     assert args.restore_save_delay == pytest.approx(0.35)
 
@@ -86,6 +89,7 @@ def test_hybrid_parser_eval_meta_reward_defaults() -> None:
     assert args.meta_reward_step_cost == pytest.approx(0.01)
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
+    assert args.meta_reward_final_sector_win == pytest.approx(25.00)
 
 
 def test_hybrid_parser_train_full_requires_warmstart_when_not_resuming() -> None:
@@ -150,6 +154,8 @@ def test_hybrid_parser_accepts_custom_meta_reward_values() -> None:
             "3.0",
             "--meta-reward-sector-advance",
             "1.75",
+            "--meta-reward-final-sector-win",
+            "40.0",
         ]
     )
 
@@ -158,6 +164,7 @@ def test_hybrid_parser_accepts_custom_meta_reward_values() -> None:
     assert args.meta_reward_step_cost == pytest.approx(0.02)
     assert args.meta_reward_premature_exit_penalty == pytest.approx(3.0)
     assert args.meta_reward_sector_advance == pytest.approx(1.75)
+    assert args.meta_reward_final_sector_win == pytest.approx(40.0)
 
 
 def test_build_meta_reward_weights_uses_cli_overrides() -> None:
@@ -175,6 +182,8 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
             "2.2",
             "--meta-reward-sector-advance",
             "1.3",
+            "--meta-reward-final-sector-win",
+            "30.0",
         ]
     )
 
@@ -185,6 +194,7 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
         step_cost=0.03,
         premature_exit_penalty=2.2,
         sector_advance=1.3,
+        final_sector_win=30.0,
     )
 
 

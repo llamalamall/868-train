@@ -18,6 +18,7 @@ class HybridMetaRewardWeights:
     step_cost: float = 0.01
     premature_exit_penalty: float = 1.25
     sector_advance: float = 1.00
+    final_sector_win: float = 25.00
 
 
 @dataclass(frozen=True)
@@ -40,6 +41,7 @@ class HybridMetaRewardBreakdown:
     step_cost: float
     premature_exit_penalty: float
     sector_advance: float
+    final_sector_win: float
     total: float
 
 
@@ -69,6 +71,19 @@ def _state_extra_numeric(state: GameStateSnapshot, *, key: str) -> float | None:
     if field is None or field.status != "ok":
         return None
     return _numeric(field.value)
+
+
+def _state_extra_bool(state: GameStateSnapshot, *, key: str) -> bool | None:
+    field = state.extra_fields.get(key)
+    if field is None or field.status != "ok":
+        return None
+    value = field.value
+    if isinstance(value, bool):
+        return value
+    try:
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return None
 
 
 def _siphon_count(state: GameStateSnapshot) -> int | None:
@@ -162,6 +177,41 @@ def _sector_advance_delta(
     return float(current - previous)
 
 
+def _state_indicates_victory(state: GameStateSnapshot) -> bool:
+    return _state_extra_bool(state, key="victory_active") is True
+
+
+def _state_is_final_sector(state: GameStateSnapshot) -> bool:
+    sector = _state_extra_numeric(state, key="current_sector")
+    return sector is not None and sector >= 7.0
+
+
+def _reason_indicates_fail_terminal(reason: str) -> bool:
+    return any(token in reason for token in ("fail", "dead", "loss"))
+
+
+def _final_sector_win_event(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+    objective_phase: ObjectivePhase,
+    done: bool,
+    info: dict[str, Any],
+) -> bool:
+    if _state_indicates_victory(previous_state) or _state_indicates_victory(current_state):
+        return True
+    if not done or objective_phase != ObjectivePhase.EXIT_SECTOR:
+        return False
+    if bool(info.get("premature_exit_attempt", False)):
+        return False
+    reason = str(info.get("terminal_reason") or "").strip().lower()
+    if reason and _reason_indicates_fail_terminal(reason):
+        return False
+    if not (_state_is_final_sector(previous_state) or _state_is_final_sector(current_state)):
+        return False
+    return _player_on_exit(previous_state) or _player_on_exit(current_state)
+
+
 def _health_delta(
     *,
     previous_state: GameStateSnapshot,
@@ -194,6 +244,7 @@ class HybridRewardSuite:
         previous_state: GameStateSnapshot,
         current_state: GameStateSnapshot,
         objective_phase: ObjectivePhase,
+        done: bool,
         info: dict[str, Any],
     ) -> HybridMetaRewardBreakdown:
         target = info.get("objective_target")
@@ -220,6 +271,13 @@ class HybridRewardSuite:
             )
         )
         sector_advance = _sector_advance_delta(previous_state=previous_state, current_state=current_state)
+        final_sector_win = _final_sector_win_event(
+            previous_state=previous_state,
+            current_state=current_state,
+            objective_phase=objective_phase,
+            done=done,
+            info=info,
+        )
 
         objective_component = (
             abs(self.meta_weights.objective_complete)
@@ -234,12 +292,18 @@ class HybridRewardSuite:
             else 0.0
         )
         sector_component = sector_advance * abs(self.meta_weights.sector_advance)
+        final_sector_win_component = (
+            abs(self.meta_weights.final_sector_win)
+            if final_sector_win
+            else 0.0
+        )
         total = (
             objective_component
             + progress_component
             + step_component
             + premature_component
             + sector_component
+            + final_sector_win_component
         )
         return HybridMetaRewardBreakdown(
             objective_complete=objective_component,
@@ -247,6 +311,7 @@ class HybridRewardSuite:
             step_cost=step_component,
             premature_exit_penalty=premature_component,
             sector_advance=sector_component,
+            final_sector_win=final_sector_win_component,
             total=total,
         )
 
@@ -294,4 +359,3 @@ class HybridRewardSuite:
             invalid_override_penalty=invalid_component,
             total=total,
         )
-

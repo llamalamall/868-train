@@ -61,51 +61,16 @@ def _siphon_candidates_near_player(player_position: GridPosition) -> set[GridPos
 
 
 def _hybrid_resource_siphon_available(snapshot: GameStateSnapshot | None) -> bool:
-    if snapshot is None or snapshot.map.status != "ok" or snapshot.map.player_position is None:
+    if snapshot is None:
         return False
-    player_x = int(snapshot.map.player_position.x)
-    player_y = int(snapshot.map.player_position.y)
-    if player_x < 0 or player_y < 0 or player_x >= int(snapshot.map.width) or player_y >= int(snapshot.map.height):
+    if snapshot.can_siphon_now is True:
+        return True
+    if snapshot.can_siphon_now is False:
         return False
-
-    layers = snapshot.map.layers
-    expected_height = int(snapshot.map.height)
-    expected_width = int(snapshot.map.width)
-    layer_ready = (
-        len(layers.energy_map) == expected_height
-        and len(layers.credits_map) == expected_height
-        and len(layers.points_map) == expected_height
-        and len(layers.siphon_penalty_map) == expected_height
-        and len(layers.progs_map) == expected_height
-        and all(len(row) == expected_width for row in layers.energy_map)
-        and all(len(row) == expected_width for row in layers.credits_map)
-        and all(len(row) == expected_width for row in layers.points_map)
-        and all(len(row) == expected_width for row in layers.siphon_penalty_map)
-        and all(len(row) == expected_width for row in layers.progs_map)
-    )
-    if layer_ready:
-        energy_gain = int(layers.energy_map[player_y][player_x])
-        credit_gain = int(layers.credits_map[player_y][player_x])
-        points_gain = int(layers.points_map[player_y][player_x])
-        penalty_gain = int(layers.siphon_penalty_map[player_y][player_x])
-        prog_ids = layers.progs_map[player_y][player_x]
-        if energy_gain > 0 or credit_gain > 0 or points_gain > 0 or penalty_gain > 0 or bool(prog_ids):
-            return True
-
-    # Fallback for partially initialized map-layer snapshots.
+    if snapshot.map.status != "ok" or snapshot.map.player_position is None:
+        return False
     nearby = _siphon_candidates_near_player(snapshot.map.player_position)
-    for cell in snapshot.map.cells:
-        if cell.position not in nearby:
-            continue
-        if cell.is_wall:
-            if int(cell.points) > 0 or int(cell.threat) > 0:
-                return True
-            if cell.prog_id is not None and int(cell.prog_id) > 0:
-                return True
-            continue
-        if int(cell.credits) > 0 or int(cell.energy) > 0:
-            return True
-    return False
+    return any(siphon in nearby for siphon in snapshot.map.siphons)
 
 
 def _build_action_config(

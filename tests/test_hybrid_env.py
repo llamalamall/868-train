@@ -20,7 +20,13 @@ def _ok_field(value: object) -> FieldState:
     return FieldState(value=value, status="ok")
 
 
-def _build_snapshot(*, player: GridPosition, cells: tuple[MapCellState, ...]) -> GameStateSnapshot:
+def _build_snapshot(
+    *,
+    player: GridPosition,
+    cells: tuple[MapCellState, ...] = (),
+    siphons: tuple[GridPosition, ...] = (),
+    can_siphon_now: bool | None = None,
+) -> GameStateSnapshot:
     return GameStateSnapshot(
         timestamp_utc="2026-03-11T00:00:00Z",
         health=_ok_field(10),
@@ -34,7 +40,9 @@ def _build_snapshot(*, player: GridPosition, cells: tuple[MapCellState, ...]) ->
             height=6,
             player_position=player,
             cells=cells,
+            siphons=siphons,
         ),
+        can_siphon_now=can_siphon_now,
     )
 
 
@@ -57,7 +65,21 @@ class _StubGameEnv:
         return
 
 
-def test_hybrid_available_actions_adds_space_when_resource_harvest_is_possible() -> None:
+def test_hybrid_available_actions_adds_space_when_adjacent_siphon_marker_exists() -> None:
+    game_env = _StubGameEnv(
+        action_space=("move_up", "space"),
+        _actions=("move_up",),
+    )
+    env = HybridLiveEnv(game_env=game_env, no_enemies_mode=True)
+    state = _build_snapshot(
+        player=GridPosition(1, 1),
+        siphons=(GridPosition(2, 1),),
+    )
+
+    assert env.available_actions(state) == ("move_up", "space")
+
+
+def test_hybrid_available_actions_does_not_add_space_for_previously_siphoned_tile() -> None:
     game_env = _StubGameEnv(
         action_space=("move_up", "space"),
         _actions=("move_up",),
@@ -75,28 +97,7 @@ def test_hybrid_available_actions_adds_space_when_resource_harvest_is_possible()
                 prog_id=7,
             ),
         ),
-    )
-
-    assert env.available_actions(state) == ("move_up", "space")
-
-
-def test_hybrid_available_actions_does_not_add_space_without_local_targets() -> None:
-    game_env = _StubGameEnv(
-        action_space=("move_up", "space"),
-        _actions=("move_up",),
-    )
-    env = HybridLiveEnv(game_env=game_env, no_enemies_mode=True)
-    state = _build_snapshot(
-        player=GridPosition(1, 1),
-        cells=(
-            MapCellState(
-                position=GridPosition(4, 4),
-                cell_type=0,
-                tile_variant=0,
-                wall_state=0,
-                is_wall=False,
-            ),
-        ),
+        can_siphon_now=False,
     )
 
     assert env.available_actions(state) == ("move_up",)

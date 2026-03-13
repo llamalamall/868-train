@@ -110,6 +110,18 @@
       "notes": "Static evidence from load/save and control flow indicates +0x1B94 is a run-state flag; fail_state can be derived as logical NOT."
     },
     {
+      "name": "victory_active",
+      "data_type": "bool",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x1B96",
+      "confidence": "medium",
+      "notes": "Decompiled UI, load/save, and end-of-run flow show +0x1B96 toggles the final victory state after exiting sector 8."
+    },
+    {
       "name": "collected_progs",
       "data_type": "array<int32>",
       "base": {
