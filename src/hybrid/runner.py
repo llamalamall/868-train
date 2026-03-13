@@ -407,6 +407,12 @@ def _add_threat_model_args(parser: argparse.ArgumentParser) -> None:
     )
     parser.add_argument("--threat-hidden-size", type=int, default=96, help="Threat GRU hidden size.")
     parser.add_argument("--threat-feature-count", type=int, default=35, help="Threat feature vector size.")
+    parser.add_argument(
+        "--threat-sequence-length",
+        type=int,
+        default=8,
+        help="Threat DRQN replay fragment length.",
+    )
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -565,6 +571,7 @@ def _build_threat_config(args: argparse.Namespace) -> ThreatDRQNConfig:
         epsilon_decay_steps=int(getattr(args, "threat_epsilon_decay_steps", 25_000)),
         feature_count=int(getattr(args, "threat_feature_count", 35)),
         hidden_size=int(getattr(args, "threat_hidden_size", 96)),
+        sequence_length=int(getattr(args, "threat_sequence_length", 8)),
     )
 
 

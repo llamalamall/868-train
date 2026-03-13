@@ -80,6 +80,7 @@ def test_hybrid_bundle_resume_load_preserves_saved_training_state(tmp_path: Path
             "threat_config": {
                 "feature_count": threat.feature_count,
                 "epsilon_start": threat.config.epsilon_start,
+                "sequence_length": threat.config.sequence_length,
             },
         },
         training_state={"episode_results": [{"steps": 3}]},
@@ -94,8 +95,10 @@ def test_hybrid_bundle_resume_load_preserves_saved_training_state(tmp_path: Path
     assert loaded_meta.training_snapshot()["replay_size"] == 1
     assert loaded_threat.training_snapshot()["total_env_steps"] == 1
     assert loaded_threat.training_snapshot()["replay_transition_count"] == 1
+    assert loaded_threat.training_snapshot()["config"]["sequence_length"] == 4
     assert hybrid_config["meta_config"]["feature_count"] == 4
     assert hybrid_config["threat_config"]["feature_count"] == 5
+    assert hybrid_config["threat_config"]["sequence_length"] == 4
     assert training_state["episode_results"] == [{"steps": 3}]
 
 

@@ -117,6 +117,37 @@ class _StubThreatController:
         return (ThreatOverride.WAIT, "force_wait", 0.0)
 
 
+@dataclass
+class _CyclingMetaController:
+    feature_count: int = 32
+    epsilon: float = 0.0
+
+    def __post_init__(self) -> None:
+        self._selections = (
+            ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+            ObjectivePhase.EXIT_SECTOR,
+        )
+        self._index = 0
+
+    def start_episode(self) -> None:
+        return
+
+    def select_objective(
+        self,
+        *,
+        features: Sequence[float],
+        allowed_phases: Sequence[ObjectivePhase] | None = None,
+        explore: bool = True,
+    ) -> tuple[ObjectivePhase, str, float | None]:
+        del explore
+        assert len(tuple(features)) == self.feature_count
+        assert allowed_phases is not None
+        phase = self._selections[min(self._index, len(self._selections) - 1)]
+        self._index += 1
+        assert phase in allowed_phases
+        return (phase, "cycling_meta", 0.0)
+
+
 def test_allowed_meta_phases_prioritize_siphons() -> None:
     coordinator = HybridCoordinator(
         meta_controller=_StubMetaController(),
@@ -166,6 +197,23 @@ def test_allowed_meta_phases_progress_to_resources_then_exit_after_siphons() -> 
         ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
         ObjectivePhase.EXIT_SECTOR,
     )
+
+
+def test_allowed_meta_phases_exit_when_resources_remain_but_player_has_no_siphons() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        siphons=(),
+        resource_cells=(ResourceCellState(position=GridPosition(1, 0), credits=3),),
+        exit_position=GridPosition(5, 5),
+        player_siphons=0,
+    )
+
+    phases = coordinator.allowed_meta_phases(state)
+    assert phases == (ObjectivePhase.EXIT_SECTOR,)
 
 
 def test_invalid_threat_override_falls_back_to_route_action() -> None:
@@ -240,6 +288,84 @@ def test_resource_target_lock_persists_until_target_invalidates() -> None:
     )
 
     assert second_trace.decision.objective.target_position == first_target
+
+
+def test_meta_phase_lock_persists_resource_objective_while_target_remains_valid() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_CyclingMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    first_state = _build_state(
+        player=GridPosition(0, 0),
+        resource_cells=(ResourceCellState(position=GridPosition(3, 0), credits=4),),
+        exit_position=GridPosition(5, 5),
+    )
+    first_trace = coordinator.decide(
+        state=first_state,
+        available_actions=("move_up", "move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    moved_state = _build_state(
+        player=GridPosition(1, 0),
+        resource_cells=(ResourceCellState(position=GridPosition(3, 0), credits=4),),
+        exit_position=GridPosition(5, 5),
+    )
+    second_trace = coordinator.decide(
+        state=moved_state,
+        available_actions=("move_up", "move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert first_trace.decision.objective.phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS
+    assert second_trace.decision.objective.phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS
+    assert second_trace.decision.objective.reason == "meta_phase_lock"
+
+
+def test_meta_phase_lock_drops_resource_objective_when_siphons_deplete() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_CyclingMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    first_state = _build_state(
+        player=GridPosition(0, 0),
+        resource_cells=(ResourceCellState(position=GridPosition(3, 0), credits=4),),
+        exit_position=GridPosition(5, 5),
+        player_siphons=1,
+    )
+    first_trace = coordinator.decide(
+        state=first_state,
+        available_actions=("move_up", "move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    depleted_state = _build_state(
+        player=GridPosition(1, 0),
+        resource_cells=(ResourceCellState(position=GridPosition(3, 0), credits=4),),
+        exit_position=GridPosition(5, 5),
+        player_siphons=0,
+    )
+    second_trace = coordinator.decide(
+        state=depleted_state,
+        available_actions=("move_up", "move_right", "space"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert first_trace.decision.objective.phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS
+    assert second_trace.decision.objective.phase == ObjectivePhase.EXIT_SECTOR
+    assert second_trace.decision.objective.reason != "meta_phase_lock"
 
 
 def test_resource_targets_use_precomputed_energy_credit_layers() -> None:
@@ -576,7 +702,8 @@ def test_scripted_run_does_not_select_siphon_when_siphons_are_depleted() -> None
         explore_meta=False,
         explore_threat=False,
     )
-    assert first_trace.decision.objective.target_position == GridPosition(1, 1)
+    assert first_trace.decision.objective.phase == ObjectivePhase.EXIT_SECTOR
+    assert first_trace.decision.objective.target_position == GridPosition(5, 5)
     assert first_trace.decision.action == "move_right"
 
     second_target = coordinator.resolve_target_for_phase(
@@ -584,7 +711,7 @@ def test_scripted_run_does_not_select_siphon_when_siphons_are_depleted() -> None
         phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
         scripted_mode=True,
     )
-    assert second_target == GridPosition(1, 1)
+    assert second_target is None
 
 
 def test_resource_target_arrival_can_siphon_when_player_has_siphons_even_if_map_has_none() -> None:

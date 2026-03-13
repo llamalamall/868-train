@@ -398,12 +398,41 @@ class HybridCoordinator:
             return (ObjectivePhase.COLLECT_SIPHONS,)
         if self.config.exit_after_siphons_when_scripted:
             return (ObjectivePhase.EXIT_SECTOR,)
-        if _resource_targets(state):
+        if self._resource_collection_possible(state) and _resource_targets(state):
             return (
                 ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
                 ObjectivePhase.EXIT_SECTOR,
             )
         return (ObjectivePhase.EXIT_SECTOR,)
+
+    def _should_persist_phase_lock(
+        self,
+        *,
+        state: GameStateSnapshot,
+        phase: ObjectivePhase,
+        target: GridPosition | None,
+        scripted_mode: bool,
+    ) -> bool:
+        if (
+            phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS
+            and not self._resource_collection_possible(state)
+        ):
+            return False
+        if target is None:
+            return False
+        if (
+            not scripted_mode
+            and phase == ObjectivePhase.EXIT_SECTOR
+            and self._resource_collection_possible(state)
+            and _resource_targets(state)
+        ):
+            return False
+        return self._is_target_valid_for_phase(
+            state=state,
+            phase=phase,
+            target=target,
+            scripted_mode=scripted_mode,
+        )
 
     def resolve_target_for_phase(
         self,
@@ -420,6 +449,8 @@ class HybridCoordinator:
                 candidates=tuple(state.map.siphons),
             )
         if phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
+            if not self._resource_collection_possible(state):
+                return None
             return self._best_resource_target(
                 state=state,
                 scripted_mode=scripted_mode,
@@ -645,7 +676,20 @@ class HybridCoordinator:
             scripted_phase=scripted_phase,
             target=scripted_target,
         )
-        if use_meta_controller:
+        locked_phase_active = bool(
+            use_meta_controller
+            and self._should_persist_phase_lock(
+                state=state,
+                phase=self._locked_phase if self._locked_phase is not None else scripted_phase,
+                target=self._locked_target,
+                scripted_mode=scripted_mode,
+            )
+        )
+        if locked_phase_active and self._locked_phase is not None:
+            selected_phase = self._locked_phase
+            meta_reason = "meta_phase_lock"
+            q_value = None
+        elif use_meta_controller:
             selected_phase, meta_reason, q_value = self.meta_controller.select_objective(
                 features=meta_features,
                 allowed_phases=allowed_phases,
@@ -778,8 +822,17 @@ class HybridCoordinator:
             phase=phase,
             scripted_mode=scripted_mode,
         )
-        self._locked_phase = phase
-        self._locked_target = resolved
+        if self._should_persist_phase_lock(
+            state=state,
+            phase=phase,
+            target=resolved,
+            scripted_mode=scripted_mode,
+        ):
+            self._locked_phase = phase
+            self._locked_target = resolved
+        else:
+            self._locked_phase = None
+            self._locked_target = None
         return resolved
 
     def _is_target_valid_for_phase(
@@ -795,6 +848,8 @@ class HybridCoordinator:
         if phase == ObjectivePhase.COLLECT_SIPHONS:
             return target in state.map.siphons
         if phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
+            if not self._resource_collection_possible(state):
+                return False
             if scripted_mode and target in self._scripted_siphoned_targets:
                 return False
             return target in _resource_targets(state)
@@ -999,6 +1054,17 @@ class HybridCoordinator:
             except (TypeError, ValueError):
                 continue
         return None
+
+    @staticmethod
+    def _resource_collection_possible(state: GameStateSnapshot) -> bool:
+        if state.map.status != "ok":
+            return True
+        if state.map.siphons:
+            return True
+        player_siphons = HybridCoordinator._player_siphon_count(state)
+        if player_siphons is None:
+            return True
+        return player_siphons > 0
 
     def _allowed_threat_overrides(self, *, actions: tuple[str, ...]) -> tuple[ThreatOverride, ...]:
         overrides = [ThreatOverride.ROUTE_DEFAULT, ThreatOverride.EVADE, ThreatOverride.ENGAGE]

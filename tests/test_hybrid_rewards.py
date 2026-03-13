@@ -10,7 +10,14 @@ from src.hybrid.rewards import (
     HybridThreatRewardWeights,
 )
 from src.hybrid.types import ObjectivePhase, ThreatOverride
-from src.state.schema import FieldState, GameStateSnapshot, GridPosition, InventoryState, MapState
+from src.state.schema import (
+    FieldState,
+    GameStateSnapshot,
+    GridPosition,
+    InventoryState,
+    MapState,
+    ResourceCellState,
+)
 
 
 def _field(value: object, *, status: str = "ok") -> FieldState:
@@ -165,6 +172,136 @@ def test_compute_meta_reward_does_not_add_final_sector_win_bonus_for_premature_e
 
     assert result.final_sector_win == 0.0
     assert result.total == 0.0
+
+
+def test_compute_meta_reward_penalizes_exit_when_resources_remain() -> None:
+    reward_suite = HybridRewardSuite(
+        meta_weights=HybridMetaRewardWeights(
+            objective_complete=0.0,
+            phase_progress=0.0,
+            step_cost=0.0,
+            premature_exit_penalty=2.0,
+            sector_advance=0.0,
+            final_sector_win=0.0,
+        )
+    )
+    previous = _snapshot(
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(5, 5),
+            exit_position=GridPosition(5, 5),
+            resource_cells=(),
+        )
+    )
+    current = _snapshot(
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(5, 5),
+            exit_position=GridPosition(5, 5),
+            resource_cells=(ResourceCellState(position=GridPosition(1, 1), credits=3),),
+        ),
+        extra_fields={"siphons": _field(1)},
+    )
+
+    result = reward_suite.compute_meta_reward(
+        previous_state=previous,
+        current_state=current,
+        objective_phase=ObjectivePhase.EXIT_SECTOR,
+        done=False,
+        info={},
+    )
+
+    assert result.premature_exit_penalty == pytest.approx(-2.0)
+    assert result.total == pytest.approx(-2.0)
+
+
+def test_compute_meta_reward_does_not_penalize_exit_when_resources_remain_but_player_has_no_siphons() -> None:
+    reward_suite = HybridRewardSuite(
+        meta_weights=HybridMetaRewardWeights(
+            objective_complete=0.0,
+            phase_progress=0.0,
+            step_cost=0.0,
+            premature_exit_penalty=2.0,
+            sector_advance=0.0,
+            final_sector_win=0.0,
+        )
+    )
+    previous = _snapshot(
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(5, 5),
+            exit_position=GridPosition(5, 5),
+            siphons=(),
+            resource_cells=(),
+        ),
+        extra_fields={"siphons": _field(0)},
+    )
+    current = _snapshot(
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(5, 5),
+            exit_position=GridPosition(5, 5),
+            siphons=(),
+            resource_cells=(ResourceCellState(position=GridPosition(1, 1), credits=3),),
+        ),
+        extra_fields={"siphons": _field(0)},
+    )
+
+    result = reward_suite.compute_meta_reward(
+        previous_state=previous,
+        current_state=current,
+        objective_phase=ObjectivePhase.EXIT_SECTOR,
+        done=False,
+        info={},
+    )
+
+    assert result.premature_exit_penalty == 0.0
+    assert result.total == 0.0
+
+
+def test_compute_meta_reward_exit_completion_allows_uncollectable_resources_with_zero_siphons() -> None:
+    reward_suite = HybridRewardSuite(
+        meta_weights=HybridMetaRewardWeights(
+            objective_complete=3.0,
+            phase_progress=0.0,
+            step_cost=0.0,
+            premature_exit_penalty=2.0,
+            sector_advance=0.0,
+            final_sector_win=0.0,
+        )
+    )
+    previous = _snapshot(
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(4, 5),
+            exit_position=GridPosition(5, 5),
+            siphons=(),
+            resource_cells=(ResourceCellState(position=GridPosition(1, 1), credits=3),),
+        ),
+        extra_fields={"siphons": _field(0)},
+    )
+    current = _snapshot(
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(5, 5),
+            exit_position=GridPosition(5, 5),
+            siphons=(),
+            resource_cells=(ResourceCellState(position=GridPosition(1, 1), credits=3),),
+        ),
+        extra_fields={"siphons": _field(0)},
+    )
+
+    result = reward_suite.compute_meta_reward(
+        previous_state=previous,
+        current_state=current,
+        objective_phase=ObjectivePhase.EXIT_SECTOR,
+        done=False,
+        info={"objective_target": GridPosition(5, 5)},
+    )
+
+    assert result.objective_complete == pytest.approx(3.0)
+    assert result.premature_exit_penalty == 0.0
+    assert result.total == pytest.approx(3.0)
 
 
 def test_compute_meta_reward_uses_route_distance_overrides_from_info() -> None:

@@ -92,6 +92,18 @@ def _siphon_count(state: GameStateSnapshot) -> int | None:
     return len(state.map.siphons)
 
 
+def _player_siphon_inventory_count(state: GameStateSnapshot) -> int | None:
+    for key in ("siphons", "player_siphons", "siphon_count"):
+        field = state.extra_fields.get(key)
+        if field is None or field.status != "ok" or field.value is None:
+            continue
+        try:
+            return int(float(field.value))
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
 def _resource_value_total(state: GameStateSnapshot) -> int | None:
     if state.map.status != "ok":
         return None
@@ -111,6 +123,16 @@ def _player_on_exit(state: GameStateSnapshot) -> bool:
     if state.map.player_position is None or state.map.exit_position is None:
         return False
     return state.map.player_position == state.map.exit_position
+
+
+def _resources_still_block_exit(state: GameStateSnapshot) -> bool:
+    remaining_value = _resource_value_total(state)
+    if remaining_value in {None, 0}:
+        return False
+    player_siphons = _player_siphon_inventory_count(state)
+    if player_siphons is None:
+        return True
+    return player_siphons > 0
 
 
 def _distance_to_target(
@@ -156,7 +178,7 @@ def _phase_completion_event(
             return False
         if _siphon_count(current_state) not in {None, 0}:
             return False
-        if _resource_value_total(current_state) not in {None, 0}:
+        if _resources_still_block_exit(current_state):
             return False
         if target is None:
             return True
@@ -209,7 +231,17 @@ def _final_sector_win_event(
         return False
     if not (_state_is_final_sector(previous_state) or _state_is_final_sector(current_state)):
         return False
-    return _player_on_exit(previous_state) or _player_on_exit(current_state)
+    if _player_on_exit(current_state):
+        exit_state = current_state
+    elif _player_on_exit(previous_state):
+        exit_state = previous_state
+    else:
+        return False
+    if _siphon_count(exit_state) not in {None, 0}:
+        return False
+    if _resources_still_block_exit(exit_state):
+        return False
+    return True
 
 
 def _health_delta(
@@ -269,7 +301,10 @@ class HybridRewardSuite:
             info.get("premature_exit_attempt", False)
             or (
                 _player_on_exit(current_state)
-                and _siphon_count(current_state) not in {None, 0}
+                and (
+                    _siphon_count(current_state) not in {None, 0}
+                    or _resources_still_block_exit(current_state)
+                )
             )
         )
         sector_advance = _sector_advance_delta(previous_state=previous_state, current_state=current_state)

@@ -6,6 +6,7 @@ import pytest
 
 from src.hybrid.rewards import HybridMetaRewardWeights
 from src.hybrid.runner import (
+    _build_threat_config,
     _build_meta_reward_weights,
     _build_parser,
     _format_monitor_action_line,
@@ -71,6 +72,19 @@ def test_hybrid_parser_train_full_meta_reward_defaults() -> None:
     parser = _build_parser()
     args = parser.parse_args(["train-full-hierarchical"])
 
+    assert args.episodes == 500
+    assert args.max_steps == 450
+    assert args.no_enemies is False
+    assert args.meta_freeze_episodes == 100
+    assert args.meta_epsilon_start == pytest.approx(0.25)
+    assert args.meta_epsilon_end == pytest.approx(0.05)
+    assert args.meta_epsilon_decay_steps == 15_000
+    assert args.meta_feature_count == 32
+    assert args.threat_epsilon_start == pytest.approx(0.80)
+    assert args.threat_epsilon_end == pytest.approx(0.05)
+    assert args.threat_epsilon_decay_steps == 25_000
+    assert args.threat_feature_count == 35
+    assert args.threat_sequence_length == 8
     assert args.meta_reward_objective_complete == pytest.approx(1.50)
     assert args.meta_reward_phase_progress == pytest.approx(0.25)
     assert args.meta_reward_step_cost == pytest.approx(0.01)
@@ -132,6 +146,22 @@ def test_hybrid_parser_train_full_accepts_warmstart_path() -> None:
     _validate_args(parser, args)
     assert args.warmstart_checkpoint == "artifacts/hybrid/20260311-01-gateb"
     assert args.episodes == 30
+
+
+def test_hybrid_parser_train_full_accepts_threat_sequence_length_override() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "train-full-hierarchical",
+            "--warmstart-checkpoint",
+            "artifacts/hybrid/20260311-01-gateb",
+            "--threat-sequence-length",
+            "12",
+        ]
+    )
+
+    _validate_args(parser, args)
+    assert args.threat_sequence_length == 12
 
 
 def test_hybrid_parser_eval_requires_checkpoint() -> None:
@@ -197,6 +227,23 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
         sector_advance=1.3,
         final_sector_win=30.0,
     )
+
+
+def test_build_threat_config_uses_cli_sequence_length_override() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "train-full-hierarchical",
+            "--threat-sequence-length",
+            "12",
+        ]
+    )
+
+    config = _build_threat_config(args)
+
+    assert config.sequence_length == 12
+    assert config.feature_count == 35
+    assert config.epsilon_start == pytest.approx(0.80)
 
 
 def test_format_monitor_action_line_includes_phase_and_target_coordinates() -> None:
