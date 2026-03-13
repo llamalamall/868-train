@@ -49,3 +49,32 @@ def test_astar_returns_none_when_target_unreachable() -> None:
 
     assert action is None
 
+
+def test_astar_prefers_safe_detour_when_blocked_positions_have_alternative_route() -> None:
+    controller = AStarMovementController()
+    plan = controller.plan_route(
+        start=GridPosition(0, 0),
+        target=GridPosition(2, 0),
+        width=6,
+        height=6,
+        walls=set(),
+        blocked_positions={GridPosition(1, 0)},
+    )
+
+    assert plan is not None
+    assert plan.actions == ("move_up", "move_right", "move_right", "move_down")
+
+
+def test_astar_falls_back_to_soft_route_when_blocked_positions_make_target_unreachable() -> None:
+    controller = AStarMovementController()
+    plan = controller.plan_route(
+        start=GridPosition(0, 0),
+        target=GridPosition(2, 0),
+        width=6,
+        height=6,
+        walls={GridPosition(0, 1), GridPosition(1, 1), GridPosition(2, 1)},
+        blocked_positions={GridPosition(1, 0)},
+    )
+
+    assert plan is not None
+    assert plan.actions == ("move_right", "move_right")

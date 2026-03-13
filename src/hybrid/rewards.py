@@ -187,7 +187,7 @@ def _state_is_final_sector(state: GameStateSnapshot) -> bool:
 
 
 def _reason_indicates_fail_terminal(reason: str) -> bool:
-    return any(token in reason for token in ("fail", "dead", "loss"))
+    return any(token in reason for token in ("fail", "dead", "loss", "memory:player_health"))
 
 
 def _final_sector_win_event(
@@ -253,7 +253,9 @@ class HybridRewardSuite:
         distance_before = info.get("objective_distance_before")
         if distance_before is None:
             distance_before = _distance_to_target(previous_state, target=target)
-        distance_after = _distance_to_target(current_state, target=target)
+        distance_after = info.get("objective_distance_after")
+        if distance_after is None:
+            distance_after = _distance_to_target(current_state, target=target)
         progress_delta = 0.0
         if distance_before is not None and distance_after is not None:
             progress_delta = float(distance_before - distance_after)
@@ -325,18 +327,25 @@ class HybridRewardSuite:
         info: dict[str, Any],
     ) -> HybridThreatRewardBreakdown:
         terminal_reason = str(info.get("terminal_reason") or "").strip().lower()
-        failed = done and any(token in terminal_reason for token in ("fail", "dead", "loss"))
+        failed = done and _reason_indicates_fail_terminal(terminal_reason)
         health_delta = _health_delta(previous_state=previous_state, current_state=current_state)
         damage_taken = max(-health_delta, 0.0)
-        rejoined_route = bool(info.get("rejoined_route", False))
+        reward_window_active = bool(info.get("threat_reward_active", False))
+        rejoined_route = bool(info.get("rejoined_route_transition", False))
         invalid_override = bool(info.get("invalid_override", False))
 
-        survival_component = abs(self.threat_weights.survival) if not done else 0.0
+        survival_component = (
+            abs(self.threat_weights.survival)
+            if reward_window_active and not done
+            else 0.0
+        )
         damage_component = -damage_taken * abs(self.threat_weights.damage_taken_penalty)
         fail_component = -abs(self.threat_weights.fail_penalty) if failed else 0.0
         rejoin_component = (
             abs(self.threat_weights.route_rejoin_bonus)
-            if rejoined_route and threat_override == ThreatOverride.ROUTE_DEFAULT
+            if reward_window_active
+            and rejoined_route
+            and threat_override == ThreatOverride.ROUTE_DEFAULT
             else 0.0
         )
         invalid_component = (

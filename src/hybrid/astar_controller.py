@@ -44,8 +44,45 @@ class AStarMovementController:
         height: int,
         walls: set[GridPosition],
         allowed_first_actions: tuple[str, ...] | None = None,
+        blocked_positions: set[GridPosition] | None = None,
+        danger_costs: dict[GridPosition, float] | None = None,
     ) -> RoutePlan | None:
         """Return deterministic shortest route plan or None if unreachable."""
+        extra_blocked = {position for position in (blocked_positions or set()) if position != target}
+        preferred_plan = self._plan_route_internal(
+            start=start,
+            target=target,
+            width=width,
+            height=height,
+            walls=walls | extra_blocked,
+            allowed_first_actions=allowed_first_actions,
+            danger_costs=danger_costs,
+        )
+        if preferred_plan is not None:
+            return preferred_plan
+        if not extra_blocked and not danger_costs:
+            return None
+        return self._plan_route_internal(
+            start=start,
+            target=target,
+            width=width,
+            height=height,
+            walls=walls,
+            allowed_first_actions=allowed_first_actions,
+            danger_costs=danger_costs,
+        )
+
+    def _plan_route_internal(
+        self,
+        *,
+        start: GridPosition,
+        target: GridPosition,
+        width: int,
+        height: int,
+        walls: set[GridPosition],
+        allowed_first_actions: tuple[str, ...] | None = None,
+        danger_costs: dict[GridPosition, float] | None = None,
+    ) -> RoutePlan | None:
         if start == target:
             return RoutePlan(actions=(), distance=0)
         if start in walls or target in walls:
@@ -59,11 +96,11 @@ class AStarMovementController:
             tuple(action for action in allowed_first_actions or () if action in _MOVE_DELTAS)
             or _MOVE_ORDER
         )
-        open_heap: list[tuple[int, int, int, GridPosition]] = []
+        open_heap: list[tuple[float, int, int, GridPosition]] = []
         push_counter = 0
         start_h = _manhattan(start, target)
-        heapq.heappush(open_heap, (start_h, 0, push_counter, start))
-        best_cost: dict[GridPosition, int] = {start: 0}
+        heapq.heappush(open_heap, (float(start_h), 0, push_counter, start))
+        best_cost: dict[GridPosition, float] = {start: 0.0}
         parent: dict[GridPosition, tuple[GridPosition, str]] = {}
 
         while open_heap:
@@ -82,14 +119,15 @@ class AStarMovementController:
                     continue
                 if candidate in walls:
                     continue
-                tentative_cost = cost_so_far + 1
+                danger_cost = float(danger_costs.get(candidate, 0.0)) if danger_costs else 0.0
+                tentative_cost = float(cost_so_far) + 1.0 + max(danger_cost, 0.0)
                 previous_best = best_cost.get(candidate)
                 if previous_best is not None and tentative_cost >= previous_best:
                     continue
                 best_cost[candidate] = tentative_cost
                 parent[candidate] = (current, action)
                 push_counter += 1
-                priority = tentative_cost + _manhattan(candidate, target)
+                priority = tentative_cost + float(_manhattan(candidate, target))
                 heapq.heappush(open_heap, (priority, tentative_cost, push_counter, candidate))
 
         if target not in parent:
@@ -113,6 +151,8 @@ class AStarMovementController:
         height: int,
         walls: set[GridPosition],
         available_actions: tuple[str, ...],
+        blocked_positions: set[GridPosition] | None = None,
+        danger_costs: dict[GridPosition, float] | None = None,
     ) -> str | None:
         """Return deterministic next movement action for the route."""
         movement_actions = tuple(action for action in available_actions if action in _MOVE_DELTAS)
@@ -125,6 +165,8 @@ class AStarMovementController:
             height=height,
             walls=walls,
             allowed_first_actions=movement_actions,
+            blocked_positions=blocked_positions,
+            danger_costs=danger_costs,
         )
         if plan is None or not plan.actions:
             return None
@@ -132,4 +174,3 @@ class AStarMovementController:
         if next_move not in movement_actions:
             return None
         return next_move
-

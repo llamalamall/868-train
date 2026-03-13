@@ -55,8 +55,15 @@ class HybridDecisionTrace:
     decision: HybridDecision
     meta_features: tuple[float, ...]
     threat_features: tuple[float, ...]
+    route_action: str | None
     objective_distance_before: int | None
     threat_active: bool
+    current_tile_threatened: bool
+    route_tile_threatened: bool
+    predicted_damage: bool
+    safe_action_count: int
+    predicted_attack_types: tuple[int, ...]
+    objective_penalty_bucket: int
     available_actions: tuple[str, ...]
 
 
@@ -74,4 +81,3 @@ class HybridEpisodeEnv(Protocol):
 
     def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
         """Return valid actions for current snapshot."""
-

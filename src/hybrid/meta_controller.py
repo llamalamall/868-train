@@ -49,7 +49,7 @@ class MetaDQNConfig:
     epsilon_end: float = 0.05
     epsilon_decay_steps: int = 5_000
     hidden_size: int = 64
-    feature_count: int = 18
+    feature_count: int = 32
 
 
 @dataclass(frozen=True)
@@ -327,6 +327,20 @@ class MetaControllerDQN:
         else:
             self._replay_cursor = 0
 
+    def copy_weights_from(self, other: MetaControllerDQN) -> None:
+        self._online.model.load_state_dict(other._online.model.state_dict())
+        self._target.model.load_state_dict(other._target.model.state_dict())
+
+    def training_snapshot(self) -> dict[str, Any]:
+        return {
+            "config": asdict(self.config),
+            "epsilon": self.epsilon,
+            "total_env_steps": self._total_env_steps,
+            "optimization_steps": self._optimization_steps,
+            "episodes_seen": self._episodes_seen,
+            "replay_size": len(self._replay),
+        }
+
     def save(self, path: str | Path) -> Path:
         checkpoint_path = Path(path)
         checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -421,4 +435,3 @@ class MetaControllerDQN:
         )
         self._optimizer.step()
         return float(loss.item())
-

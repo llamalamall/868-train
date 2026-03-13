@@ -22,11 +22,12 @@ class ThreatDRQNConfig:
     min_replay_size: int = 512
     batch_size: int = 64
     target_sync_interval: int = 300
-    epsilon_start: float = 0.50
+    epsilon_start: float = 0.80
     epsilon_end: float = 0.05
-    epsilon_decay_steps: int = 7_500
-    feature_count: int = 20
+    epsilon_decay_steps: int = 25_000
+    feature_count: int = 35
     hidden_size: int = 96
+    sequence_length: int = 8
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,7 @@ class ThreatUpdateResult:
 
 
 class _ThreatQNetwork:
-    """Single-step DRQN (encoder + GRU + Q head)."""
+    """Sequence DRQN (encoder + GRU + Q head)."""
 
     def __init__(
         self,
@@ -103,9 +104,9 @@ class _ThreatQNetwork:
 
 
 class ThreatControllerDRQN:
-    """Threat controller with recurrent state and DQN updates."""
+    """Threat controller with recurrent state and sequence-fragment DQN updates."""
 
-    CHECKPOINT_VERSION = 1
+    CHECKPOINT_VERSION = 2
 
     def __init__(
         self,
@@ -123,6 +124,8 @@ class ThreatControllerDRQN:
             raise ValueError("target_sync_interval must be >= 1.")
         if config.epsilon_decay_steps < 1:
             raise ValueError("epsilon_decay_steps must be >= 1.")
+        if config.sequence_length < 1:
+            raise ValueError("sequence_length must be >= 1.")
         if not (0.0 <= config.epsilon_end <= 1.0 and 0.0 <= config.epsilon_start <= 1.0):
             raise ValueError("epsilon values must be in [0, 1].")
 
@@ -156,8 +159,9 @@ class ThreatControllerDRQN:
         )
         self._loss_fn = self._nn.MSELoss()
 
-        self._replay: list[ThreatTransition] = []
-        self._replay_cursor = 0
+        self._replay_episodes: list[list[ThreatTransition]] = []
+        self._replay_transition_count = 0
+        self._current_episode_replay: list[ThreatTransition] | None = None
         self._total_env_steps = 0
         self._optimization_steps = 0
         self._episodes_seen = 0
@@ -180,6 +184,8 @@ class ThreatControllerDRQN:
     def start_episode(self) -> None:
         self._episodes_seen += 1
         self._hidden_state = None
+        self._current_episode_replay = []
+        self._replay_episodes.append(self._current_episode_replay)
 
     def select_override(
         self,
@@ -199,11 +205,6 @@ class ThreatControllerDRQN:
         if not allowed_indices:
             raise ValueError("No allowed threat overrides supplied.")
 
-        if explore and self._rng.random() < self.epsilon:
-            selected = self._override_order[self._rng.choice(allowed_indices)]
-            self.last_decision_reason = "threat_epsilon_explore"
-            return (selected, self.last_decision_reason, None)
-
         with self._torch.no_grad():
             feature_tensor = self._torch.tensor(vector, dtype=self._torch.float32).view(1, 1, -1)
             q_tensor, new_hidden = self._online.forward(
@@ -212,9 +213,15 @@ class ThreatControllerDRQN:
             )
             self._hidden_state = new_hidden.detach()
             q_values = q_tensor[:, -1, :].squeeze(0)
-            best_index = max(allowed_indices, key=lambda index: float(q_values[index].item()))
-            selected = self._override_order[best_index]
-            q_value = float(q_values[best_index].item())
+
+        if explore and self._rng.random() < self.epsilon:
+            selected = self._override_order[self._rng.choice(allowed_indices)]
+            self.last_decision_reason = "threat_epsilon_explore"
+            return (selected, self.last_decision_reason, None)
+
+        best_index = max(allowed_indices, key=lambda index: float(q_values[index].item()))
+        selected = self._override_order[best_index]
+        q_value = float(q_values[best_index].item())
         self.last_decision_reason = "threat_greedy_q"
         return (selected, self.last_decision_reason, q_value)
 
@@ -246,16 +253,16 @@ class ThreatControllerDRQN:
         self._total_env_steps += 1
 
         minimum_replay = max(int(self.config.min_replay_size), int(self.config.batch_size))
-        if len(self._replay) < minimum_replay:
+        if self._replay_transition_count < minimum_replay:
             return ThreatUpdateResult(
                 did_update=False,
                 loss=None,
                 epsilon=self.epsilon,
-                replay_size=len(self._replay),
+                replay_size=self._replay_transition_count,
                 optimization_step=self._optimization_steps,
             )
 
-        batch = self._rng.sample(self._replay, int(self.config.batch_size))
+        batch = [self._sample_sequence_fragment() for _ in range(int(self.config.batch_size))]
         loss = self._apply_update(batch=batch)
         self._optimization_steps += 1
         if self._optimization_steps % int(self.config.target_sync_interval) == 0:
@@ -264,7 +271,7 @@ class ThreatControllerDRQN:
             did_update=True,
             loss=loss,
             epsilon=self.epsilon,
-            replay_size=len(self._replay),
+            replay_size=self._replay_transition_count,
             optimization_step=self._optimization_steps,
         )
 
@@ -281,26 +288,30 @@ class ThreatControllerDRQN:
                 "total_env_steps": self._total_env_steps,
                 "optimization_steps": self._optimization_steps,
                 "episodes_seen": self._episodes_seen,
-                "replay_cursor": self._replay_cursor,
+                "replay_transition_count": self._replay_transition_count,
             },
-            "replay": [
-                {
-                    "features": list(item.features),
-                    "action_index": int(item.action_index),
-                    "reward": float(item.reward),
-                    "next_features": list(item.next_features),
-                    "done": bool(item.done),
-                    "next_valid_action_indices": list(item.next_valid_action_indices),
-                }
-                for item in self._replay
+            "replay_episodes": [
+                [
+                    {
+                        "features": list(item.features),
+                        "action_index": int(item.action_index),
+                        "reward": float(item.reward),
+                        "next_features": list(item.next_features),
+                        "done": bool(item.done),
+                        "next_valid_action_indices": list(item.next_valid_action_indices),
+                    }
+                    for item in episode
+                ]
+                for episode in self._replay_episodes
+                if episode
             ],
         }
 
     def load_checkpoint_payload(self, payload: dict[str, Any]) -> None:
         version = int(payload.get("version", -1))
-        if version != self.CHECKPOINT_VERSION:
+        if version not in {1, self.CHECKPOINT_VERSION}:
             raise ValueError(
-                f"Unsupported threat checkpoint version {version}. Expected {self.CHECKPOINT_VERSION}."
+                f"Unsupported threat checkpoint version {version}. Expected 1 or {self.CHECKPOINT_VERSION}."
             )
         self._online.load_state_dict(payload["online_state_dict"])
         self._target.load_state_dict(payload["target_state_dict"])
@@ -310,35 +321,51 @@ class ThreatControllerDRQN:
         self._total_env_steps = int(training.get("total_env_steps", 0))
         self._optimization_steps = int(training.get("optimization_steps", 0))
         self._episodes_seen = int(training.get("episodes_seen", 0))
-        self._replay_cursor = int(training.get("replay_cursor", 0))
         self._hidden_state = None
 
-        raw_replay = payload.get("replay", [])
-        if not isinstance(raw_replay, list):
-            raise ValueError("Threat checkpoint replay must be a list.")
-        parsed: list[ThreatTransition] = []
-        for item in raw_replay:
-            if not isinstance(item, dict):
-                continue
-            parsed.append(
-                ThreatTransition(
-                    features=self._normalize_features(item.get("features", [])),
-                    action_index=int(item.get("action_index", 0)),
-                    reward=float(item.get("reward", 0.0)),
-                    next_features=self._normalize_features(item.get("next_features", [])),
-                    done=bool(item.get("done", False)),
-                    next_valid_action_indices=tuple(
-                        int(value) for value in item.get("next_valid_action_indices", [])
-                    ),
-                )
-            )
-        if len(parsed) > int(self.config.replay_capacity):
-            parsed = parsed[-int(self.config.replay_capacity):]
-        self._replay = parsed
-        if self._replay:
-            self._replay_cursor %= len(self._replay)
+        if version == 1:
+            raw_replay = payload.get("replay", [])
+            if not isinstance(raw_replay, list):
+                raise ValueError("Threat checkpoint replay must be a list.")
+            parsed_episodes = []
+            for item in raw_replay:
+                if not isinstance(item, dict):
+                    continue
+                parsed_episodes.append([self._parse_transition_payload(item)])
+            self._replay_episodes = parsed_episodes
         else:
-            self._replay_cursor = 0
+            raw_replay = payload.get("replay_episodes", [])
+            if not isinstance(raw_replay, list):
+                raise ValueError("Threat checkpoint replay_episodes must be a list.")
+            self._replay_episodes = []
+            for episode in raw_replay:
+                if not isinstance(episode, list):
+                    continue
+                parsed_episode = [
+                    self._parse_transition_payload(item)
+                    for item in episode
+                    if isinstance(item, dict)
+                ]
+                if parsed_episode:
+                    self._replay_episodes.append(parsed_episode)
+
+        self._replay_transition_count = sum(len(episode) for episode in self._replay_episodes)
+        self._trim_replay_capacity()
+        self._current_episode_replay = None
+
+    def copy_weights_from(self, other: ThreatControllerDRQN) -> None:
+        self._online.load_state_dict(other._online.state_dict())
+        self._target.load_state_dict(other._target.state_dict())
+
+    def training_snapshot(self) -> dict[str, Any]:
+        return {
+            "config": asdict(self.config),
+            "epsilon": self.epsilon,
+            "total_env_steps": self._total_env_steps,
+            "optimization_steps": self._optimization_steps,
+            "episodes_seen": self._episodes_seen,
+            "replay_transition_count": self._replay_transition_count,
+        }
 
     def save(self, path: str | Path) -> Path:
         target = Path(path)
@@ -393,32 +420,77 @@ class ThreatControllerDRQN:
             normalized.append(parsed)
         return tuple(normalized)
 
-    def _append_transition(self, transition: ThreatTransition) -> None:
-        capacity = int(self.config.replay_capacity)
-        if len(self._replay) < capacity:
-            self._replay.append(transition)
-            return
-        self._replay[self._replay_cursor] = transition
-        self._replay_cursor = (self._replay_cursor + 1) % capacity
+    def _parse_transition_payload(self, item: dict[str, Any]) -> ThreatTransition:
+        return ThreatTransition(
+            features=self._normalize_features(item.get("features", [])),
+            action_index=int(item.get("action_index", 0)),
+            reward=float(item.get("reward", 0.0)),
+            next_features=self._normalize_features(item.get("next_features", [])),
+            done=bool(item.get("done", False)),
+            next_valid_action_indices=tuple(
+                int(value) for value in item.get("next_valid_action_indices", [])
+            ),
+        )
 
-    def _apply_update(self, *, batch: list[ThreatTransition]) -> float:
-        state_tensor = self._torch.tensor(
-            [item.features for item in batch],
-            dtype=self._torch.float32,
-        ).view(len(batch), 1, -1)
-        action_tensor = self._torch.tensor(
-            [item.action_index for item in batch],
-            dtype=self._torch.int64,
-        )
-        reward_tensor = self._torch.tensor(
-            [item.reward for item in batch],
-            dtype=self._torch.float32,
-        )
-        next_state_tensor = self._torch.tensor(
-            [item.next_features for item in batch],
-            dtype=self._torch.float32,
-        ).view(len(batch), 1, -1)
-        done_tensor = self._torch.tensor([item.done for item in batch], dtype=self._torch.float32)
+    def _append_transition(self, transition: ThreatTransition) -> None:
+        if self._current_episode_replay is None:
+            self._current_episode_replay = []
+            self._replay_episodes.append(self._current_episode_replay)
+        self._current_episode_replay.append(transition)
+        self._replay_transition_count += 1
+        self._trim_replay_capacity()
+
+    def _trim_replay_capacity(self) -> None:
+        capacity = int(self.config.replay_capacity)
+        while self._replay_episodes and self._replay_transition_count > capacity:
+            first_episode = self._replay_episodes[0]
+            excess = self._replay_transition_count - capacity
+            if len(first_episode) <= excess:
+                self._replay_transition_count -= len(first_episode)
+                self._replay_episodes.pop(0)
+                continue
+            del first_episode[:excess]
+            self._replay_transition_count -= excess
+        self._replay_episodes = [episode for episode in self._replay_episodes if episode]
+        if self._current_episode_replay is not None and not self._current_episode_replay:
+            self._current_episode_replay = None
+
+    def _sample_sequence_fragment(self) -> list[ThreatTransition]:
+        valid_episodes = [episode for episode in self._replay_episodes if episode]
+        if not valid_episodes:
+            raise ValueError("Cannot sample from empty threat replay.")
+        episode = self._rng.choice(valid_episodes)
+        end_index = self._rng.randrange(len(episode))
+        start_index = max(0, end_index - int(self.config.sequence_length) + 1)
+        return episode[start_index : end_index + 1]
+
+    def _apply_update(self, *, batch: list[list[ThreatTransition]]) -> float:
+        sequence_length = int(self.config.sequence_length)
+        zero_vector = [0.0 for _ in range(int(self.config.feature_count))]
+        state_sequences: list[list[list[float]]] = []
+        action_values: list[int] = []
+        reward_values: list[float] = []
+        next_state_values: list[list[float]] = []
+        done_values: list[bool] = []
+        next_index_values: list[tuple[int, ...]] = []
+
+        for fragment in batch:
+            padded = [zero_vector[:] for _ in range(sequence_length)]
+            for offset, transition in enumerate(fragment[-sequence_length:]):
+                padded[sequence_length - len(fragment[-sequence_length:]) + offset] = list(transition.features)
+            last_transition = fragment[-1]
+            state_sequences.append(padded)
+            action_values.append(last_transition.action_index)
+            reward_values.append(last_transition.reward)
+            next_state_values.append(list(last_transition.next_features))
+            done_values.append(last_transition.done)
+            next_index_values.append(last_transition.next_valid_action_indices)
+
+        state_tensor = self._torch.tensor(state_sequences, dtype=self._torch.float32)
+        action_tensor = self._torch.tensor(action_values, dtype=self._torch.int64)
+        reward_tensor = self._torch.tensor(reward_values, dtype=self._torch.float32)
+        next_state_tensor = self._torch.tensor(next_state_values, dtype=self._torch.float32).view(len(batch), 1, -1)
+        done_tensor = self._torch.tensor(done_values, dtype=self._torch.float32)
 
         q_seq, _hidden = self._online.forward(features_tensor=state_tensor, hidden_state=None)
         selected_q = q_seq[:, -1, :].gather(1, action_tensor.unsqueeze(1)).squeeze(1)
@@ -430,11 +502,11 @@ class ThreatControllerDRQN:
             )
             next_last_q = next_q_seq[:, -1, :]
             max_next_values: list[float] = []
-            for index, transition in enumerate(batch):
-                if transition.done or not transition.next_valid_action_indices:
+            for index, next_indices in enumerate(next_index_values):
+                if done_values[index] or not next_indices:
                     max_next_values.append(0.0)
                     continue
-                allowed = [float(next_last_q[index, offset].item()) for offset in transition.next_valid_action_indices]
+                allowed = [float(next_last_q[index, offset].item()) for offset in next_indices]
                 max_next_values.append(max(allowed) if allowed else 0.0)
             next_q_tensor = self._torch.tensor(max_next_values, dtype=self._torch.float32)
             targets = reward_tensor + ((1.0 - done_tensor) * float(self.config.gamma) * next_q_tensor)

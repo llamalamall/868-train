@@ -25,7 +25,7 @@ class HybridCheckpointBundle:
 class HybridCheckpointManager:
     """Save/load helper for the multi-file hybrid checkpoint format."""
 
-    VERSION = 1
+    VERSION = 2
     META_FILE = "meta_controller.pt"
     THREAT_FILE = "threat_drqn.pt"
     HYBRID_CONFIG_FILE = "hybrid_config.json"
@@ -70,6 +70,7 @@ class HybridCheckpointManager:
         cls,
         *,
         run_directory: str | Path,
+        for_training: bool = False,
     ) -> tuple[MetaControllerDQN, ThreatControllerDRQN, dict[str, Any], dict[str, Any]]:
         source_dir = Path(run_directory)
         if not source_dir.exists():
@@ -87,13 +88,18 @@ class HybridCheckpointManager:
         if not training_state_path.exists():
             raise FileNotFoundError(f"Missing hybrid checkpoint file: {training_state_path}")
 
-        meta_controller = MetaControllerDQN.load(meta_path)
-        threat_controller = ThreatControllerDRQN.load(threat_path)
         hybrid_config = json.loads(hybrid_config_path.read_text(encoding="utf-8"))
         training_state = json.loads(training_state_path.read_text(encoding="utf-8"))
         if not isinstance(hybrid_config, dict):
             raise ValueError("hybrid_config.json must contain an object.")
         if not isinstance(training_state, dict):
             raise ValueError("training_state.json must contain an object.")
+        bundle_version = int(hybrid_config.get("version", training_state.get("version", -1)))
+        if for_training and bundle_version != cls.VERSION:
+            raise ValueError(
+                f"Hybrid bundle version {bundle_version} is evaluation-only. "
+                f"Training requires version {cls.VERSION}."
+            )
+        meta_controller = MetaControllerDQN.load(meta_path)
+        threat_controller = ThreatControllerDRQN.load(threat_path)
         return (meta_controller, threat_controller, hybrid_config, training_state)
-

@@ -135,6 +135,11 @@ class HybridEpisodeSummary:
     premature_exit_attempts: int
     route_length_total: int
     route_replans: int
+    threat_active_steps: int
+    predicted_danger_moves: int
+    siphons_by_penalty_bucket: tuple[tuple[str, int], ...]
+    override_counts: tuple[tuple[str, int], ...]
+    damage_by_enemy_type: tuple[tuple[str, int], ...]
 
 
 def _add_common_runner_args(
@@ -382,7 +387,7 @@ def _add_meta_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--meta-epsilon-end", type=float, default=0.05, help="Meta epsilon end.")
     parser.add_argument("--meta-epsilon-decay-steps", type=int, default=5_000, help="Meta epsilon decay steps.")
     parser.add_argument("--meta-hidden-size", type=int, default=64, help="Meta network hidden size.")
-    parser.add_argument("--meta-feature-count", type=int, default=18, help="Meta feature vector size.")
+    parser.add_argument("--meta-feature-count", type=int, default=32, help="Meta feature vector size.")
 
 
 def _add_threat_model_args(parser: argparse.ArgumentParser) -> None:
@@ -392,16 +397,16 @@ def _add_threat_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--threat-min-replay-size", type=int, default=512, help="Threat min replay size.")
     parser.add_argument("--threat-batch-size", type=int, default=64, help="Threat batch size.")
     parser.add_argument("--threat-target-sync-interval", type=int, default=300, help="Threat target sync interval.")
-    parser.add_argument("--threat-epsilon-start", type=float, default=0.50, help="Threat epsilon start.")
+    parser.add_argument("--threat-epsilon-start", type=float, default=0.80, help="Threat epsilon start.")
     parser.add_argument("--threat-epsilon-end", type=float, default=0.05, help="Threat epsilon end.")
     parser.add_argument(
         "--threat-epsilon-decay-steps",
         type=int,
-        default=7_500,
+        default=25_000,
         help="Threat epsilon decay steps.",
     )
     parser.add_argument("--threat-hidden-size", type=int, default=96, help="Threat GRU hidden size.")
-    parser.add_argument("--threat-feature-count", type=int, default=20, help="Threat feature vector size.")
+    parser.add_argument("--threat-feature-count", type=int, default=35, help="Threat feature vector size.")
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -444,12 +449,20 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_common_runner_args(
         train_full,
-        default_episodes=200,
+        default_episodes=500,
         default_max_steps=450,
         default_no_enemies=False,
     )
     _add_meta_model_args(train_full)
     _add_threat_model_args(train_full)
+    train_full.set_defaults(
+        meta_epsilon_start=0.25,
+        meta_epsilon_end=0.05,
+        meta_epsilon_decay_steps=15_000,
+        threat_epsilon_start=0.80,
+        threat_epsilon_end=0.05,
+        threat_epsilon_decay_steps=25_000,
+    )
     train_full.add_argument(
         "--warmstart-checkpoint",
         default=None,
@@ -463,7 +476,7 @@ def _build_parser() -> argparse.ArgumentParser:
     train_full.add_argument(
         "--meta-freeze-episodes",
         type=int,
-        default=25,
+        default=100,
         help="Episodes to freeze meta updates while threat DRQN warms up.",
     )
     train_full.add_argument(
@@ -535,7 +548,7 @@ def _build_meta_config(args: argparse.Namespace) -> MetaDQNConfig:
         epsilon_end=float(getattr(args, "meta_epsilon_end", 0.05)),
         epsilon_decay_steps=int(getattr(args, "meta_epsilon_decay_steps", 5_000)),
         hidden_size=int(getattr(args, "meta_hidden_size", 64)),
-        feature_count=int(getattr(args, "meta_feature_count", 18)),
+        feature_count=int(getattr(args, "meta_feature_count", 32)),
     )
 
 
@@ -547,10 +560,10 @@ def _build_threat_config(args: argparse.Namespace) -> ThreatDRQNConfig:
         min_replay_size=int(getattr(args, "threat_min_replay_size", 512)),
         batch_size=int(getattr(args, "threat_batch_size", 64)),
         target_sync_interval=int(getattr(args, "threat_target_sync_interval", 300)),
-        epsilon_start=float(getattr(args, "threat_epsilon_start", 0.50)),
+        epsilon_start=float(getattr(args, "threat_epsilon_start", 0.80)),
         epsilon_end=float(getattr(args, "threat_epsilon_end", 0.05)),
-        epsilon_decay_steps=int(getattr(args, "threat_epsilon_decay_steps", 7_500)),
-        feature_count=int(getattr(args, "threat_feature_count", 20)),
+        epsilon_decay_steps=int(getattr(args, "threat_epsilon_decay_steps", 25_000)),
+        feature_count=int(getattr(args, "threat_feature_count", 35)),
         hidden_size=int(getattr(args, "threat_hidden_size", 96)),
     )
 
@@ -697,9 +710,22 @@ def _serialize_results(results: tuple[HybridEpisodeSummary, ...]) -> list[dict[s
             "premature_exit_attempts": item.premature_exit_attempts,
             "route_length_total": item.route_length_total,
             "route_replans": item.route_replans,
+            "threat_active_steps": item.threat_active_steps,
+            "predicted_danger_moves": item.predicted_danger_moves,
+            "siphons_by_penalty_bucket": dict(item.siphons_by_penalty_bucket),
+            "override_counts": dict(item.override_counts),
+            "damage_by_enemy_type": dict(item.damage_by_enemy_type),
         }
         for item in results
     ]
+
+
+def _penalty_bucket_name(bucket: int) -> str:
+    if bucket <= 0:
+        return "safe"
+    if bucket == 1:
+        return "risky"
+    return "dangerous"
 
 
 def _run_rollouts(
@@ -737,6 +763,13 @@ def _run_rollouts(
         route_replans = 0
         updates_applied = 0
         last_target_signature: tuple[str, int, int] | None = None
+        previous_threat_active = False
+        threat_cooldown_remaining = 0
+        threat_active_steps = 0
+        predicted_danger_moves = 0
+        siphons_by_penalty_bucket: dict[str, int] = {}
+        override_counts: dict[str, int] = {}
+        damage_by_enemy_type: dict[str, int] = {}
 
         while steps < max_steps and not done:
             available_actions = env.available_actions(state)
@@ -753,6 +786,13 @@ def _run_rollouts(
                 explore_threat=explore_threat,
             )
             target = trace.decision.objective.target_position
+            override_counts[trace.decision.threat_override.value] = (
+                override_counts.get(trace.decision.threat_override.value, 0) + 1
+            )
+            if trace.threat_active:
+                threat_active_steps += 1
+            if trace.predicted_damage:
+                predicted_danger_moves += 1
             if target is not None:
                 route_length_total += max(int(trace.objective_distance_before or 0), 0)
                 target_signature = (
@@ -794,6 +834,16 @@ def _run_rollouts(
                 invalid_actions += 1
             if bool(info.get("premature_exit_attempt", False)):
                 premature_exit_attempts += 1
+            if trace.decision.action in {"space", "z"}:
+                bucket_name = _penalty_bucket_name(trace.objective_penalty_bucket)
+                siphons_by_penalty_bucket[bucket_name] = siphons_by_penalty_bucket.get(bucket_name, 0) + 1
+
+            transition_to_cooldown = previous_threat_active and not trace.threat_active
+            threat_reward_active = bool(
+                trace.threat_active
+                or threat_cooldown_remaining > 0
+                or transition_to_cooldown
+            )
 
             meta_breakdown = reward_suite.compute_meta_reward(
                 previous_state=state,
@@ -804,6 +854,10 @@ def _run_rollouts(
                     **info,
                     "objective_target": target,
                     "objective_distance_before": trace.objective_distance_before,
+                    "objective_distance_after": coordinator.objective_distance(
+                        state=next_state,
+                        target=target,
+                    ),
                 },
             )
             threat_breakdown = reward_suite.compute_threat_reward(
@@ -817,9 +871,10 @@ def _run_rollouts(
                         trace.decision.used_fallback
                         and trace.decision.threat_override != ThreatOverride.ROUTE_DEFAULT
                     ),
-                    "rejoined_route": bool(
-                        trace.decision.threat_override == ThreatOverride.ROUTE_DEFAULT
-                        and not trace.threat_active
+                    "threat_reward_active": threat_reward_active,
+                    "rejoined_route_transition": bool(
+                        transition_to_cooldown
+                        and trace.decision.threat_override == ThreatOverride.ROUTE_DEFAULT
                     ),
                 },
             )
@@ -827,12 +882,30 @@ def _run_rollouts(
             total_reward += step_reward
             meta_reward_total += float(meta_breakdown.total)
             threat_reward_total += float(threat_breakdown.total)
+            coordinator.note_transition(previous_state=state, current_state=next_state)
+            if state.health.status == "ok" and next_state.health.status == "ok":
+                try:
+                    if float(next_state.health.value) < float(state.health.value):
+                        for enemy_type in trace.predicted_attack_types:
+                            key = str(int(enemy_type))
+                            damage_by_enemy_type[key] = damage_by_enemy_type.get(key, 0) + 1
+                except (TypeError, ValueError):
+                    pass
 
             next_allowed_phases = coordinator.allowed_meta_phases(next_state)
             next_scripted_phase = next_allowed_phases[0]
             next_target = coordinator.resolve_target_for_phase(
                 state=next_state,
                 phase=next_scripted_phase,
+            )
+            next_available_actions = env.available_actions(next_state)
+            next_route_action = coordinator._route_action_for_objective(
+                state=next_state,
+                target=next_target,
+                phase=next_scripted_phase,
+                available_actions=next_available_actions if next_available_actions else tuple(
+                    action for action in env.action_space if action != "cancel"
+                ),
             )
             next_meta_features = coordinator.meta_feature_vector(
                 state=next_state,
@@ -845,8 +918,9 @@ def _run_rollouts(
             )
             next_threat_features = coordinator.threat_feature_vector(
                 state=next_state,
-                route_action=None,
+                route_action=next_route_action,
                 objective_distance=next_objective_distance,
+                target=next_target,
             )
 
             if train_meta:
@@ -860,7 +934,7 @@ def _run_rollouts(
                 )
                 if update.did_update:
                     updates_applied += 1
-            if train_threat:
+            if train_threat and threat_reward_active:
                 update = coordinator.threat_controller.observe(
                     features=trace.threat_features,
                     chosen_override=trace.decision.threat_override,
@@ -871,8 +945,13 @@ def _run_rollouts(
                 )
                 if update.did_update:
                     updates_applied += 1
-
-            next_available_actions = env.available_actions(next_state)
+            if trace.threat_active:
+                threat_cooldown_remaining = 0
+            elif transition_to_cooldown:
+                threat_cooldown_remaining = 1
+            elif threat_cooldown_remaining > 0:
+                threat_cooldown_remaining -= 1
+            previous_threat_active = trace.threat_active
             if monitor_enabled:
                 tui.consume_manual_step_flag()
                 tui.update(
@@ -930,6 +1009,11 @@ def _run_rollouts(
                 premature_exit_attempts=premature_exit_attempts,
                 route_length_total=route_length_total,
                 route_replans=route_replans,
+                threat_active_steps=threat_active_steps,
+                predicted_danger_moves=predicted_danger_moves,
+                siphons_by_penalty_bucket=tuple(sorted(siphons_by_penalty_bucket.items())),
+                override_counts=tuple(sorted(override_counts.items())),
+                damage_by_enemy_type=tuple(sorted(damage_by_enemy_type.items())),
             )
         )
     return tuple(results)
@@ -1021,7 +1105,8 @@ def main() -> None:
 
         if command == "eval-hybrid":
             loaded_meta, loaded_threat, _bundle_config, _training_state = HybridCheckpointManager.load_bundle(
-                run_directory=str(args.checkpoint)
+                run_directory=str(args.checkpoint),
+                for_training=False,
             )
             coordinator = HybridCoordinator(
                 meta_controller=loaded_meta,
@@ -1031,7 +1116,8 @@ def main() -> None:
             )
         elif getattr(args, "resume_checkpoint", None):
             loaded_meta, loaded_threat, _bundle_config, _training_state = HybridCheckpointManager.load_bundle(
-                run_directory=str(args.resume_checkpoint)
+                run_directory=str(args.resume_checkpoint),
+                for_training=True,
             )
             coordinator = HybridCoordinator(
                 meta_controller=loaded_meta,
@@ -1041,11 +1127,15 @@ def main() -> None:
             )
         elif command == "train-full-hierarchical" and getattr(args, "warmstart_checkpoint", None):
             loaded_meta, _loaded_threat, _bundle_config, _training_state = HybridCheckpointManager.load_bundle(
-                run_directory=str(args.warmstart_checkpoint)
+                run_directory=str(args.warmstart_checkpoint),
+                for_training=True,
             )
+            fresh_meta = MetaControllerDQN(config=_build_meta_config(args), seed=args.seed)
+            fresh_meta.copy_weights_from(loaded_meta)
+            fresh_threat = ThreatControllerDRQN(config=_build_threat_config(args), seed=args.seed)
             coordinator = HybridCoordinator(
-                meta_controller=loaded_meta,
-                threat_controller=ThreatControllerDRQN(config=_build_threat_config(args), seed=args.seed),
+                meta_controller=fresh_meta,
+                threat_controller=fresh_threat,
                 movement_controller=AStarMovementController(),
                 config=coordinator_config,
             )
@@ -1166,14 +1256,22 @@ def main() -> None:
                     "restore_save_delay": float(args.restore_save_delay),
                     "threat_trigger_distance": int(args.threat_trigger_distance),
                     "meta_reward_weights": asdict(meta_reward_weights),
-                    "meta_config": vars(_build_meta_config(args)),
-                    "threat_config": vars(_build_threat_config(args)),
+                    "meta_config": asdict(coordinator.meta_controller.config),
+                    "threat_config": asdict(coordinator.threat_controller.config),
+                    "checkpoint_sources": {
+                        "resume_checkpoint": str(args.resume_checkpoint) if getattr(args, "resume_checkpoint", None) else None,
+                        "warmstart_checkpoint": str(args.warmstart_checkpoint) if getattr(args, "warmstart_checkpoint", None) else None,
+                    },
                 },
                 training_state={
                     "episodes_requested": int(args.episodes),
                     "episodes_completed": len(finalized),
                     "max_steps_per_episode": int(args.max_steps),
                     "saved_at_utc": datetime.utcnow().isoformat() + "Z",
+                    "controller_state_at_save": {
+                        "meta_controller": coordinator.meta_controller.training_snapshot(),
+                        "threat_controller": coordinator.threat_controller.training_snapshot(),
+                    },
                     "results": _serialize_results(finalized),
                 },
             )

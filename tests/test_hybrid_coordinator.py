@@ -77,7 +77,7 @@ def _build_state(
 
 @dataclass
 class _StubMetaController:
-    feature_count: int = 18
+    feature_count: int = 32
     epsilon: float = 0.0
 
     def start_episode(self) -> None:
@@ -97,7 +97,7 @@ class _StubMetaController:
 
 @dataclass
 class _StubThreatController:
-    feature_count: int = 20
+    feature_count: int = 35
     epsilon: float = 0.0
 
     def start_episode(self) -> None:
@@ -278,6 +278,168 @@ def test_resource_targets_use_precomputed_energy_credit_layers() -> None:
         phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
     )
     assert target == GridPosition(2, 1)
+
+
+def test_resource_target_prefers_lower_penalty_bucket_over_higher_value() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    zero_row = (0, 0, 0, 0, 0, 0)
+    credits_grid = (
+        (0, 9, 0, 0, 0, 0),
+        zero_row,
+        (0, 0, 0, 12, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    penalty_grid = (
+        (0, 1, 0, 0, 0, 0),
+        zero_row,
+        (0, 0, 0, 5, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        map_layers=MapLayersState(
+            credits_map=credits_grid,
+            energy_map=(zero_row, zero_row, zero_row, zero_row, zero_row, zero_row),
+            siphon_penalty_map=penalty_grid,
+        ),
+    )
+
+    target = coordinator.resolve_target_for_phase(
+        state=state,
+        phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+    )
+
+    assert target == GridPosition(1, 0)
+
+
+def test_route_default_avoids_guaranteed_damage_when_safe_path_exists() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        siphons=(GridPosition(3, 0),),
+        enemies=(
+            EnemyState(
+                slot=1,
+                type_id=3,
+                position=GridPosition(2, 0),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+        ),
+    )
+
+    trace = coordinator.decide(
+        state=state,
+        available_actions=("move_up", "move_right"),
+        use_meta_controller=False,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert trace.route_tile_threatened is False
+    assert trace.decision.action == "move_up"
+
+
+def test_glitch_threat_ignores_walls_when_predicting_damage() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    wall_cell = MapCellState(
+        position=GridPosition(1, 0),
+        cell_type=0,
+        tile_variant=0,
+        wall_state=1,
+        is_wall=True,
+    )
+    cells = tuple(
+        wall_cell if (x == 1 and y == 0) else MapCellState(
+            position=GridPosition(x=x, y=y),
+            cell_type=0,
+            tile_variant=0,
+            wall_state=0,
+            is_wall=False,
+        )
+        for y in range(6)
+        for x in range(6)
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        siphons=(GridPosition(2, 0),),
+        cells=cells,
+        enemies=(
+            EnemyState(
+                slot=1,
+                type_id=4,
+                position=GridPosition(2, 0),
+                hp=1,
+                state=0,
+                in_bounds=True,
+            ),
+        ),
+    )
+
+    assert coordinator.is_threat_active(state) is True
+
+
+def test_dangerous_harvest_target_retargets_instead_of_auto_siphon() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    zero_row = (0, 0, 0, 0, 0, 0)
+    credits_grid = (
+        zero_row,
+        (0, 12, 0, 3, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    penalty_grid = (
+        zero_row,
+        (0, 5, 0, 1, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    state = _build_state(
+        player=GridPosition(1, 1),
+        resource_cells=(
+            ResourceCellState(position=GridPosition(1, 1), credits=12),
+            ResourceCellState(position=GridPosition(3, 1), credits=3),
+        ),
+        map_layers=MapLayersState(
+            credits_map=credits_grid,
+            energy_map=(zero_row, zero_row, zero_row, zero_row, zero_row, zero_row),
+            siphon_penalty_map=penalty_grid,
+        ),
+        player_siphons=1,
+    )
+
+    trace = coordinator.decide(
+        state=state,
+        available_actions=("move_right", "space"),
+        use_meta_controller=False,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert trace.decision.action == "move_right"
 
 
 def test_resource_target_arrival_avoids_siphon_when_siphons_depleted() -> None:
