@@ -13,6 +13,7 @@ from src.env.dqn_policy_runner import main as dqn_runner_main
 from src.env.heuristic_policy_runner import main as heuristic_runner_main
 from src.env.random_policy_runner import main as random_runner_main
 from src.gui.dqn_runner_gui import main as dqn_gui_main
+from src.hybrid.runner import main as hybrid_runner_main
 from src.memory.offset_smoke_test import main as offset_smoke_main
 from src.memory.state_monitor_tui import main as state_monitor_main
 from src.training.evaluate import main as evaluate_main
@@ -97,6 +98,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_passthrough_parser(
         subparsers,
+        name="run-hybrid",
+        summary="Run hybrid hierarchical workflows.",
+        details=(
+            "Runs src.hybrid.runner for movement-test, meta no-enemy training, "
+            "full hierarchical training, and hybrid checkpoint evaluation."
+        ),
+    )
+    _add_passthrough_parser(
+        subparsers,
         name="dqn-gui",
         summary="Launch GUI for DQN run/eval/compare workflows.",
         details=(
@@ -131,6 +141,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "run-random": random_runner_main,
         "run-heuristic": heuristic_runner_main,
         "run-dqn": dqn_runner_main,
+        "run-hybrid": hybrid_runner_main,
         "dqn-gui": dqn_gui_main,
         "evaluate": evaluate_main,
     }

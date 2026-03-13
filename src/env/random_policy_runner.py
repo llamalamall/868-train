@@ -3,6 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import os
+import shutil
+import time
+from pathlib import Path
 from typing import Any
 from statistics import mean
 
@@ -37,6 +41,42 @@ _PROG_SLOT_ACTION_BINDINGS = {
     "prog_slot_9": "9",
     "prog_slot_10": "0",
 }
+
+_APP_SAVE_FOLDER_NAME = "868-HACK"
+_APP_SAVE_FILE_NAME = "savegame_868"
+
+
+def _default_game_save_target_path() -> Path:
+    appdata = os.environ.get("APPDATA")
+    if appdata:
+        return Path(appdata) / _APP_SAVE_FOLDER_NAME / _APP_SAVE_FILE_NAME
+    return Path.home() / "AppData" / "Roaming" / _APP_SAVE_FOLDER_NAME / _APP_SAVE_FILE_NAME
+
+
+def _resolve_restore_save_source_path(args: argparse.Namespace) -> Path | None:
+    if not args.restore_save_file:
+        return None
+    return Path(str(args.restore_save_file)).expanduser().resolve()
+
+
+def _restore_selected_save_file(*, source_path: Path, target_path: Path) -> None:
+    source = source_path.expanduser().resolve()
+    if not source.exists():
+        raise FileNotFoundError(f"Selected restore save file does not exist: {source}")
+    if not source.is_file():
+        raise IsADirectoryError(f"Selected restore save file must be a file: {source}")
+
+    target = target_path.expanduser()
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    if target.exists():
+        try:
+            if source.samefile(target):
+                return
+        except OSError:
+            pass
+
+    shutil.copy2(source, target)
 
 
 def _game_tick_ms_arg(value: str) -> int:
@@ -302,6 +342,20 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Comma-separated action names to sample from. Default excludes 'cancel'.",
     )
     parser.add_argument(
+        "--restore-save-file",
+        default=None,
+        help=(
+            "Optional source save file to restore before each new-game confirm/reset action. "
+            "When set, the file is copied to %APPDATA%\\868-hack\\savegame_868."
+        ),
+    )
+    parser.add_argument(
+        "--restore-save-delay",
+        type=float,
+        default=0.35,
+        help="Delay in seconds after restoring save file before the next episode reset/new game.",
+    )
+    parser.add_argument(
         "--reset-sequence",
         default="confirm",
         nargs="?",
@@ -539,9 +593,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if float(args.restore_save_delay) < 0:
+        parser.error("--restore-save-delay must be >= 0.")
+    restore_source = _resolve_restore_save_source_path(args)
+    if restore_source is not None:
+        if not restore_source.exists():
+            parser.error(f"--restore-save-file not found: {restore_source}.")
+        if not restore_source.is_file():
+            parser.error(f"--restore-save-file must be a file: {restore_source}.")
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+    _validate_args(parser, args)
     if bool(args.step_through) and not bool(args.tui):
         parser.error("--step-through requires --tui.")
     effective_window_input = bool(args.window_input) or bool(args.step_through) or bool(args.tui)
@@ -577,6 +643,39 @@ def main() -> None:
         reward_config=reward_config,
         print_breakdown=bool(args.print_reward_breakdown),
     )
+    restore_save_source = _resolve_restore_save_source_path(args)
+    restore_save_delay_seconds = max(float(args.restore_save_delay), 0.0)
+    restore_save_target = (
+        _default_game_save_target_path()
+        if restore_save_source is not None
+        else None
+    )
+    if restore_save_source is not None and restore_save_target is not None:
+        print(
+            "savegame_restore_enabled\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+
+    def _restore_save_before_reset() -> None:
+        if restore_save_source is None or restore_save_target is None:
+            return
+        _restore_selected_save_file(
+            source_path=restore_save_source,
+            target_path=restore_save_target,
+        )
+        print(
+            "savegame_restored_before_reset\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+        if restore_save_delay_seconds > 0:
+            time.sleep(restore_save_delay_seconds)
+
     env: GameEnv | None = None
     tui = RunnerTuiSession(
         executable_name=str(args.exe),
@@ -593,6 +692,11 @@ def main() -> None:
             focus_window_on_attach=bool(args.focus_window),
             window_targeted_input=effective_window_input,
             action_config=action_config,
+            pre_reset_hook=(
+                _restore_save_before_reset
+                if restore_save_source is not None and restore_save_target is not None
+                else None
+            ),
             reward_fn=reward_fn,
             game_tick_ms=int(args.game_tick_ms),
         )

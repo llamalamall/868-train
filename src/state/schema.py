@@ -6,6 +6,9 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 FieldStatus = Literal["ok", "missing", "invalid"]
+GridIntMap = tuple[tuple[int, ...], ...]
+GridProgMap = tuple[tuple[tuple[int, ...], ...], ...]
+GridEnemyMap = tuple[tuple[tuple[int, ...], ...], ...]
 
 
 @dataclass(frozen=True)
@@ -105,6 +108,32 @@ class EnemyState:
     hp: int
     state: int
     in_bounds: bool
+    incubation_timer: int = 0
+
+
+@dataclass(frozen=True)
+class MapLayersState:
+    """Layered board representation used by controllers and UI."""
+
+    obstacle_map: GridIntMap = ()
+    player_position_map: GridIntMap = ()
+    enemy_position_map: GridEnemyMap = ()
+    goal_map: GridIntMap = ()
+    energy_map: GridIntMap = ()
+    credits_map: GridIntMap = ()
+    progs_map: GridProgMap = ()
+    points_map: GridIntMap = ()
+    siphon_penalty_map: GridIntMap = ()
+
+
+@dataclass(frozen=True)
+class MapLayerRefreshState:
+    """Flags describing which map-layer groups were recomputed this snapshot."""
+
+    obstacles_updated: bool = True
+    player_and_enemy_updated: bool = True
+    goals_updated: bool = True
+    siphon_outcomes_updated: bool = True
 
 
 @dataclass(frozen=True)
@@ -121,6 +150,8 @@ class MapState:
     player_position: GridPosition | None = None
     exit_position: GridPosition | None = None
     enemies: tuple[EnemyState, ...] = ()
+    layers: MapLayersState = field(default_factory=MapLayersState)
+    layer_refresh: MapLayerRefreshState = field(default_factory=MapLayerRefreshState)
     error_code: str | None = None
     error: str | None = None
     address: int | None = None

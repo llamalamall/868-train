@@ -5,17 +5,23 @@ from __future__ import annotations
 import pytest
 
 from src.env import dqn_policy_runner
+from src.hybrid import runner as hybrid_runner
 from src.gui.dqn_runner_gui import (
+    _HYBRID_CHECKPOINT_DIR,
     _SMOKE_TEST_REWARD_DESTS,
     _CHECKPOINT_DIR,
     _estimate_epsilon_eta_seconds,
+    _format_epsilon_progress_text,
     _format_duration_seconds,
     _initial_browse_dir,
     _is_boolean_flag,
+    _get_subparser,
     _iter_parser_actions,
     _parse_episode_progress,
     _resolve_reward_metric_value,
     _run_dqn_preset_overrides,
+    _run_hybrid_preset_overrides,
+    _strip_textual_markup,
     _sort_form_actions,
 )
 from src.training.rewards import RewardWeights
@@ -32,6 +38,12 @@ def test_initial_browse_dir_uses_checkpoint_directory_for_checkpoint_fields() ->
     assert _initial_browse_dir(dest="checkpoint", current_value="") == _CHECKPOINT_DIR
     assert _initial_browse_dir(dest="checkpoint_a", current_value="") == _CHECKPOINT_DIR
     assert _initial_browse_dir(dest="checkpoint_b", current_value="") == _CHECKPOINT_DIR
+
+
+def test_initial_browse_dir_uses_hybrid_checkpoint_directory_for_hybrid_paths() -> None:
+    assert _initial_browse_dir(dest="checkpoint_root", current_value="") == _HYBRID_CHECKPOINT_DIR
+    assert _initial_browse_dir(dest="resume_checkpoint", current_value="") == _HYBRID_CHECKPOINT_DIR
+    assert _initial_browse_dir(dest="warmstart_checkpoint", current_value="") == _HYBRID_CHECKPOINT_DIR
 
 
 def test_no_enemies_action_is_treated_as_boolean_flag() -> None:
@@ -51,6 +63,22 @@ def test_run_dqn_presets_include_expected_profiles() -> None:
     assert "smoke test - siphon objective" in presets
     assert "smoke test - enemy objective" in presets
     assert "smoke test - exit objective" in presets
+
+
+def test_run_hybrid_presets_include_expected_profiles() -> None:
+    movement = _run_hybrid_preset_overrides(command_name="movement-test")
+    meta = _run_hybrid_preset_overrides(command_name="train-meta-no-enemies")
+    full = _run_hybrid_preset_overrides(command_name="train-full-hierarchical")
+    evaluate = _run_hybrid_preset_overrides(command_name="eval-hybrid")
+
+    assert "defaults" in movement
+    assert "gate a smoke" in movement
+    assert "defaults" in meta
+    assert "gate b baseline" in meta
+    assert "defaults" in full
+    assert "gate c baseline" in full
+    assert "defaults" in evaluate
+    assert "eval quick" in evaluate
 
 
 def test_phase_progression_profile_ignores_enemy_rewards() -> None:
@@ -111,6 +139,14 @@ def test_estimate_epsilon_eta_seconds_computes_linear_decay_remaining_time() -> 
     assert eta == pytest.approx(150.0)
 
 
+def test_format_epsilon_progress_text_includes_end_target() -> None:
+    assert _format_epsilon_progress_text(current_epsilon=0.6, epsilon_end=0.05) == "60.0% -> 5.0%"
+
+
+def test_format_epsilon_progress_text_falls_back_to_end_target_when_current_missing() -> None:
+    assert _format_epsilon_progress_text(current_epsilon=None, epsilon_end=0.05) == "end 5.0%"
+
+
 def test_resolve_reward_metric_value_uses_reward_line_total_when_training_waits() -> None:
     reward_value = _resolve_reward_metric_value(
         training_line="episode=1 step=2 total=1.200 waiting=step",
@@ -118,3 +154,23 @@ def test_resolve_reward_metric_value_uses_reward_line_total_when_training_waits(
         previous_value="-",
     )
     assert reward_value == "+0.420"
+
+
+def test_strip_textual_markup_removes_color_tokens_from_board_text() -> None:
+    raw = "map [yellow]#[/] [bright_white]P[/] [magenta]E[/]"
+    assert _strip_textual_markup(raw) == "map # P E"
+
+
+def test_hybrid_gui_action_discovery_includes_meta_reward_weight_flags() -> None:
+    parser = hybrid_runner._build_parser()
+    movement_parser = _get_subparser(parser, command_name="movement-test")
+    discovered = {action.dest for action in _iter_parser_actions(movement_parser)}
+
+    assert "restore_save_file" in discovered
+    assert "restore_save_delay" in discovered
+    assert "meta_reward_objective_complete" in discovered
+    assert "meta_reward_phase_progress" in discovered
+    assert "meta_reward_step_cost" in discovered
+    assert "meta_reward_premature_exit_penalty" in discovered
+    assert "meta_reward_sector_advance" in discovered
+    assert "meta_reward_final_sector_win" in discovered

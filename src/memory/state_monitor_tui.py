@@ -25,6 +25,7 @@ import datetime as dt
 import json
 import os
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -403,8 +404,234 @@ def render_ascii_map(map_state: MapState) -> str:
                 row_chars.append(_styled(symbol, "bright_white"))
             else:
                 row_chars.append(_styled(symbol, "bright_black"))
-        lines.append(f"{y}|{''.join(row_chars)}")
-    lines.append(f"  {''.join(str(index % 10) for index in range(map_state.width))}")
+        lines.append(f"{y}|{' '.join(row_chars)}")
+    lines.append(f"  {' '.join(str(index % 10) for index in range(map_state.width))}")
+    return "\n".join(lines)
+
+
+def _styled(symbol: str, style: str) -> str:
+    return f"[{style}]{symbol}[/]"
+
+
+def _render_layer_header(
+    *,
+    name: str,
+    legend: str,
+) -> str:
+    return f"{name}: {legend}"
+
+
+def render_ascii_layer_maps(map_state: MapState) -> str:
+    """Render layered map state as UTF-8 mini-maps with color markup."""
+    if map_state.status != "ok":
+        return f"layer maps unavailable ({map_state.status})"
+
+    width = int(map_state.width)
+    height = int(map_state.height)
+    layers = map_state.layers
+    has_valid_dimensions = (
+        len(layers.obstacle_map) == height
+        and len(layers.player_position_map) == height
+        and len(layers.enemy_position_map) == height
+        and len(layers.goal_map) == height
+        and len(layers.energy_map) == height
+        and len(layers.credits_map) == height
+        and len(layers.progs_map) == height
+        and len(layers.points_map) == height
+        and len(layers.siphon_penalty_map) == height
+        and all(len(row) == width for row in layers.obstacle_map)
+        and all(len(row) == width for row in layers.player_position_map)
+        and all(len(row) == width for row in layers.enemy_position_map)
+        and all(len(row) == width for row in layers.goal_map)
+        and all(len(row) == width for row in layers.energy_map)
+        and all(len(row) == width for row in layers.credits_map)
+        and all(len(row) == width for row in layers.progs_map)
+        and all(len(row) == width for row in layers.points_map)
+        and all(len(row) == width for row in layers.siphon_penalty_map)
+    )
+    if not has_valid_dimensions:
+        return "layer maps unavailable (incomplete_layers)"
+    def _row_prefix(y: int) -> str:
+        return f"{y}|"
+
+    def _axis_row() -> str:
+        return f"  {' '.join(str(index % 10) for index in range(width))}"
+
+    def _visible_len(text: str) -> int:
+        return len(re.sub(r"\[[^\]]+\]", "", text))
+
+    def _pad_visible(text: str, target_width: int) -> str:
+        return text + (" " * max(0, target_width - _visible_len(text)))
+
+    def _build_numeric_block(
+        *,
+        layer_name: str,
+        layer_data: tuple[tuple[int, ...], ...],
+        style: str,
+    ) -> list[str]:
+        block = [
+            _render_layer_header(
+                name=layer_name,
+                legend=f"{_styled('·', 'bright_black')}=0 {_styled('1..9', style)}=value",
+            ),
+        ]
+        for y in range(height - 1, -1, -1):
+            row: list[str] = []
+            for x in range(width):
+                value = max(int(layer_data[y][x]), 0)
+                row.append(_styled(str(min(value, 9)), style) if value > 0 else _styled("·", "bright_black"))
+            block.append(f"{_row_prefix(y)}{' '.join(row)}")
+        block.append(_axis_row())
+        return block
+
+    blocks: list[list[str]] = []
+
+    obstacle_block = [
+        _render_layer_header(
+            name="obstacle_map",
+            legend=f"{_styled('·', 'bright_black')}=pass {_styled('▓', 'yellow')}=wall",
+        ),
+    ]
+    for y in range(height - 1, -1, -1):
+        row = []
+        for x in range(width):
+            row.append(_styled("▓", "yellow") if layers.obstacle_map[y][x] > 0 else _styled("·", "bright_black"))
+        obstacle_block.append(f"{_row_prefix(y)}{' '.join(row)}")
+    obstacle_block.append(_axis_row())
+    blocks.append(obstacle_block)
+
+    player_block = [
+        _render_layer_header(
+            name="player_position_map",
+            legend=f"{_styled('☺', 'bright_white')}=player {_styled('·', 'bright_black')}=empty",
+        ),
+    ]
+    for y in range(height - 1, -1, -1):
+        row = []
+        for x in range(width):
+            row.append(_styled("☺", "bright_white") if layers.player_position_map[y][x] > 0 else _styled("·", "bright_black"))
+        player_block.append(f"{_row_prefix(y)}{' '.join(row)}")
+    player_block.append(_axis_row())
+    blocks.append(player_block)
+
+    enemy_block = [
+        _render_layer_header(
+            name="enemy_position_map",
+            legend=f"{_styled('·', 'bright_black')}=none {_styled('1..9', 'red')}=type/count",
+        ),
+    ]
+    for y in range(height - 1, -1, -1):
+        row = []
+        for x in range(width):
+            enemy_types = layers.enemy_position_map[y][x]
+            if not enemy_types:
+                row.append(_styled("·", "bright_black"))
+            elif len(enemy_types) == 1:
+                row.append(_styled(str(int(enemy_types[0]) % 10), "red"))
+            else:
+                row.append(_styled(str(min(len(enemy_types), 9)), "red"))
+        enemy_block.append(f"{_row_prefix(y)}{' '.join(row)}")
+    enemy_block.append(_axis_row())
+    blocks.append(enemy_block)
+
+    goal_block = [
+        _render_layer_header(
+            name="goal_map",
+            legend=(
+                f"{_styled('S', 'green')}=siphon(2) "
+                f"{_styled('E', 'magenta')}=exit(1) "
+                f"{_styled('·', 'bright_black')}=none"
+            ),
+        ),
+    ]
+    for y in range(height - 1, -1, -1):
+        row = []
+        for x in range(width):
+            value = int(layers.goal_map[y][x])
+            if value >= 2:
+                row.append(_styled("S", "green"))
+            elif value == 1:
+                row.append(_styled("E", "magenta"))
+            else:
+                row.append(_styled("·", "bright_black"))
+        goal_block.append(f"{_row_prefix(y)}{' '.join(row)}")
+    goal_block.append(_axis_row())
+    blocks.append(goal_block)
+
+    blocks.append(_build_numeric_block(layer_name="energy_map", layer_data=layers.energy_map, style="cyan"))
+    blocks.append(_build_numeric_block(layer_name="credits_map", layer_data=layers.credits_map, style="yellow"))
+
+    progs_block = [
+        _render_layer_header(
+            name="progs_map",
+            legend=f"{_styled('·', 'bright_black')}=none {_styled('1..9', 'green')}=prog_count",
+        ),
+    ]
+    non_empty_prog_cells: list[str] = []
+    for y in range(height - 1, -1, -1):
+        row = []
+        for x in range(width):
+            prog_ids = layers.progs_map[y][x]
+            if not prog_ids:
+                row.append(_styled("·", "bright_black"))
+                continue
+            row.append(_styled(str(min(len(prog_ids), 9)), "green"))
+            non_empty_prog_cells.append(f"({x},{y})={list(prog_ids)}")
+        progs_block.append(f"{_row_prefix(y)}{' '.join(row)}")
+    progs_block.append(_axis_row())
+    blocks.append(progs_block)
+
+    blocks.append(_build_numeric_block(layer_name="points_map", layer_data=layers.points_map, style="magenta"))
+    blocks.append(
+        _build_numeric_block(
+            layer_name="siphon_penalty_map",
+            layer_data=layers.siphon_penalty_map,
+            style="red",
+        )
+    )
+
+    max_width = max(shutil.get_terminal_size(fallback=(180, 40)).columns, 80)
+    gap = "   "
+    grouped_rows: list[list[tuple[list[str], int]]] = []
+    active_group: list[tuple[list[str], int]] = []
+    active_width = 0
+
+    for block in blocks:
+        block_width = max(_visible_len(line) for line in block)
+        proposed_width = block_width if not active_group else active_width + len(gap) + block_width
+        if active_group and proposed_width > max_width:
+            grouped_rows.append(active_group)
+            active_group = [(block, block_width)]
+            active_width = block_width
+            continue
+        active_group.append((block, block_width))
+        active_width = proposed_width
+    if active_group:
+        grouped_rows.append(active_group)
+
+    lines: list[str] = []
+    for row_index, row_group in enumerate(grouped_rows):
+        row_height = max(len(block) for block, _ in row_group)
+        for line_index in range(row_height):
+            columns: list[str] = []
+            for block, block_width in row_group:
+                line_text = block[line_index] if line_index < len(block) else ""
+                columns.append(_pad_visible(line_text, block_width))
+            lines.append(gap.join(columns).rstrip())
+        if row_index < len(grouped_rows) - 1:
+            lines.append("")
+
+    lines.append("progs_map_details: " + (", ".join(non_empty_prog_cells) if non_empty_prog_cells else "none"))
+
+    refresh = map_state.layer_refresh
+    lines.append(
+        "layer_refresh "
+        f"obstacles={refresh.obstacles_updated} "
+        f"player_enemy={refresh.player_and_enemy_updated} "
+        f"goals={refresh.goals_updated} "
+        f"siphon_outcomes={refresh.siphon_outcomes_updated}"
+    )
+
     return "\n".join(lines)
 
 
@@ -473,6 +700,7 @@ class MemoryStateMonitor:
         self._prog_name_scan_attempted = False
         self._enemy_name_by_id: dict[int, str] = {}
         self._enemy_name_scan_attempted = False
+        self._previous_map_state: MapState | None = None
 
     @property
     def attached(self) -> AttachedProcess:
@@ -495,6 +723,7 @@ class MemoryStateMonitor:
         self._prog_name_scan_attempted = False
         self._enemy_name_by_id.clear()
         self._enemy_name_scan_attempted = False
+        self._previous_map_state = None
 
     def stop(self) -> None:
         """Detach from process handle if attached."""
@@ -508,6 +737,7 @@ class MemoryStateMonitor:
             self._prog_name_scan_attempted = False
             self._enemy_name_by_id.clear()
             self._enemy_name_scan_attempted = False
+            self._previous_map_state = None
 
     def _select_entries(
         self,
@@ -768,13 +998,19 @@ class MemoryStateMonitor:
                 reader=self._reader,
                 registry=self._registry,
                 module_base_resolver=self._module_base_resolver,
+                previous_map_state=self._previous_map_state,
             )
         except Exception as error:  # pragma: no cover - runtime diagnostics path
             return f"board_status=error({error})"
+        self._previous_map_state = snapshot.map if snapshot.map.status == "ok" else None
 
         self._ensure_enemy_name_map_loaded()
         board_summary = summarize_board_state(snapshot.map, enemy_name_by_id=self._enemy_name_by_id)
-        return f"{board_summary}\n{render_ascii_map(snapshot.map)}"
+        return (
+            f"{board_summary}\n"
+            f"{render_ascii_map(snapshot.map)}\n"
+            f"{render_ascii_layer_maps(snapshot.map)}"
+        )
 
     def poll(self) -> PollSnapshot:
         """Read all selected fields once."""

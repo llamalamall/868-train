@@ -45,6 +45,7 @@ def _snapshot(
     inventory_state: InventoryState | None = None,
     can_siphon_now: bool | None = None,
     prog_slots_available_mask: int | None = None,
+    extra_fields: dict[str, FieldState] | None = None,
 ) -> GameStateSnapshot:
     return GameStateSnapshot(
         timestamp_utc="2026-03-06T00:00:00+00:00",
@@ -56,6 +57,7 @@ def _snapshot(
         map=map_state or MapState(status="missing"),
         can_siphon_now=can_siphon_now,
         prog_slots_available_mask=prog_slots_available_mask,
+        extra_fields=extra_fields or {},
     )
 
 
@@ -294,6 +296,32 @@ def test_game_env_step_marks_done_when_fail_detector_reports_null_pointer_start_
     assert done is True
     assert info["terminal_reason"] == "state:start_screen"
     assert info["start_screen_detected"] is True
+
+
+def test_game_env_step_marks_done_when_victory_flag_is_active() -> None:
+    state_provider = QueueStateProvider(
+        [
+            _snapshot(failed=False),
+            _snapshot(
+                failed=False,
+                extra_fields={"victory_active": _field(True)},
+            ),
+        ]
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+
+    env.reset()
+    _, _, done, info = env.step("wait")
+
+    assert done is True
+    assert info["terminal_reason"] == "state:victory"
+    assert info["victory_detected"] is True
 
 
 def test_game_env_reset_dispatches_confirm_and_space_when_start_screen_null_pointer_seen() -> None:

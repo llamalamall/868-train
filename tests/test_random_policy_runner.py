@@ -11,6 +11,7 @@ from src.env.random_policy_runner import (
     _build_parser,
     _build_reward_config,
     _build_reward_fn,
+    _validate_args,
 )
 from src.state.schema import FieldState, GameStateSnapshot
 
@@ -103,6 +104,8 @@ def test_random_runner_parser_prog_actions_defaults_to_enabled() -> None:
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35
     assert args.action_ack_poll_interval == 0.05
+    assert args.restore_save_file is None
+    assert args.restore_save_delay == pytest.approx(0.35)
     assert args.reward_sector_advance == 1.0
 
 
@@ -125,6 +128,8 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
             "1.2",
             "--action-ack-poll-interval",
             "0.25",
+            "--restore-save-delay",
+            "1.1",
         ]
     )
 
@@ -139,6 +144,7 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
     assert args.wait_for_action_processing is False
     assert args.action_ack_timeout == 1.2
     assert args.action_ack_poll_interval == 0.25
+    assert args.restore_save_delay == pytest.approx(1.1)
 
 
 def test_random_runner_parser_rejects_out_of_range_game_tick_ms() -> None:
@@ -147,6 +153,22 @@ def test_random_runner_parser_rejects_out_of_range_game_tick_ms() -> None:
         parser.parse_args(["--game-tick-ms", "0"])
     with pytest.raises(SystemExit):
         parser.parse_args(["--game-tick-ms", "17"])
+
+
+def test_random_runner_validate_args_rejects_missing_restore_save_file() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["--restore-save-file", "does-not-exist.bin"])
+
+    with pytest.raises(SystemExit):
+        _validate_args(parser, args)
+
+
+def test_random_runner_validate_args_rejects_negative_restore_save_delay() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(["--restore-save-delay", "-0.01"])
+
+    with pytest.raises(SystemExit):
+        _validate_args(parser, args)
 
 
 def test_build_reward_fn_applies_configured_components_and_writes_breakdown() -> None:

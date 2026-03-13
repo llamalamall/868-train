@@ -17,6 +17,8 @@ from src.state.schema import (
     GameStateSnapshot,
     GridPosition,
     InventoryState,
+    MapLayerRefreshState,
+    MapLayersState,
     MapCellState,
     MapState,
     ProgInventoryItem,
@@ -59,7 +61,17 @@ _MAP_CELL_STRIDE = 0x38
 _MAP_ENTITIES_BASE_OFFSET = 0x0C
 _MAP_ENTITY_STRIDE = 0x44
 _MAP_ENTITY_COUNT = 64
-_ENEMY_STATE_EGG = 0
+_ENEMY_VISIBLE_INCUBATION_TIMER = 0
+_CAN_SIPHON_NOW_DERIVED_OFFSET = 0x1BD2
+_PROG_SLOTS_AVAILABLE_BASE_OFFSET = 0x1BC8
+_PROG_SLOT_COUNT = 10
+_SIPHON_REACH_DELTAS: tuple[tuple[int, int], ...] = (
+    (0, 0),
+    (-1, 0),
+    (1, 0),
+    (0, 1),
+    (0, -1),
+)
 
 _LOGGED_UNKNOWN_PROG_IDS: set[int] = set()
 
@@ -372,6 +384,37 @@ def _extract_optional_uint32_mask(
     return int(value & 0xFFFFFFFF)
 
 
+def _derive_optional_bool_from_root(
+    *,
+    reader: ProcessMemoryReader,
+    root_address: int | None,
+    offset: int,
+) -> bool | None:
+    if root_address is None:
+        return None
+    result = reader.read_bool(int(root_address) + int(offset))
+    if not result.is_ok:
+        return None
+    return bool(result.value)
+
+
+def _derive_prog_slots_available_mask_from_root(
+    *,
+    reader: ProcessMemoryReader,
+    root_address: int | None,
+) -> int | None:
+    if root_address is None:
+        return None
+    mask = 0
+    for slot_index in range(_PROG_SLOT_COUNT):
+        result = reader.read_bool(int(root_address) + _PROG_SLOTS_AVAILABLE_BASE_OFFSET + slot_index)
+        if not result.is_ok:
+            return None
+        if bool(result.value):
+            mask |= 1 << slot_index
+    return mask
+
+
 def _log_unknown_prog_ids_once(unknown_prog_ids: tuple[int, ...]) -> None:
     for prog_id in unknown_prog_ids:
         if prog_id in _LOGGED_UNKNOWN_PROG_IDS:
@@ -502,6 +545,8 @@ def _ok_map(
     player_position: GridPosition | None,
     exit_position: GridPosition | None,
     enemies: tuple[EnemyState, ...],
+    layers: MapLayersState,
+    layer_refresh: MapLayerRefreshState,
 ) -> MapState:
     return MapState(
         status="ok",
@@ -514,6 +559,358 @@ def _ok_map(
         player_position=player_position,
         exit_position=exit_position,
         enemies=enemies,
+        layers=layers,
+        layer_refresh=layer_refresh,
+    )
+
+
+def _build_obstacle_signature(cells: tuple[MapCellState, ...]) -> tuple[tuple[int, int], ...]:
+    return tuple(
+        sorted(
+            (int(cell.position.x), int(cell.position.y))
+            for cell in cells
+            if cell.is_wall
+        )
+    )
+
+
+def _build_goal_signature(
+    *,
+    siphons: tuple[GridPosition, ...],
+    exit_position: GridPosition | None,
+) -> tuple[tuple[tuple[int, int], ...], tuple[int, int] | None]:
+    siphon_positions = tuple(sorted((int(position.x), int(position.y)) for position in siphons))
+    exit_pos = (int(exit_position.x), int(exit_position.y)) if exit_position is not None else None
+    return (siphon_positions, exit_pos)
+
+
+def _build_enemy_signature(enemies: tuple[EnemyState, ...]) -> tuple[tuple[int, int, int], ...]:
+    return tuple(
+        sorted(
+            (
+                int(enemy.position.x),
+                int(enemy.position.y),
+                int(enemy.type_id),
+            )
+            for enemy in enemies
+            if enemy.in_bounds and int(enemy.type_id) > 0
+        )
+    )
+
+
+def _build_siphon_outcome_signature(cells: tuple[MapCellState, ...]) -> tuple[tuple[int, ...], ...]:
+    return tuple(
+        (
+            int(cell.position.x),
+            int(cell.position.y),
+            1 if cell.is_wall else 0,
+            int(cell.wall_state),
+            max(int(cell.credits), 0),
+            max(int(cell.energy), 0),
+            max(int(cell.points), 0),
+            int(cell.prog_id) if cell.prog_id is not None else -1,
+            max(int(cell.threat), 0),
+        )
+        for cell in cells
+    )
+
+
+def _empty_int_grid(*, width: int, height: int) -> list[list[int]]:
+    return [[0 for _ in range(width)] for _ in range(height)]
+
+
+def _empty_prog_grid(*, width: int, height: int) -> list[list[list[int]]]:
+    return [[[] for _ in range(width)] for _ in range(height)]
+
+
+def _freeze_int_grid(grid: list[list[int]]) -> tuple[tuple[int, ...], ...]:
+    return tuple(tuple(int(value) for value in row) for row in grid)
+
+
+def _freeze_prog_grid(grid: list[list[list[int]]]) -> tuple[tuple[tuple[int, ...], ...], ...]:
+    return tuple(tuple(tuple(int(prog_id) for prog_id in cell) for cell in row) for row in grid)
+
+
+def _int_grid_matches_dimensions(
+    grid: tuple[tuple[int, ...], ...],
+    *,
+    width: int,
+    height: int,
+) -> bool:
+    return len(grid) == height and all(len(row) == width for row in grid)
+
+
+def _nested_grid_matches_dimensions(
+    grid: tuple[tuple[tuple[int, ...], ...], ...],
+    *,
+    width: int,
+    height: int,
+) -> bool:
+    return len(grid) == height and all(len(row) == width for row in grid)
+
+
+def _layer_dimensions_match(
+    *,
+    layers: MapLayersState,
+    width: int,
+    height: int,
+) -> bool:
+    return (
+        _int_grid_matches_dimensions(layers.obstacle_map, width=width, height=height)
+        and _int_grid_matches_dimensions(layers.player_position_map, width=width, height=height)
+        and _nested_grid_matches_dimensions(layers.enemy_position_map, width=width, height=height)
+        and _int_grid_matches_dimensions(layers.goal_map, width=width, height=height)
+        and _int_grid_matches_dimensions(layers.energy_map, width=width, height=height)
+        and _int_grid_matches_dimensions(layers.credits_map, width=width, height=height)
+        and _nested_grid_matches_dimensions(layers.progs_map, width=width, height=height)
+        and _int_grid_matches_dimensions(layers.points_map, width=width, height=height)
+        and _int_grid_matches_dimensions(layers.siphon_penalty_map, width=width, height=height)
+    )
+
+
+def _build_obstacle_map(
+    *,
+    width: int,
+    height: int,
+    cells: tuple[MapCellState, ...],
+) -> tuple[tuple[int, ...], ...]:
+    obstacle_grid = _empty_int_grid(width=width, height=height)
+    for cell in cells:
+        x = int(cell.position.x)
+        y = int(cell.position.y)
+        if 0 <= x < width and 0 <= y < height and cell.is_wall:
+            obstacle_grid[y][x] = 1
+    return _freeze_int_grid(obstacle_grid)
+
+
+def _build_player_position_map(
+    *,
+    width: int,
+    height: int,
+    player_position: GridPosition | None,
+) -> tuple[tuple[int, ...], ...]:
+    player_grid = _empty_int_grid(width=width, height=height)
+    if player_position is None:
+        return _freeze_int_grid(player_grid)
+    x = int(player_position.x)
+    y = int(player_position.y)
+    if 0 <= x < width and 0 <= y < height:
+        player_grid[y][x] = 1
+    return _freeze_int_grid(player_grid)
+
+
+def _build_enemy_position_map(
+    *,
+    width: int,
+    height: int,
+    enemies: tuple[EnemyState, ...],
+) -> tuple[tuple[tuple[int, ...], ...], ...]:
+    enemy_grid = _empty_prog_grid(width=width, height=height)
+    for enemy in enemies:
+        enemy_type = int(enemy.type_id)
+        x = int(enemy.position.x)
+        y = int(enemy.position.y)
+        if not enemy.in_bounds or enemy_type <= 0:
+            continue
+        if x < 0 or y < 0 or x >= width or y >= height:
+            continue
+        enemy_grid[y][x].append(enemy_type)
+    for row in enemy_grid:
+        for cell in row:
+            cell.sort()
+    return _freeze_prog_grid(enemy_grid)
+
+
+def _build_goal_map(
+    *,
+    width: int,
+    height: int,
+    siphons: tuple[GridPosition, ...],
+    exit_position: GridPosition | None,
+) -> tuple[tuple[int, ...], ...]:
+    goal_grid = _empty_int_grid(width=width, height=height)
+    if exit_position is not None:
+        exit_x = int(exit_position.x)
+        exit_y = int(exit_position.y)
+        if 0 <= exit_x < width and 0 <= exit_y < height:
+            goal_grid[exit_y][exit_x] = 1
+    for siphon in siphons:
+        siphon_x = int(siphon.x)
+        siphon_y = int(siphon.y)
+        if 0 <= siphon_x < width and 0 <= siphon_y < height:
+            goal_grid[siphon_y][siphon_x] = 2
+    return _freeze_int_grid(goal_grid)
+
+
+def _build_siphon_outcome_layers(
+    *,
+    width: int,
+    height: int,
+    cells: tuple[MapCellState, ...],
+) -> tuple[
+    tuple[tuple[int, ...], ...],
+    tuple[tuple[int, ...], ...],
+    tuple[tuple[tuple[int, ...], ...], ...],
+    tuple[tuple[int, ...], ...],
+    tuple[tuple[int, ...], ...],
+]:
+    cell_by_pos = {(int(cell.position.x), int(cell.position.y)): cell for cell in cells}
+    energy_grid = _empty_int_grid(width=width, height=height)
+    credits_grid = _empty_int_grid(width=width, height=height)
+    points_grid = _empty_int_grid(width=width, height=height)
+    penalty_grid = _empty_int_grid(width=width, height=height)
+    progs_grid = _empty_prog_grid(width=width, height=height)
+
+    for y in range(height):
+        for x in range(width):
+            for dx, dy in _SIPHON_REACH_DELTAS:
+                target_x = x + dx
+                target_y = y + dy
+                if target_x < 0 or target_y < 0 or target_x >= width or target_y >= height:
+                    continue
+                target_cell = cell_by_pos.get((target_x, target_y))
+                if target_cell is None:
+                    continue
+                if target_cell.is_wall:
+                    points_grid[y][x] += max(int(target_cell.points), 0)
+                    penalty_grid[y][x] += max(int(target_cell.threat), 0)
+                    prog_id = int(target_cell.prog_id) if target_cell.prog_id is not None else -1
+                    if prog_id > 0 and int(target_cell.wall_state) > 0:
+                        progs_grid[y][x].append(prog_id)
+                    continue
+                credits_grid[y][x] += max(int(target_cell.credits), 0)
+                energy_grid[y][x] += max(int(target_cell.energy), 0)
+
+    for row in progs_grid:
+        for cell in row:
+            cell.sort()
+
+    return (
+        _freeze_int_grid(energy_grid),
+        _freeze_int_grid(credits_grid),
+        _freeze_prog_grid(progs_grid),
+        _freeze_int_grid(points_grid),
+        _freeze_int_grid(penalty_grid),
+    )
+
+
+def _build_map_layers(
+    *,
+    width: int,
+    height: int,
+    cells: tuple[MapCellState, ...],
+    siphons: tuple[GridPosition, ...],
+    player_position: GridPosition | None,
+    exit_position: GridPosition | None,
+    enemies: tuple[EnemyState, ...],
+    previous_map_state: MapState | None,
+) -> tuple[MapLayersState, MapLayerRefreshState]:
+    reusable_previous = (
+        previous_map_state is not None
+        and previous_map_state.status == "ok"
+        and int(previous_map_state.width) == width
+        and int(previous_map_state.height) == height
+        and _layer_dimensions_match(layers=previous_map_state.layers, width=width, height=height)
+    )
+
+    previous_layers = previous_map_state.layers if reusable_previous and previous_map_state is not None else None
+    previous_cells = previous_map_state.cells if reusable_previous and previous_map_state is not None else ()
+    previous_siphons = previous_map_state.siphons if reusable_previous and previous_map_state is not None else ()
+    previous_exit = previous_map_state.exit_position if reusable_previous and previous_map_state is not None else None
+    previous_enemies = previous_map_state.enemies if reusable_previous and previous_map_state is not None else ()
+    previous_player = previous_map_state.player_position if reusable_previous and previous_map_state is not None else None
+
+    player_moved = previous_player != player_position
+    obstacle_signature = _build_obstacle_signature(cells)
+    previous_obstacle_signature = _build_obstacle_signature(previous_cells)
+    goals_signature = _build_goal_signature(siphons=siphons, exit_position=exit_position)
+    previous_goals_signature = _build_goal_signature(siphons=previous_siphons, exit_position=previous_exit)
+    enemy_signature = _build_enemy_signature(enemies)
+    previous_enemy_signature = _build_enemy_signature(previous_enemies)
+    siphon_outcome_signature = _build_siphon_outcome_signature(cells)
+    previous_siphon_outcome_signature = _build_siphon_outcome_signature(previous_cells)
+
+    obstacles_updated = (
+        not reusable_previous
+        or obstacle_signature != previous_obstacle_signature
+    )
+    goals_updated = (
+        not reusable_previous
+        or player_moved
+        or goals_signature != previous_goals_signature
+    )
+    player_and_enemy_updated = (
+        not reusable_previous
+        or player_moved
+        or enemy_signature != previous_enemy_signature
+    )
+    siphon_outcomes_updated = (
+        not reusable_previous
+        or siphon_outcome_signature != previous_siphon_outcome_signature
+    )
+
+    obstacle_map = (
+        _build_obstacle_map(width=width, height=height, cells=cells)
+        if obstacles_updated or previous_layers is None
+        else previous_layers.obstacle_map
+    )
+    player_position_map = _build_player_position_map(
+        width=width,
+        height=height,
+        player_position=player_position,
+    )
+    enemy_position_map = _build_enemy_position_map(
+        width=width,
+        height=height,
+        enemies=enemies,
+    )
+    goal_map = (
+        _build_goal_map(
+            width=width,
+            height=height,
+            siphons=siphons,
+            exit_position=exit_position,
+        )
+        if goals_updated or previous_layers is None
+        else previous_layers.goal_map
+    )
+    if siphon_outcomes_updated or previous_layers is None:
+        (
+            energy_map,
+            credits_map,
+            progs_map,
+            points_map,
+            siphon_penalty_map,
+        ) = _build_siphon_outcome_layers(
+            width=width,
+            height=height,
+            cells=cells,
+        )
+    else:
+        energy_map = previous_layers.energy_map
+        credits_map = previous_layers.credits_map
+        progs_map = previous_layers.progs_map
+        points_map = previous_layers.points_map
+        siphon_penalty_map = previous_layers.siphon_penalty_map
+
+    return (
+        MapLayersState(
+            obstacle_map=obstacle_map,
+            player_position_map=player_position_map,
+            enemy_position_map=enemy_position_map,
+            goal_map=goal_map,
+            energy_map=energy_map,
+            credits_map=credits_map,
+            progs_map=progs_map,
+            points_map=points_map,
+            siphon_penalty_map=siphon_penalty_map,
+        ),
+        MapLayerRefreshState(
+            obstacles_updated=obstacles_updated,
+            player_and_enemy_updated=player_and_enemy_updated,
+            goals_updated=goals_updated,
+            siphon_outcomes_updated=siphon_outcomes_updated,
+        ),
     )
 
 
@@ -581,13 +978,13 @@ def _read_required_bool(reader: ProcessMemoryReader, address: int) -> ReadResult
     return ReadResult.ok(bool(result.value))
 
 
-def _mask_enemy_type_for_visibility(*, raw_type_id: int, enemy_state: int, in_bounds: bool) -> int:
-    """Hide enemy type for non-visible entities (egg mode or off-board)."""
+def _mask_enemy_type_for_visibility(*, raw_type_id: int, incubation_timer: int, in_bounds: bool) -> int:
+    """Hide enemy type for off-board or incubating entities."""
     if raw_type_id <= 0:
         return 0
     if not in_bounds:
         return 0
-    if enemy_state == _ENEMY_STATE_EGG:
+    if incubation_timer > _ENEMY_VISIBLE_INCUBATION_TIMER:
         return 0
     return raw_type_id
 
@@ -597,6 +994,7 @@ def _extract_map_state(
     reader: ProcessMemoryReader,
     entries_by_name: dict[str, OffsetEntry],
     module_base_resolver: ModuleBaseResolver | None,
+    previous_map_state: MapState | None = None,
 ) -> MapState:
     root_address, source_field, root_failure = _resolve_game_state_root(
         reader=reader,
@@ -771,7 +1169,7 @@ def _extract_map_state(
         enemy_y = int(y_result.value or 0)
         enemy_position = GridPosition(x=enemy_x, y=enemy_y)
         in_bounds = 0 <= enemy_x < _MAP_WIDTH and 0 <= enemy_y < _MAP_HEIGHT
-        enemy_state = int(state_result.value or 0)
+        incubation_timer = int(state_result.value or 0)
         if slot == 0:
             player_position = enemy_position
             continue
@@ -781,15 +1179,27 @@ def _extract_map_state(
                 slot=slot,
                 type_id=_mask_enemy_type_for_visibility(
                     raw_type_id=int(type_result.value or 0),
-                    enemy_state=enemy_state,
+                    incubation_timer=incubation_timer,
                     in_bounds=in_bounds,
                 ),
                 position=enemy_position,
                 hp=int(hp_result.value or 0),
-                state=enemy_state,
+                state=incubation_timer,
                 in_bounds=in_bounds,
+                incubation_timer=incubation_timer,
             )
         )
+
+    layers, layer_refresh = _build_map_layers(
+        width=_MAP_WIDTH,
+        height=_MAP_HEIGHT,
+        cells=tuple(cell_states),
+        siphons=tuple(siphons),
+        player_position=player_position,
+        exit_position=exit_position,
+        enemies=tuple(enemies),
+        previous_map_state=previous_map_state,
+    )
 
     return _ok_map(
         source_field=source_field or "derived_root",
@@ -801,6 +1211,8 @@ def _extract_map_state(
         player_position=player_position,
         exit_position=exit_position,
         enemies=tuple(enemies),
+        layers=layers,
+        layer_refresh=layer_refresh,
     )
 
 
@@ -836,6 +1248,7 @@ def extract_state(
     reader: ProcessMemoryReader,
     registry: OffsetRegistry,
     module_base_resolver: ModuleBaseResolver | None = None,
+    previous_map_state: MapState | None = None,
     terminal_health_value: int = -1,
     timestamp_fn: Callable[[], str] = _now_iso_utc,
 ) -> GameStateSnapshot:
@@ -863,6 +1276,7 @@ def extract_state(
         reader=reader,
         entries_by_name=entries,
         module_base_resolver=module_base_resolver,
+        previous_map_state=previous_map_state,
     )
     can_siphon_now = _extract_optional_bool(
         reader=reader,
@@ -874,6 +1288,24 @@ def extract_state(
         entry=prog_slots_available_mask_entry,
         module_base_resolver=module_base_resolver,
     )
+    root_address = int(map_state.address) if map_state.address is not None else None
+    if root_address is None:
+        root_address, _root_source_field, _root_failure = _resolve_game_state_root(
+            reader=reader,
+            entries_by_name=entries,
+            module_base_resolver=module_base_resolver,
+        )
+    if can_siphon_now is None:
+        can_siphon_now = _derive_optional_bool_from_root(
+            reader=reader,
+            root_address=root_address,
+            offset=_CAN_SIPHON_NOW_DERIVED_OFFSET,
+        )
+    if prog_slots_available_mask is None:
+        prog_slots_available_mask = _derive_prog_slots_available_mask_from_root(
+            reader=reader,
+            root_address=root_address,
+        )
     fail_state = _derive_fail_state(
         health,
         terminal_health_value,

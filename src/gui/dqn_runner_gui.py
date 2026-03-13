@@ -1,4 +1,4 @@
-"""Simple Tkinter launcher for DQN run/evaluation workflows."""
+"""Simple Tkinter launcher for DQN and hybrid run/evaluation workflows."""
 
 from __future__ import annotations
 
@@ -20,9 +20,12 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from src.env import dqn_policy_runner
+from src.hybrid import runner as hybrid_runner
 from src.memory.state_monitor_tui import (
     CONTROL_MODE_AUTO,
     CONTROL_MODE_PAUSED,
+    MemoryStateMonitor,
+    PollSnapshot,
     load_external_control_snapshot,
     set_external_control_mode,
     step_external_control,
@@ -36,18 +39,24 @@ _PATH_LIKE_DESTS = {
     "checkpoint",
     "checkpoint_a",
     "checkpoint_b",
+    "checkpoint_root",
+    "resume_checkpoint",
+    "warmstart_checkpoint",
     "json_out",
     "restore_save_file",
 }
 _HIDDEN_GUI_DESTS = {"external_status_file", "external_control_file"}
 _MAX_FORM_COLUMNS = 5
 _CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
+_HYBRID_CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "hybrid"
 _APPDATA_GAME_SAVE_DIR = (
     Path(os.environ["APPDATA"]) / "868-hack"
     if os.environ.get("APPDATA")
     else None
 )
 _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
+_TEXTUAL_MARKUP_PATTERN = re.compile(r"\[[^\]]+\]")
+_TEXTUAL_MARKUP_SEGMENT_PATTERN = re.compile(r"\[([a-zA-Z0-9_]+)\](.*?)\[/\]", re.DOTALL)
 _REWARD_HISTORY_LIMIT = 30
 _PALETTE = {
     "bg": "#0b0f14",
@@ -68,6 +77,16 @@ _FONTS = {
     "body": ("Segoe UI", 9),
     "mono": ("Consolas", 9),
     "small": ("Segoe UI", 8),
+}
+_TEXTUAL_STYLE_COLORS = {
+    "bright_black": "#7f8d99",
+    "yellow": "#f7b955",
+    "cyan": "#5bd1c2",
+    "green": "#5acc6f",
+    "magenta": "#d48ef7",
+    "red": "#ff7078",
+    "bright_white": "#f5f9ff",
+    "white": "#d7e0ea",
 }
 
 
@@ -218,6 +237,8 @@ def _initial_browse_dir(*, dest: str, current_value: str) -> Path:
         return current_path
     if dest in {"checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}:
         return _CHECKPOINT_DIR
+    if dest in {"checkpoint_root", "resume_checkpoint", "warmstart_checkpoint"}:
+        return _HYBRID_CHECKPOINT_DIR
     if (
         dest == "restore_save_file"
         and _APPDATA_GAME_SAVE_DIR is not None
@@ -303,6 +324,80 @@ def _run_dqn_preset_overrides() -> dict[str, dict[str, object]]:
     }
 
 
+def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, object]]:
+    if command_name == "movement-test":
+        return {
+            "defaults": {},
+            "gate a smoke": {
+                "episodes": 3,
+                "max_steps": 180,
+                "no_enemies": True,
+                "threat_trigger_distance": 2,
+            },
+            "long route validation": {
+                "episodes": 10,
+                "max_steps": 320,
+                "no_enemies": True,
+                "threat_trigger_distance": 2,
+                "prog_actions": False,
+            },
+        }
+    if command_name == "train-meta-no-enemies":
+        return {
+            "defaults": {},
+            "gate b baseline": {
+                "episodes": 120,
+                "max_steps": 350,
+                "no_enemies": True,
+                "meta_epsilon_start": 0.6,
+                "meta_epsilon_end": 0.05,
+                "meta_epsilon_decay_steps": 5000,
+            },
+            "quick tune": {
+                "episodes": 60,
+                "max_steps": 280,
+                "no_enemies": True,
+                "meta_learning_rate": 0.0005,
+                "meta_epsilon_decay_steps": 3000,
+            },
+        }
+    if command_name == "train-full-hierarchical":
+        return {
+            "defaults": {},
+            "gate c baseline": {
+                "episodes": 200,
+                "max_steps": 450,
+                "no_enemies": False,
+                "meta_freeze_episodes": 25,
+                "joint_finetune": True,
+                "threat_trigger_distance": 2,
+            },
+            "threat warmup heavy": {
+                "episodes": 240,
+                "max_steps": 450,
+                "no_enemies": False,
+                "meta_freeze_episodes": 60,
+                "joint_finetune": True,
+                "threat_learning_rate": 0.0007,
+            },
+        }
+    if command_name == "eval-hybrid":
+        return {
+            "defaults": {},
+            "eval quick": {
+                "episodes": 10,
+                "max_steps": 300,
+                "no_enemies": False,
+            },
+            "eval stress": {
+                "episodes": 25,
+                "max_steps": 500,
+                "no_enemies": False,
+            },
+        }
+    return {"defaults": {}}
+
+
 def _validate_text_input(action: argparse.Action, *, value: str, field_name: str) -> None:
     if action.type is not None:
         try:
@@ -325,6 +420,10 @@ def _format_command(command: list[str]) -> str:
 
 def _parse_status_values(line: str) -> dict[str, str]:
     return {key: value for key, value in _STATUS_KV_PATTERN.findall(line)}
+
+
+def _strip_textual_markup(text: str) -> str:
+    return _TEXTUAL_MARKUP_PATTERN.sub("", text)
 
 
 def _resolve_reward_metric_value(
@@ -439,6 +538,25 @@ def _estimate_epsilon_eta_seconds(
     remaining_fraction = (clamped - epsilon_end) / (epsilon_start - epsilon_end)
     remaining_steps = max(0.0, float(epsilon_decay_steps) * remaining_fraction)
     return remaining_steps * seconds_per_step
+
+
+def _format_epsilon_progress_text(
+    *,
+    current_epsilon: float | None,
+    epsilon_end: float | None,
+) -> str:
+    if current_epsilon is None:
+        if epsilon_end is None:
+            return "-"
+        clamped_end = max(0.0, min(1.0, epsilon_end))
+        return f"end {clamped_end * 100.0:.1f}%"
+
+    clamped_current = max(0.0, min(1.0, current_epsilon))
+    current_text = f"{clamped_current * 100.0:.1f}%"
+    if epsilon_end is None:
+        return current_text
+    clamped_end = max(0.0, min(1.0, epsilon_end))
+    return f"{current_text} -> {clamped_end * 100.0:.1f}%"
 
 
 @dataclass
@@ -723,6 +841,8 @@ class _ArgForm(ttk.Frame):
     def _browse_path(self, variable: tk.StringVar, dest: str) -> None:
         current_value = variable.get().strip()
         initial_dir = str(_initial_browse_dir(dest=dest, current_value=current_value))
+        if dest == "checkpoint" and self._profile_id.startswith("hybrid-") and not current_value:
+            initial_dir = str(_HYBRID_CHECKPOINT_DIR)
         if dest == "exe":
             path = filedialog.askopenfilename(
                 parent=self,
@@ -736,6 +856,24 @@ class _ArgForm(ttk.Frame):
                 title="Select checkpoint",
                 initialdir=initial_dir,
                 filetypes=[("JSON", "*.json"), ("All files", "*.*")],
+            )
+        elif dest == "checkpoint" and self._profile_id == "hybrid-eval":
+            path = filedialog.askdirectory(
+                parent=self,
+                title="Select hybrid checkpoint directory",
+                initialdir=initial_dir,
+            )
+        elif dest in {"resume_checkpoint", "warmstart_checkpoint"}:
+            path = filedialog.askdirectory(
+                parent=self,
+                title="Select hybrid checkpoint directory",
+                initialdir=initial_dir,
+            )
+        elif dest == "checkpoint_root":
+            path = filedialog.askdirectory(
+                parent=self,
+                title="Select checkpoint root directory",
+                initialdir=initial_dir,
             )
         elif dest == "checkpoint" and self._profile_id != "run-dqn":
             path = filedialog.askopenfilename(
@@ -849,6 +987,17 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_episode_duration_sum = 0.0
         self._monitor_episode_duration_count = 0
         self._monitor_last_reward_step_key: tuple[int, int] | None = None
+        self._state_monitor: MemoryStateMonitor | None = None
+        self._state_monitor_error = tk.StringVar(value="")
+        self._state_monitor_status = tk.StringVar(value="state_monitor=idle")
+        self._state_monitor_timestamp = tk.StringVar(value="last_snapshot=-")
+        self._state_monitor_pid = tk.StringVar(value="pid=-")
+        self._state_tab_widget: ttk.Frame | None = None
+        self._ascii_maps_tab_widget: ttk.Frame | None = None
+        self._state_fields_tree: ttk.Treeview | None = None
+        self._ascii_maps_text: tk.Text | None = None
+        self._state_last_poll_monotonic = 0.0
+        self._state_poll_interval_seconds = 0.5
 
         self.columnconfigure(0, weight=1)
         self.rowconfigure(1, weight=4)
@@ -967,6 +1116,7 @@ class DqnRunnerGui(tk.Tk):
         self.after(120, self._animate_status)
         self.after(100, self._drain_event_queue)
         self.after(200, self._poll_external_status)
+        self.after(300, self._poll_state_monitor)
         self._refresh_tab_visuals()
         self._refresh_preview()
 
@@ -1031,6 +1181,32 @@ class DqnRunnerGui(tk.Tk):
         style.configure("TCombobox", fieldbackground="#0f1620", foreground=_PALETTE["text"])
         style.configure("TSpinbox", fieldbackground="#0f1620", foreground=_PALETTE["text"])
         style.configure(
+            "State.Treeview",
+            background="#0f1620",
+            fieldbackground="#0f1620",
+            foreground=_PALETTE["text"],
+            bordercolor="#243244",
+            rowheight=22,
+        )
+        style.map(
+            "State.Treeview",
+            background=[("selected", "#1b2a3b")],
+            foreground=[("selected", _PALETTE["text"])],
+        )
+        style.configure(
+            "State.Treeview.Heading",
+            background="#1a2533",
+            foreground=_PALETTE["accent"],
+            bordercolor="#243244",
+            relief="flat",
+            font=("Segoe UI Semibold", 9),
+        )
+        style.map(
+            "State.Treeview.Heading",
+            background=[("active", "#223246")],
+            foreground=[("active", _PALETTE["accent"])],
+        )
+        style.configure(
             "MonitorEpsilon.Horizontal.TProgressbar",
             troughcolor="#0f1620",
             background=_PALETTE["accent"],
@@ -1049,7 +1225,12 @@ class DqnRunnerGui(tk.Tk):
 
     def _build_profiles(self) -> None:
         run_parser = dqn_policy_runner._build_parser()
+        hybrid_parser = hybrid_runner._build_parser()
         evaluate_parser = evaluate._build_parser()
+        hybrid_movement_parser = _get_subparser(hybrid_parser, command_name="movement-test")
+        hybrid_train_meta_parser = _get_subparser(hybrid_parser, command_name="train-meta-no-enemies")
+        hybrid_train_full_parser = _get_subparser(hybrid_parser, command_name="train-full-hierarchical")
+        hybrid_eval_parser = _get_subparser(hybrid_parser, command_name="eval-hybrid")
         eval_run_parser = _get_subparser(evaluate_parser, command_name="run")
         eval_compare_parser = _get_subparser(evaluate_parser, command_name="compare")
 
@@ -1060,6 +1241,34 @@ class DqnRunnerGui(tk.Tk):
                 run_parser,
                 ("-m", "src.env.dqn_policy_runner"),
                 _run_dqn_preset_overrides(),
+            ),
+            (
+                "hybrid-movement",
+                "Hybrid Movement Test",
+                hybrid_movement_parser,
+                ("-m", "src.hybrid.runner", "movement-test"),
+                _run_hybrid_preset_overrides(command_name="movement-test"),
+            ),
+            (
+                "hybrid-train-meta",
+                "Hybrid Meta Train (No Enemies)",
+                hybrid_train_meta_parser,
+                ("-m", "src.hybrid.runner", "train-meta-no-enemies"),
+                _run_hybrid_preset_overrides(command_name="train-meta-no-enemies"),
+            ),
+            (
+                "hybrid-train-full",
+                "Hybrid Full Train",
+                hybrid_train_full_parser,
+                ("-m", "src.hybrid.runner", "train-full-hierarchical"),
+                _run_hybrid_preset_overrides(command_name="train-full-hierarchical"),
+            ),
+            (
+                "hybrid-eval",
+                "Hybrid Evaluate",
+                hybrid_eval_parser,
+                ("-m", "src.hybrid.runner", "eval-hybrid"),
+                _run_hybrid_preset_overrides(command_name="eval-hybrid"),
             ),
             (
                 "eval-run",
@@ -1091,6 +1300,8 @@ class DqnRunnerGui(tk.Tk):
             if self._last_form is None:
                 self._last_form = form
         self._build_monitor_tab()
+        self._build_state_tab()
+        self._build_ascii_maps_tab()
         self._refresh_tab_visuals()
 
     def _build_monitor_tab(self) -> None:
@@ -1116,6 +1327,7 @@ class DqnRunnerGui(tk.Tk):
             ("Reward", "reward"),
             ("Total", "total"),
             ("Epsilon", "epsilon"),
+            ("Threat Epsilon", "threat_epsilon"),
             ("Updates", "updates"),
             ("Done", "done"),
             ("Terminal", "terminal"),
@@ -1267,6 +1479,13 @@ class DqnRunnerGui(tk.Tk):
     def _on_tab_changed(self) -> None:
         self._refresh_tab_visuals()
         self._refresh_preview()
+        selected_tab = self._notebook.select()
+        current_widget = self.nametowidget(selected_tab)
+        if (
+            (self._state_tab_widget is not None and current_widget == self._state_tab_widget)
+            or (self._ascii_maps_tab_widget is not None and current_widget == self._ascii_maps_tab_widget)
+        ):
+            self._ensure_state_monitor_started()
 
     def _current_form(self) -> _ArgForm:
         selected_tab = self._notebook.select()
@@ -1334,13 +1553,24 @@ class DqnRunnerGui(tk.Tk):
         if total_episodes is not None and total_episodes >= 1:
             self._monitor_total_episodes = total_episodes
 
-        is_train_mode = str(form.value_for_dest("mode") or "train").strip().lower() == "train"
-        if form.profile_id != "run-dqn" or not is_train_mode:
+        epsilon_start: float | None = None
+        epsilon_end: float | None = None
+        epsilon_decay_steps: int | None = None
+
+        if form.profile_id == "run-dqn":
+            is_train_mode = str(form.value_for_dest("mode") or "train").strip().lower() == "train"
+            if not is_train_mode:
+                return
+            epsilon_start = self._parse_float_or_none(form.value_for_dest("epsilon_start"))
+            epsilon_end = self._parse_float_or_none(form.value_for_dest("epsilon_end"))
+            epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("epsilon_decay_steps"))
+        elif form.profile_id in {"hybrid-train-meta", "hybrid-train-full"}:
+            epsilon_start = self._parse_float_or_none(form.value_for_dest("meta_epsilon_start"))
+            epsilon_end = self._parse_float_or_none(form.value_for_dest("meta_epsilon_end"))
+            epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("meta_epsilon_decay_steps"))
+        else:
             return
 
-        epsilon_start = self._parse_float_or_none(form.value_for_dest("epsilon_start"))
-        epsilon_end = self._parse_float_or_none(form.value_for_dest("epsilon_end"))
-        epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("epsilon_decay_steps"))
         if epsilon_start is None or epsilon_end is None or epsilon_decay_steps is None:
             return
         if epsilon_decay_steps <= 0:
@@ -1384,8 +1614,9 @@ class DqnRunnerGui(tk.Tk):
             self._reset_monitor_estimates()
             return command
         is_dqn_runner = command[1:3] == ["-m", "src.env.dqn_policy_runner"]
+        is_hybrid_runner = command[1:3] == ["-m", "src.hybrid.runner"]
         is_eval_compare = command[1:4] == ["-m", "src.training.evaluate", "compare"]
-        if not is_dqn_runner and not is_eval_compare:
+        if not is_dqn_runner and not is_hybrid_runner and not is_eval_compare:
             self._clear_monitor_files()
             self._reset_monitor_estimates()
             return command
@@ -1393,7 +1624,7 @@ class DqnRunnerGui(tk.Tk):
         self._clear_monitor_files()
         status_file = self._create_status_file()
         self._external_status_file = status_file
-        control_file = self._create_control_file() if is_dqn_runner else None
+        control_file = self._create_control_file() if (is_dqn_runner or is_hybrid_runner) else None
         self._external_control_file = control_file
         self._status_snapshot = ("", "", "", "")
         self._monitor_training_line.set("training=starting")
@@ -1432,10 +1663,10 @@ class DqnRunnerGui(tk.Tk):
                 continue
             filtered.append(token)
 
-        if is_dqn_runner or is_eval_compare:
+        if is_dqn_runner or is_hybrid_runner or is_eval_compare:
             filtered.append("--no-tui")
         filtered.extend(["--external-status-file", str(status_file)])
-        if is_dqn_runner and control_file is not None:
+        if (is_dqn_runner or is_hybrid_runner) and control_file is not None:
             filtered.extend(["--external-control-file", str(control_file)])
         return filtered
 
@@ -1483,6 +1714,302 @@ class DqnRunnerGui(tk.Tk):
                     self._update_monitor_metrics(training_line, reward_line=reward_line)
         self._refresh_monitor_control_state()
         self.after(200, self._poll_external_status)
+
+    def _poll_state_monitor(self) -> None:
+        try:
+            now = time.monotonic()
+            if now - self._state_last_poll_monotonic < self._state_poll_interval_seconds:
+                return
+            self._state_last_poll_monotonic = now
+            if self._state_monitor is None:
+                return
+            selected_tab = self._notebook.select()
+            current_widget = self.nametowidget(selected_tab)
+            state_selected = self._state_tab_widget is not None and current_widget == self._state_tab_widget
+            ascii_selected = (
+                self._ascii_maps_tab_widget is not None
+                and current_widget == self._ascii_maps_tab_widget
+            )
+            if not state_selected and not ascii_selected:
+                return
+            self._refresh_state_snapshot()
+        finally:
+            self.after(300, self._poll_state_monitor)
+
+    def _resolve_monitor_executable_name(self) -> str:
+        try:
+            form = self._current_form()
+            value = str(form.value_for_dest("exe") or "").strip()
+            if value:
+                return value
+        except Exception:
+            pass
+        return "868-HACK.exe"
+
+    def _ensure_state_monitor_started(self) -> None:
+        if self._state_monitor is not None:
+            return
+        executable_name = self._resolve_monitor_executable_name()
+        try:
+            monitor = MemoryStateMonitor(
+                executable_name=executable_name,
+                config_path=None,
+                fields_filter="",
+                resolve_each_poll=False,
+            )
+            monitor.start()
+        except Exception as error:
+            self._state_monitor_error.set(str(error))
+            self._state_monitor_status.set("state_monitor=error")
+            self._state_monitor_pid.set("pid=-")
+            return
+        self._state_monitor = monitor
+        self._state_monitor_error.set("")
+        self._state_monitor_status.set(f"state_monitor=attached exe={executable_name}")
+        self._state_monitor_pid.set(f"pid={monitor.attached.pid}")
+        self._refresh_state_snapshot()
+
+    def _stop_state_monitor(self) -> None:
+        if self._state_monitor is not None:
+            try:
+                self._state_monitor.stop()
+            except Exception:
+                pass
+        self._state_monitor = None
+        self._state_monitor_status.set("state_monitor=stopped")
+        self._state_monitor_pid.set("pid=-")
+        self._state_monitor_timestamp.set("last_snapshot=-")
+        self._state_monitor_error.set("")
+        if self._state_fields_tree is not None:
+            for item_id in self._state_fields_tree.get_children():
+                self._state_fields_tree.delete(item_id)
+        self._set_ascii_maps_text("board snapshot unavailable")
+
+    def _insert_textual_markup(self, widget: tk.Text, text: str) -> None:
+        cursor = 0
+        for match in _TEXTUAL_MARKUP_SEGMENT_PATTERN.finditer(text):
+            if match.start() > cursor:
+                widget.insert("end", text[cursor:match.start()])
+            style_name = str(match.group(1)).strip().lower()
+            segment = str(match.group(2))
+            tag_name = f"textual_{style_name}"
+            if tag_name in widget.tag_names():
+                widget.insert("end", segment, tag_name)
+            else:
+                widget.insert("end", segment)
+            cursor = match.end()
+        if cursor < len(text):
+            widget.insert("end", text[cursor:])
+
+    def _set_ascii_maps_text(self, text: str) -> None:
+        widget = self._ascii_maps_text
+        if widget is None:
+            return
+        widget.configure(state="normal")
+        widget.delete("1.0", "end")
+        self._insert_textual_markup(widget, text)
+        widget.configure(state="disabled")
+
+    def _refresh_state_snapshot(self) -> None:
+        monitor = self._state_monitor
+        if monitor is None:
+            return
+        try:
+            snapshot = monitor.poll()
+        except Exception as error:
+            self._state_monitor_error.set(str(error))
+            self._state_monitor_status.set("state_monitor=poll_error")
+            return
+        self._state_monitor_error.set("")
+        self._state_monitor_status.set("state_monitor=ok")
+        self._state_monitor_timestamp.set(f"last_snapshot={snapshot.timestamp}")
+        self._render_state_snapshot(snapshot=snapshot)
+
+    def _render_state_snapshot(self, *, snapshot: PollSnapshot) -> None:
+        if self._state_fields_tree is not None:
+            for item_id in self._state_fields_tree.get_children():
+                self._state_fields_tree.delete(item_id)
+            for row in snapshot.fields:
+                self._state_fields_tree.insert(
+                    "",
+                    "end",
+                    values=(
+                        row.name,
+                        row.data_type,
+                        row.confidence,
+                        row.address,
+                        row.value,
+                        row.status,
+                        row.error,
+                    ),
+                )
+        if self._ascii_maps_text is not None:
+            self._set_ascii_maps_text(snapshot.board_stats or "board snapshot unavailable")
+
+    def _build_state_tab(self) -> None:
+        state_tab = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
+        state_tab.columnconfigure(0, weight=1)
+        state_tab.rowconfigure(3, weight=1)
+
+        ttk.Label(state_tab, text="Game State Inspector", style="SectionLabel.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+
+        controls = ttk.Frame(state_tab, style="Surface.TFrame")
+        controls.grid(row=1, column=0, sticky="ew", pady=(8, 6))
+        controls.columnconfigure(0, weight=0)
+        controls.columnconfigure(1, weight=0)
+        controls.columnconfigure(2, weight=1)
+        ttk.Button(
+            controls,
+            text="Attach",
+            command=self._ensure_state_monitor_started,
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            controls,
+            text="Detach",
+            command=self._stop_state_monitor,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, sticky="w", padx=(8, 0))
+        ttk.Label(
+            controls,
+            textvariable=self._state_monitor_status,
+            style="FormHelp.TLabel",
+        ).grid(row=0, column=2, sticky="e")
+
+        meta = ttk.Frame(state_tab, style="Surface.TFrame")
+        meta.grid(row=2, column=0, sticky="ew")
+        meta.columnconfigure(0, weight=1)
+        meta.columnconfigure(1, weight=1)
+        meta.columnconfigure(2, weight=1)
+        ttk.Label(meta, textvariable=self._state_monitor_pid, style="FormHelp.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+        ttk.Label(meta, textvariable=self._state_monitor_timestamp, style="FormHelp.TLabel").grid(
+            row=0,
+            column=1,
+            sticky="w",
+        )
+        ttk.Label(meta, textvariable=self._state_monitor_error, style="FormHelp.TLabel").grid(
+            row=0,
+            column=2,
+            sticky="e",
+        )
+
+        table_frame = ttk.Frame(state_tab, style="Surface.TFrame")
+        table_frame.grid(row=3, column=0, sticky="nsew", pady=(8, 8))
+        table_frame.columnconfigure(0, weight=1)
+        table_frame.rowconfigure(0, weight=1)
+        columns = ("field", "type", "confidence", "address", "value", "status", "error")
+        tree = ttk.Treeview(
+            table_frame,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            style="State.Treeview",
+        )
+        tree.heading("field", text="Field")
+        tree.heading("type", text="Type")
+        tree.heading("confidence", text="Confidence")
+        tree.heading("address", text="Address")
+        tree.heading("value", text="Value")
+        tree.heading("status", text="Status")
+        tree.heading("error", text="Error")
+        tree.column("field", width=180, anchor="w")
+        tree.column("type", width=90, anchor="w")
+        tree.column("confidence", width=90, anchor="w")
+        tree.column("address", width=130, anchor="w")
+        tree.column("value", width=280, anchor="w")
+        tree.column("status", width=100, anchor="w")
+        tree.column("error", width=240, anchor="w")
+        tree.grid(row=0, column=0, sticky="nsew")
+        tree_scroll_y = ttk.Scrollbar(table_frame, orient="vertical", command=tree.yview)
+        tree_scroll_y.grid(row=0, column=1, sticky="ns")
+        tree_scroll_x = ttk.Scrollbar(table_frame, orient="horizontal", command=tree.xview)
+        tree_scroll_x.grid(row=1, column=0, sticky="ew")
+        tree.configure(yscrollcommand=tree_scroll_y.set, xscrollcommand=tree_scroll_x.set)
+        self._state_fields_tree = tree
+
+        self._state_tab_widget = state_tab
+
+        self._notebook.add(state_tab, text="Game State")
+
+    def _build_ascii_maps_tab(self) -> None:
+        maps_tab = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
+        maps_tab.columnconfigure(0, weight=1)
+        maps_tab.rowconfigure(2, weight=1)
+
+        ttk.Label(maps_tab, text="ASCII Maps", style="SectionLabel.TLabel").grid(
+            row=0,
+            column=0,
+            sticky="w",
+        )
+
+        meta = ttk.Frame(maps_tab, style="Surface.TFrame")
+        meta.grid(row=1, column=0, sticky="ew", pady=(6, 8))
+        meta.columnconfigure(0, weight=0)
+        meta.columnconfigure(1, weight=0)
+        meta.columnconfigure(2, weight=1)
+        meta.columnconfigure(3, weight=1)
+        meta.columnconfigure(4, weight=1)
+        ttk.Button(
+            meta,
+            text="Attach",
+            command=self._ensure_state_monitor_started,
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            meta,
+            text="Detach",
+            command=self._stop_state_monitor,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, sticky="w", padx=(8, 12))
+        ttk.Label(meta, textvariable=self._state_monitor_status, style="FormHelp.TLabel").grid(
+            row=0,
+            column=2,
+            sticky="w",
+        )
+        ttk.Label(meta, textvariable=self._state_monitor_pid, style="FormHelp.TLabel").grid(
+            row=0,
+            column=3,
+            sticky="w",
+        )
+        ttk.Label(meta, textvariable=self._state_monitor_timestamp, style="FormHelp.TLabel").grid(
+            row=0,
+            column=4,
+            sticky="e",
+        )
+
+        maps_text = tk.Text(
+            maps_tab,
+            wrap="none",
+            bg=_PALETTE["terminal_bg"],
+            fg=_PALETTE["terminal_fg"],
+            insertbackground=_PALETTE["terminal_fg"],
+            relief="flat",
+            padx=8,
+            pady=8,
+            font=_FONTS["mono"],
+        )
+        maps_text.grid(row=2, column=0, sticky="nsew")
+        maps_scroll_y = ttk.Scrollbar(maps_tab, orient="vertical", command=maps_text.yview)
+        maps_scroll_y.grid(row=2, column=1, sticky="ns")
+        maps_scroll_x = ttk.Scrollbar(maps_tab, orient="horizontal", command=maps_text.xview)
+        maps_scroll_x.grid(row=3, column=0, sticky="ew")
+        maps_text.configure(yscrollcommand=maps_scroll_y.set, xscrollcommand=maps_scroll_x.set)
+        for style_name, color in _TEXTUAL_STYLE_COLORS.items():
+            maps_text.tag_configure(f"textual_{style_name}", foreground=color)
+        maps_text.insert("1.0", "board snapshot unavailable")
+        maps_text.configure(state="disabled")
+
+        self._ascii_maps_text = maps_text
+        self._ascii_maps_tab_widget = maps_tab
+        self._notebook.add(maps_tab, text="ASCII Maps")
 
     def _set_monitor_controls_enabled(self, enabled: bool) -> None:
         state = "normal" if enabled else "disabled"
@@ -1616,6 +2143,7 @@ class DqnRunnerGui(tk.Tk):
             "reward": reward_value,
             "total": status_values.get("total", "-"),
             "epsilon": status_values.get("epsilon", "-"),
+            "threat_epsilon": status_values.get("threat_epsilon", "-"),
             "updates": status_values.get("updates", "-"),
             "done": status_values.get("done", "-"),
             "terminal": status_values.get("terminal", "-"),
@@ -1629,11 +2157,21 @@ class DqnRunnerGui(tk.Tk):
 
         if epsilon_value is None:
             self._epsilon_progress_value.set(0.0)
-            self._epsilon_progress_text.set("-")
+            self._epsilon_progress_text.set(
+                _format_epsilon_progress_text(
+                    current_epsilon=None,
+                    epsilon_end=self._monitor_epsilon_end,
+                )
+            )
         else:
             clamped_epsilon = max(0.0, min(1.0, epsilon_value))
             self._epsilon_progress_value.set(clamped_epsilon * 100.0)
-            self._epsilon_progress_text.set(f"{clamped_epsilon * 100.0:.1f}%")
+            self._epsilon_progress_text.set(
+                _format_epsilon_progress_text(
+                    current_epsilon=clamped_epsilon,
+                    epsilon_end=self._monitor_epsilon_end,
+                )
+            )
 
         reward_step_key: tuple[int, int] | None = None
         if current_episode is not None and current_step is not None:
@@ -1815,6 +2353,7 @@ class DqnRunnerGui(tk.Tk):
     def _on_close(self) -> None:
         if self._process is not None:
             self._stop_process()
+        self._stop_state_monitor()
         self._clear_monitor_files()
         self.destroy()
 

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import argparse
 import logging
+import time
 from statistics import mean
 from typing import Any
 
 from src.agent.baseline_heuristic import HeuristicBaselineAgent, HeuristicBaselineConfig
 from src.env.game_env import GameEnv, GameEnvConfig
 from src.env.random_policy_runner import (
+    _default_game_save_target_path,
     _build_action_config,
     _build_reward_config,
     _build_reward_fn,
+    _resolve_restore_save_source_path,
+    _restore_selected_save_file,
     format_reward_breakdown_line,
 )
 from src.env.runner_tui import RunnerTuiSession
@@ -46,6 +50,20 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Include prog-slot actions (prog_slot_1..prog_slot_10 mapped to 1..0).",
+    )
+    parser.add_argument(
+        "--restore-save-file",
+        default=None,
+        help=(
+            "Optional source save file to restore before each new-game confirm/reset action. "
+            "When set, the file is copied to %APPDATA%\\868-hack\\savegame_868."
+        ),
+    )
+    parser.add_argument(
+        "--restore-save-delay",
+        type=float,
+        default=0.35,
+        help="Delay in seconds after restoring save file before the next episode reset/new game.",
     )
     parser.add_argument(
         "--reset-sequence",
@@ -206,6 +224,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Weight for progress toward active objective (siphon->high-priority siphon target->enemy->exit).",
     )
     parser.add_argument(
+        "--reward-backtrack-penalty",
+        type=float,
+        default=default_weights.backtrack_penalty,
+        help="Penalty weight for increased distance from the active objective.",
+    )
+    parser.add_argument(
         "--reward-map-clear-bonus",
         type=float,
         default=default_weights.map_clear_bonus,
@@ -266,6 +290,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Penalty multiplier applied to negative health deltas.",
     )
     parser.add_argument(
+        "--reward-sector-advance",
+        type=float,
+        default=default_weights.sector_advance,
+        help="Reward per positive sector index transition.",
+    )
+    parser.add_argument(
         "--reward-clip-abs",
         type=float,
         default=5.0,
@@ -286,9 +316,21 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
+    if float(args.restore_save_delay) < 0:
+        parser.error("--restore-save-delay must be >= 0.")
+    restore_source = _resolve_restore_save_source_path(args)
+    if restore_source is not None:
+        if not restore_source.exists():
+            parser.error(f"--restore-save-file not found: {restore_source}.")
+        if not restore_source.is_file():
+            parser.error(f"--restore-save-file must be a file: {restore_source}.")
+
+
 def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
+    _validate_args(parser, args)
     if bool(args.step_through) and not bool(args.tui):
         parser.error("--step-through requires --tui.")
     effective_window_input = bool(args.window_input) or bool(args.step_through) or bool(args.tui)
@@ -309,6 +351,39 @@ def main() -> None:
         reward_config=reward_config,
         print_breakdown=bool(args.print_reward_breakdown),
     )
+    restore_save_source = _resolve_restore_save_source_path(args)
+    restore_save_delay_seconds = max(float(args.restore_save_delay), 0.0)
+    restore_save_target = (
+        _default_game_save_target_path()
+        if restore_save_source is not None
+        else None
+    )
+    if restore_save_source is not None and restore_save_target is not None:
+        print(
+            "savegame_restore_enabled\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+
+    def _restore_save_before_reset() -> None:
+        if restore_save_source is None or restore_save_target is None:
+            return
+        _restore_selected_save_file(
+            source_path=restore_save_source,
+            target_path=restore_save_target,
+        )
+        print(
+            "savegame_restored_before_reset\tsource={source}\ttarget={target}\tdelay_seconds={delay:.3f}".format(
+                source=restore_save_source,
+                target=restore_save_target,
+                delay=restore_save_delay_seconds,
+            )
+        )
+        if restore_save_delay_seconds > 0:
+            time.sleep(restore_save_delay_seconds)
+
     env: GameEnv | None = None
     tui = RunnerTuiSession(
         executable_name=str(args.exe),
@@ -336,6 +411,11 @@ def main() -> None:
             action_config=_build_action_config(
                 args.movement_keys,
                 include_prog_actions=bool(args.prog_actions),
+            ),
+            pre_reset_hook=(
+                _restore_save_before_reset
+                if restore_save_source is not None and restore_save_target is not None
+                else None
             ),
             reward_fn=reward_fn,
         )

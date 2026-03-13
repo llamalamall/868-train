@@ -13,8 +13,10 @@ authors = [
 ]
 dependencies = [
   "pydantic>=2.0",
+  "torch>=2.2",
   "typing-extensions>=4.0",
-  "textual>=0.78"
+  "textual>=0.78",
+  "numpy>=2.4.3"
 ]
 
 [project.scripts]
