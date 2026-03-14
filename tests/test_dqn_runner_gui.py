@@ -10,8 +10,10 @@ from src.gui.dqn_runner_gui import (
     _HYBRID_CHECKPOINT_DIR,
     _SMOKE_TEST_REWARD_DESTS,
     _CHECKPOINT_DIR,
+    _REWARD_HISTORY_LIMIT,
     _estimate_epsilon_eta_seconds,
     _format_epsilon_progress_text,
+    _format_phase_breakdown_tooltip,
     _format_reward_breakdown_tooltip,
     _format_duration_seconds,
     _initial_browse_dir,
@@ -212,6 +214,26 @@ def test_format_reward_breakdown_tooltip_formats_reward_components() -> None:
     assert "survival" in tooltip
     assert "objective" in tooltip
     assert "collect_siphons" in tooltip
+
+
+def test_format_phase_breakdown_tooltip_formats_phase_details() -> None:
+    tooltip = _format_phase_breakdown_tooltip(
+        "action=move_right phase=collect_siphons next_target=(3,4) reason=scripted_phase_only"
+    )
+
+    assert "phase detail" in tooltip
+    assert "Reason" in tooltip
+    assert "scripted_phase_only" in tooltip
+    assert "Action" in tooltip
+    assert "move_right" in tooltip
+    assert "Phase" in tooltip
+    assert "collect_siphons" in tooltip
+    assert "Target" in tooltip
+    assert "(3,4)" in tooltip
+
+
+def test_reward_history_limit_tracks_500_steps() -> None:
+    assert _REWARD_HISTORY_LIMIT == 500
 
 
 def test_strip_textual_markup_removes_color_tokens_from_board_text() -> None:

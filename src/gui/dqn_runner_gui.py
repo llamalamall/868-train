@@ -57,14 +57,7 @@ _APPDATA_GAME_SAVE_DIR = (
 _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
 _TEXTUAL_MARKUP_PATTERN = re.compile(r"\[[^\]]+\]")
 _TEXTUAL_MARKUP_SEGMENT_PATTERN = re.compile(r"\[([a-zA-Z0-9_]+)\](.*?)\[/\]", re.DOTALL)
-_REWARD_HISTORY_LIMIT = 100
-_MONITOR_ACTION_CARD_FIELDS: tuple[tuple[str, str, int], ...] = (
-    ("Action", "action", 1),
-    ("Reason", "reason", 2),
-    ("Phase", "phase", 1),
-    ("Target", "target", 1),
-    ("Loss", "loss", 1),
-)
+_REWARD_HISTORY_LIMIT = 500
 _MONITOR_KEY_LABELS: tuple[str, ...] = (
     "1",
     "2",
@@ -523,6 +516,23 @@ def _format_reward_breakdown_tooltip(reward_line: str) -> str:
     lines = ["reward breakdown"]
     for key, value in reward_values.items():
         lines.append(f"{_status_key_label(key):<{label_width}}  {value}")
+    return "\n".join(lines)
+
+
+def _format_phase_breakdown_tooltip(action_line: str) -> str:
+    action_values = _monitor_action_card_values(action_line)
+    fields = (
+        ("Reason", action_values["reason"]),
+        ("Action", action_values["action"]),
+        ("Phase", action_values["phase"]),
+        ("Target", action_values["target"]),
+    )
+    if all(value == "-" for _, value in fields):
+        return "Phase detail unavailable"
+    label_width = max(len(label) for label, _ in fields)
+    lines = ["phase detail"]
+    for label, value in fields:
+        lines.append(f"{label:<{label_width}}  {value}")
     return "\n".join(lines)
 
 
@@ -1054,7 +1064,6 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_step_button: ttk.Button | None = None
         self._monitor_resume_button: ttk.Button | None = None
         self._monitor_metric_vars: dict[str, tk.StringVar] = {}
-        self._monitor_action_vars: dict[str, tk.StringVar] = {}
         self._reward_history: list[float] = []
         self._monitor_keycap_labels: dict[str, tk.Label] = {}
         self._monitor_available_key_labels: set[str] = set()
@@ -1062,6 +1071,9 @@ class DqnRunnerGui(tk.Tk):
         self._reward_tooltip: tk.Toplevel | None = None
         self._reward_tooltip_label: tk.Label | None = None
         self._reward_hover_widgets: tuple[tk.Misc, ...] = ()
+        self._phase_tooltip: tk.Toplevel | None = None
+        self._phase_tooltip_label: tk.Label | None = None
+        self._phase_hover_widgets: tuple[tk.Misc, ...] = ()
         self._epsilon_progress_value = tk.DoubleVar(value=0.0)
         self._epsilon_progress_text = tk.StringVar(value="0.0%")
         self._monitor_total_episodes: int | None = None
@@ -1287,23 +1299,6 @@ class DqnRunnerGui(tk.Tk):
             foreground=_PALETTE["text"],
             font=("Consolas", 11, "bold"),
         )
-        style.configure(
-            "ActionCard.TFrame",
-            background="#101821",
-        )
-        style.configure(
-            "ActionName.TLabel",
-            background="#101821",
-            foreground=_PALETTE["muted"],
-            font=("Segoe UI", 8),
-        )
-        style.configure(
-            "ActionValue.TLabel",
-            background="#101821",
-            foreground=_PALETTE["text"],
-            font=("Consolas", 9, "bold"),
-        )
-
         style.configure("StatusReady.TLabel", background=_PALETTE["surface"], foreground=_PALETTE["accent"])
         style.configure("StatusRun.TLabel", background="#2a3522", foreground=_PALETTE["accent_alt"])
         style.configure("StatusStop.TLabel", background="#3d2026", foreground=_PALETTE["danger"])
@@ -1491,7 +1486,7 @@ class DqnRunnerGui(tk.Tk):
     def _build_monitor_tab(self) -> None:
         monitor = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
         monitor.columnconfigure(0, weight=1)
-        monitor.rowconfigure(5, weight=1)
+        monitor.rowconfigure(3, weight=1)
 
         ttk.Label(
             monitor,
@@ -1508,6 +1503,7 @@ class DqnRunnerGui(tk.Tk):
             ("Episode", "episode"),
             ("Step", "step"),
             ("Reward", "reward"),
+            ("Phase", "phase"),
             ("Total", "total"),
             ("Epsilon", "epsilon"),
             ("Threat Epsilon", "threat_epsilon"),
@@ -1537,32 +1533,15 @@ class DqnRunnerGui(tk.Tk):
                     widget.bind("<Enter>", self._show_reward_tooltip, add="+")
                     widget.bind("<Motion>", self._move_reward_tooltip, add="+")
                     widget.bind("<Leave>", self._hide_reward_tooltip, add="+")
-
-        ttk.Label(
-            monitor,
-            text="Action Trace",
-            style="SectionLabel.TLabel",
-        ).grid(row=2, column=0, sticky="w", pady=(10, 0))
-
-        action_grid = ttk.Frame(monitor, style="Surface.TFrame")
-        action_grid.grid(row=3, column=0, sticky="ew", pady=(6, 6))
-        for col in range(6):
-            action_grid.columnconfigure(col, weight=1, uniform="action-cols")
-        action_column = 0
-        for label, key, span in _MONITOR_ACTION_CARD_FIELDS:
-            card = ttk.Frame(action_grid, style="ActionCard.TFrame", padding=(8, 6, 8, 6))
-            card.grid(row=0, column=action_column, columnspan=span, sticky="ew", padx=3, pady=3)
-            self._monitor_action_vars[key] = tk.StringVar(value="-")
-            ttk.Label(card, text=label, style="ActionName.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(card, textvariable=self._monitor_action_vars[key], style="ActionValue.TLabel").grid(
-                row=1,
-                column=0,
-                sticky="w",
-            )
-            action_column += span
+            if key == "phase":
+                self._phase_hover_widgets = (card, name_label, value_label)
+                for widget in self._phase_hover_widgets:
+                    widget.bind("<Enter>", self._show_phase_tooltip, add="+")
+                    widget.bind("<Motion>", self._move_phase_tooltip, add="+")
+                    widget.bind("<Leave>", self._hide_phase_tooltip, add="+")
 
         graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
-        graph_shell.grid(row=5, column=0, sticky="nsew", pady=(14, 0))
+        graph_shell.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
         graph_shell.columnconfigure(0, weight=1)
         graph_shell.rowconfigure(3, weight=1)
 
@@ -1656,7 +1635,6 @@ class DqnRunnerGui(tk.Tk):
         )
         self._reward_canvas.grid(row=3, column=0, sticky="nsew")
         self._reward_canvas.bind("<Configure>", lambda _: self._draw_reward_graph())
-        self._update_monitor_action_cards("")
         self._update_monitor_keycaps(action_line="", next_available_actions_line="")
         self._set_monitor_controls_enabled(False)
 
@@ -1822,9 +1800,9 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_action_line.set("action=idle")
         self._monitor_reward_line.set("reward=idle")
         self._monitor_next_available_actions_line.set("next_available_actions=unavailable")
-        self._update_monitor_action_cards("")
         self._update_monitor_keycaps(action_line="", next_available_actions_line="")
         self._hide_reward_tooltip(force=True)
+        self._hide_phase_tooltip(force=True)
         if control_file is not None:
             snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_AUTO)
             self._monitor_control_state.set(
@@ -1884,6 +1862,7 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_control_state.set("session=idle")
         self._set_monitor_controls_enabled(False)
         self._hide_reward_tooltip(force=True)
+        self._hide_phase_tooltip(force=True)
 
     def _poll_external_status(self) -> None:
         status_file = self._external_status_file
@@ -1906,13 +1885,17 @@ class DqnRunnerGui(tk.Tk):
                     self._monitor_next_available_actions_line.set(
                         next_available_actions_line or "next_available_actions=unavailable"
                     )
-                    self._update_monitor_action_cards(action_line)
                     self._update_monitor_keycaps(
                         action_line=action_line,
                         next_available_actions_line=next_available_actions_line,
                     )
                     self._refresh_reward_tooltip_contents()
-                    self._update_monitor_metrics(training_line, reward_line=reward_line)
+                    self._refresh_phase_tooltip_contents()
+                    self._update_monitor_metrics(
+                        training_line,
+                        action_line=action_line,
+                        reward_line=reward_line,
+                    )
         self._refresh_monitor_control_state()
         self.after(200, self._poll_external_status)
 
@@ -2222,11 +2205,6 @@ class DqnRunnerGui(tk.Tk):
             if button is not None:
                 button.configure(state=state)
 
-    def _update_monitor_action_cards(self, action_line: str) -> None:
-        card_values = _monitor_action_card_values(action_line)
-        for key, variable in self._monitor_action_vars.items():
-            variable.set(card_values.get(key, "-"))
-
     def _update_monitor_keycaps(self, *, action_line: str, next_available_actions_line: str) -> None:
         available_actions = _parse_next_available_actions(next_available_actions_line)
         self._monitor_available_key_labels = {
@@ -2268,34 +2246,44 @@ class DqnRunnerGui(tk.Tk):
             text=_format_reward_breakdown_tooltip(self._monitor_reward_line.get())
         )
 
+    def _refresh_phase_tooltip_contents(self) -> None:
+        if self._phase_tooltip_label is None:
+            return
+        self._phase_tooltip_label.configure(
+            text=_format_phase_breakdown_tooltip(self._monitor_action_line.get())
+        )
+
+    def _create_monitor_tooltip(self, text: str) -> tuple[tk.Toplevel, tk.Label]:
+        tooltip = tk.Toplevel(self)
+        tooltip.withdraw()
+        tooltip.overrideredirect(True)
+        try:
+            tooltip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        label = tk.Label(
+            tooltip,
+            text=text,
+            justify="left",
+            anchor="w",
+            bg="#101821",
+            fg=_PALETTE["text"],
+            relief="solid",
+            bd=1,
+            padx=10,
+            pady=8,
+            font=("Consolas", 9),
+        )
+        label.pack()
+        return (tooltip, label)
+
     def _show_reward_tooltip(self, event: tk.Event[tk.Misc] | None = None) -> None:
         tooltip_text = _format_reward_breakdown_tooltip(self._monitor_reward_line.get())
         if self._reward_tooltip is None or not self._reward_tooltip.winfo_exists():
-            tooltip = tk.Toplevel(self)
-            tooltip.withdraw()
-            tooltip.overrideredirect(True)
-            try:
-                tooltip.attributes("-topmost", True)
-            except tk.TclError:
-                pass
-            label = tk.Label(
-                tooltip,
-                text=tooltip_text,
-                justify="left",
-                anchor="w",
-                bg="#101821",
-                fg=_PALETTE["text"],
-                relief="solid",
-                bd=1,
-                padx=10,
-                pady=8,
-                font=("Consolas", 9),
-            )
-            label.pack()
-            self._reward_tooltip = tooltip
-            self._reward_tooltip_label = label
+            self._reward_tooltip, self._reward_tooltip_label = self._create_monitor_tooltip(tooltip_text)
         else:
             self._refresh_reward_tooltip_contents()
+        self._hide_phase_tooltip(force=True)
         self._move_reward_tooltip(event)
         if self._reward_tooltip is not None:
             self._reward_tooltip.deiconify()
@@ -2306,6 +2294,24 @@ class DqnRunnerGui(tk.Tk):
         pointer_x = self.winfo_pointerx() + 16
         pointer_y = self.winfo_pointery() + 18
         self._reward_tooltip.geometry(f"+{pointer_x}+{pointer_y}")
+
+    def _show_phase_tooltip(self, event: tk.Event[tk.Misc] | None = None) -> None:
+        tooltip_text = _format_phase_breakdown_tooltip(self._monitor_action_line.get())
+        if self._phase_tooltip is None or not self._phase_tooltip.winfo_exists():
+            self._phase_tooltip, self._phase_tooltip_label = self._create_monitor_tooltip(tooltip_text)
+        else:
+            self._refresh_phase_tooltip_contents()
+        self._hide_reward_tooltip(force=True)
+        self._move_phase_tooltip(event)
+        if self._phase_tooltip is not None:
+            self._phase_tooltip.deiconify()
+
+    def _move_phase_tooltip(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        if self._phase_tooltip is None or not self._phase_tooltip.winfo_exists():
+            return
+        pointer_x = self.winfo_pointerx() + 16
+        pointer_y = self.winfo_pointery() + 18
+        self._phase_tooltip.geometry(f"+{pointer_x}+{pointer_y}")
 
     def _hide_reward_tooltip(
         self,
@@ -2320,6 +2326,20 @@ class DqnRunnerGui(tk.Tk):
             self._reward_tooltip.destroy()
         self._reward_tooltip = None
         self._reward_tooltip_label = None
+
+    def _hide_phase_tooltip(
+        self,
+        _event: tk.Event[tk.Misc] | None = None,
+        *,
+        force: bool = False,
+    ) -> None:
+        hovered_widget = self.winfo_containing(self.winfo_pointerx(), self.winfo_pointery())
+        if not force and hovered_widget in self._phase_hover_widgets:
+            return
+        if self._phase_tooltip is not None and self._phase_tooltip.winfo_exists():
+            self._phase_tooltip.destroy()
+        self._phase_tooltip = None
+        self._phase_tooltip_label = None
 
     def _refresh_monitor_control_state(self) -> None:
         control_file = self._external_control_file
@@ -2357,8 +2377,15 @@ class DqnRunnerGui(tk.Tk):
             f"session={snapshot.mode} advance={snapshot.advance_counter}"
         )
 
-    def _update_monitor_metrics(self, training_line: str, *, reward_line: str = "") -> None:
+    def _update_monitor_metrics(
+        self,
+        training_line: str,
+        *,
+        action_line: str = "",
+        reward_line: str = "",
+    ) -> None:
         status_values = _parse_status_values(training_line)
+        action_values = _monitor_action_card_values(action_line)
         now = time.monotonic()
         new_step_event = False
 
@@ -2441,6 +2468,7 @@ class DqnRunnerGui(tk.Tk):
             "episode": status_values.get("episode", "-"),
             "step": status_values.get("step", "-"),
             "reward": reward_value,
+            "phase": action_values.get("phase", "-"),
             "total": status_values.get("total", "-"),
             "epsilon": status_values.get("epsilon", "-"),
             "threat_epsilon": status_values.get("threat_epsilon", "-"),
@@ -2662,6 +2690,7 @@ class DqnRunnerGui(tk.Tk):
         self._stop_state_monitor()
         self._clear_monitor_files()
         self._hide_reward_tooltip(force=True)
+        self._hide_phase_tooltip(force=True)
         self.destroy()
 
 
