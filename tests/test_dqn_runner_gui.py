@@ -12,11 +12,15 @@ from src.gui.dqn_runner_gui import (
     _CHECKPOINT_DIR,
     _estimate_epsilon_eta_seconds,
     _format_epsilon_progress_text,
+    _format_reward_breakdown_tooltip,
     _format_duration_seconds,
     _initial_browse_dir,
     _is_boolean_flag,
     _get_subparser,
     _iter_parser_actions,
+    _monitor_action_card_values,
+    _monitor_key_label_for_action,
+    _parse_next_available_actions,
     _parse_episode_progress,
     _resolve_reward_metric_value,
     _run_dqn_preset_overrides,
@@ -154,6 +158,60 @@ def test_resolve_reward_metric_value_uses_reward_line_total_when_training_waits(
         previous_value="-",
     )
     assert reward_value == "+0.420"
+
+
+def test_monitor_action_card_values_cover_dqn_and_hybrid_payloads() -> None:
+    assert _monitor_action_card_values("action=move_up reason=dqn_select_action loss=0.012345") == {
+        "action": "move_up",
+        "reason": "dqn_select_action",
+        "phase": "-",
+        "target": "-",
+        "loss": "0.012345",
+    }
+    assert _monitor_action_card_values(
+        "action=move_right phase=collect_siphons next_target=(3,4) reason=scripted_phase_only"
+    ) == {
+        "action": "move_right",
+        "reason": "scripted_phase_only",
+        "phase": "collect_siphons",
+        "target": "(3,4)",
+        "loss": "-",
+    }
+
+
+def test_parse_next_available_actions_preserves_full_input_set() -> None:
+    parsed = _parse_next_available_actions(
+        "next_available_actions=move_up,move_left,move_right,space,prog_slot_1,prog_slot_9,prog_slot_10"
+    )
+
+    assert parsed == (
+        "move_up",
+        "move_left",
+        "move_right",
+        "space",
+        "prog_slot_1",
+        "prog_slot_9",
+        "prog_slot_10",
+    )
+
+
+def test_monitor_key_label_for_action_maps_to_visual_keycaps() -> None:
+    assert _monitor_key_label_for_action("move_down") == "DOWN"
+    assert _monitor_key_label_for_action("prog_slot_10") == "0"
+    assert _monitor_key_label_for_action("confirm") is None
+
+
+def test_format_reward_breakdown_tooltip_formats_reward_components() -> None:
+    tooltip = _format_reward_breakdown_tooltip(
+        "reward total=+0.420 survival=+0.050 objective=collect_siphons"
+    )
+
+    assert "reward breakdown" in tooltip
+    assert "total" in tooltip
+    assert "+0.420" in tooltip
+    assert "survival" in tooltip
+    assert "objective" in tooltip
+    assert "collect_siphons" in tooltip
 
 
 def test_strip_textual_markup_removes_color_tokens_from_board_text() -> None:

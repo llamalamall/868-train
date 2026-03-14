@@ -9,6 +9,7 @@ from src.hybrid.runner import (
     _build_meta_reward_weights,
     _build_parser,
     _format_monitor_action_line,
+    _format_monitor_actions,
     _format_monitor_training_line,
     _validate_args,
 )
@@ -210,6 +211,15 @@ def test_format_monitor_action_line_includes_phase_and_target_coordinates() -> N
         "action=move_right phase=collect_siphons next_target=(3,4) "
         "reason=scripted_phase_only"
     )
+
+
+def test_hybrid_format_monitor_actions_preserves_full_action_list() -> None:
+    formatted = _format_monitor_actions(
+        ("move_up", "move_down", "move_left", "move_right", "space", "prog_slot_10"),
+        limit=2,
+    )
+
+    assert formatted == "move_up,move_down,move_left,move_right,space,prog_slot_10"
 
 
 def test_format_monitor_training_line_includes_threat_epsilon_when_available() -> None:
