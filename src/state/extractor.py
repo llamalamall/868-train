@@ -1034,7 +1034,7 @@ def _extract_map_state(
             0x0C,  # credits
             0x10,  # energy
             0x14,  # prog id
-            0x18,  # wall state
+            0x18,  # wall state / depleted-siphon marker
             0x1C,  # threat
             0x20,  # points
             0x24,  # siphon flag

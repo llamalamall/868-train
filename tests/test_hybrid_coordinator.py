@@ -384,6 +384,70 @@ def test_resource_targets_use_precomputed_energy_credit_layers() -> None:
     assert target == GridPosition(2, 1)
 
 
+def test_resource_targets_skip_previously_siphoned_non_wall_cells() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    cells = tuple(
+        MapCellState(
+            position=GridPosition(x=x, y=y),
+            cell_type=0,
+            tile_variant=0,
+            wall_state=1 if (x == 1 and y == 1) else 0,
+            is_wall=False,
+        )
+        for y in range(6)
+        for x in range(6)
+    )
+    state = _build_state(
+        player=GridPosition(0, 1),
+        cells=cells,
+        resource_cells=(
+            ResourceCellState(position=GridPosition(1, 1), credits=3),
+            ResourceCellState(position=GridPosition(4, 1), credits=2),
+        ),
+    )
+
+    target = coordinator.resolve_target_for_phase(
+        state=state,
+        phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+    )
+    assert target == GridPosition(3, 1)
+
+
+def test_resource_targets_skip_depleted_prog_walls() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    walls = (WallCellState(position=GridPosition(2, 2), wall_type="prog_wall", wall_state=0, prog_id=8),)
+    cells = tuple(
+        MapCellState(
+            position=GridPosition(x=x, y=y),
+            cell_type=0,
+            tile_variant=0,
+            wall_state=0,
+            is_wall=(x == 2 and y == 2),
+            prog_id=8 if (x == 2 and y == 2) else None,
+            points=0,
+        )
+        for y in range(6)
+        for x in range(6)
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        cells=cells,
+        walls=walls,
+    )
+
+    target = coordinator.resolve_target_for_phase(
+        state=state,
+        phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+    )
+    assert target is None
+
+
 def test_resource_target_arrival_avoids_siphon_when_siphons_depleted() -> None:
     space_coordinator = HybridCoordinator(
         meta_controller=_StubMetaController(),
@@ -494,7 +558,38 @@ def test_prog_and_point_wall_targets_resolve_to_adjacent_walkable_tiles() -> Non
     }
 
 
-def test_scripted_run_does_not_select_siphon_when_siphons_are_depleted() -> None:
+def test_collect_resources_resolution_reverts_to_collect_siphons_when_inventory_is_empty() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    state = _build_state(
+        player=GridPosition(1, 1),
+        siphons=(GridPosition(3, 1),),
+        resource_cells=(ResourceCellState(position=GridPosition(1, 1), credits=3),),
+        exit_position=GridPosition(5, 5),
+        player_siphons=0,
+    )
+
+    resolved_phase, resolved_target = coordinator.resolve_objective_for_phase(
+        state=state,
+        phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+        scripted_mode=True,
+    )
+
+    assert resolved_phase == ObjectivePhase.COLLECT_SIPHONS
+    assert resolved_target == GridPosition(3, 1)
+    assert (
+        coordinator.resolve_target_for_phase(
+            state=state,
+            phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+            scripted_mode=True,
+        )
+        == GridPosition(3, 1)
+    )
+
+
+def test_collect_resources_decision_exits_when_siphons_are_depleted_and_none_remain_on_map() -> None:
     coordinator = HybridCoordinator(
         meta_controller=_StubMetaController(),
         threat_controller=_StubThreatController(),
@@ -510,15 +605,26 @@ def test_scripted_run_does_not_select_siphon_when_siphons_are_depleted() -> None
         player_siphons=0,
     )
 
+    resolved_phase, resolved_target = coordinator.resolve_objective_for_phase(
+        state=state,
+        phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+        scripted_mode=True,
+    )
+
+    assert resolved_phase == ObjectivePhase.EXIT_SECTOR
+    assert resolved_target == GridPosition(5, 5)
+
     first_trace = coordinator.decide(
         state=state,
         available_actions=("space", "move_right", "move_up"),
-        use_meta_controller=False,
+        use_meta_controller=True,
         use_threat_controller=False,
         explore_meta=False,
         explore_threat=False,
     )
-    assert first_trace.decision.objective.target_position == GridPosition(1, 1)
+    assert first_trace.decision.objective.phase == ObjectivePhase.EXIT_SECTOR
+    assert "phase_resolved_to_exit_sector" in first_trace.decision.objective.reason
+    assert first_trace.decision.objective.target_position == GridPosition(5, 5)
     assert first_trace.decision.action == "move_right"
 
     second_target = coordinator.resolve_target_for_phase(
@@ -526,7 +632,7 @@ def test_scripted_run_does_not_select_siphon_when_siphons_are_depleted() -> None
         phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
         scripted_mode=True,
     )
-    assert second_target == GridPosition(1, 1)
+    assert second_target == GridPosition(5, 5)
 
 
 def test_resource_target_arrival_can_siphon_when_player_has_siphons_even_if_map_has_none() -> None:

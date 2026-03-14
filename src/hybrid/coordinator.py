@@ -73,8 +73,12 @@ def _cell_index(state: GameStateSnapshot) -> dict[GridPosition, object]:
 def _resource_value_index(state: GameStateSnapshot) -> dict[GridPosition, tuple[int, int, int]]:
     if state.map.status != "ok":
         return {}
+    cells = _cell_index(state)
     values: dict[GridPosition, tuple[int, int, int]] = {}
     for resource in state.map.resource_cells:
+        raw_cell = cells.get(resource.position)
+        if raw_cell is not None and _cell_target_already_siphoned(raw_cell):
+            continue
         values[resource.position] = (
             max(int(resource.credits), 0),
             max(int(resource.energy), 0),
@@ -138,8 +142,12 @@ def _credit_energy_cluster_total(
     total = 0
     for candidate in (position, *_adjacent_positions(position)):
         cell = cell_index.get(candidate)
-        cell_credits = max(int(getattr(cell, "credits", 0)), 0) if cell is not None else 0
-        cell_energy = max(int(getattr(cell, "energy", 0)), 0) if cell is not None else 0
+        if cell is not None and _cell_target_already_siphoned(cell):
+            cell_credits = 0
+            cell_energy = 0
+        else:
+            cell_credits = max(int(getattr(cell, "credits", 0)), 0) if cell is not None else 0
+            cell_energy = max(int(getattr(cell, "energy", 0)), 0) if cell is not None else 0
         resource = resource_values.get(candidate)
         resource_credits = resource[0] if resource is not None else 0
         resource_energy = resource[1] if resource is not None else 0
@@ -152,6 +160,20 @@ def _count_enemies(state: GameStateSnapshot) -> int:
     if state.map.status != "ok":
         return 0
     return sum(1 for enemy in state.map.enemies if enemy.in_bounds)
+
+
+def _cell_target_already_siphoned(cell: object) -> bool:
+    # Decompiled map state uses cell +0x18 as wall durability for walls and as a
+    # depleted marker once a non-wall resource tile has already been siphoned.
+    wall_state = int(getattr(cell, "wall_state", 0))
+    is_wall = bool(getattr(cell, "is_wall", False) or hasattr(cell, "wall_type"))
+    if is_wall:
+        has_payload = bool(
+            (getattr(cell, "prog_id", None) is not None and int(getattr(cell, "prog_id", 0)) > 0)
+            or max(int(getattr(cell, "points", 0)), 0) > 0
+        )
+        return has_payload and wall_state <= 0
+    return wall_state > 0
 
 
 def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
@@ -170,12 +192,18 @@ def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
             return
         if position in walls:
             return
+        cell = cells.get(position)
+        if cell is not None and _cell_target_already_siphoned(cell):
+            return
         bounded = max(int(weight), 0)
         current = weighted_targets.get(position)
         if current is None or bounded > current:
             weighted_targets[position] = bounded
 
     for cell in state.map.resource_cells:
+        raw_cell = cells.get(cell.position)
+        if raw_cell is not None and _cell_target_already_siphoned(raw_cell):
+            continue
         cluster_total = _credit_energy_cluster_total(
             position=cell.position,
             cell_index=cells,
@@ -191,6 +219,8 @@ def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
         add_target(cell.position, weight=cluster_total + points_total)
 
     for cell in state.map.cells:
+        if _cell_target_already_siphoned(cell):
+            continue
         cluster_total = _credit_energy_cluster_total(
             position=cell.position,
             cell_index=cells,
@@ -226,6 +256,8 @@ def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
             add_target(adjacent, weight=adjacent_cluster + wall_weight)
 
     for wall in state.map.walls:
+        if _cell_target_already_siphoned(wall):
+            continue
         has_prog = bool(wall.prog_id is not None and wall.prog_id > 0)
         points_total = max(int(wall.points), 0)
         if not has_prog and points_total <= 0:
@@ -298,23 +330,60 @@ class HybridCoordinator:
         phase: ObjectivePhase,
         scripted_mode: bool = False,
     ) -> GridPosition | None:
-        if state.map.status != "ok" or state.map.player_position is None:
-            return None
+        _, target = self.resolve_objective_for_phase(
+            state=state,
+            phase=phase,
+            scripted_mode=scripted_mode,
+        )
+        return target
 
-        if phase == ObjectivePhase.COLLECT_SIPHONS:
-            return self._nearest_target(
-                state=state,
-                candidates=tuple(state.map.siphons),
+    def resolve_objective_for_phase(
+        self,
+        *,
+        state: GameStateSnapshot,
+        phase: ObjectivePhase,
+        scripted_mode: bool = False,
+    ) -> tuple[ObjectivePhase, GridPosition | None]:
+        if state.map.status != "ok" or state.map.player_position is None:
+            return (phase, None)
+
+        resolved_phase = self._resolved_phase_for_state(state=state, phase=phase)
+
+        if resolved_phase == ObjectivePhase.COLLECT_SIPHONS:
+            return (
+                resolved_phase,
+                self._nearest_target(
+                    state=state,
+                    candidates=tuple(state.map.siphons),
+                ),
             )
-        if phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
+        if resolved_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
             candidates = self._available_resource_targets(state=state)
-            return self._nearest_target(
-                state=state,
-                candidates=candidates,
+            return (
+                resolved_phase,
+                self._nearest_target(
+                    state=state,
+                    candidates=candidates,
+                ),
             )
-        if phase == ObjectivePhase.EXIT_SECTOR:
-            return state.map.exit_position
-        return None
+        if resolved_phase == ObjectivePhase.EXIT_SECTOR:
+            return (resolved_phase, state.map.exit_position)
+        return (resolved_phase, None)
+
+    def _resolved_phase_for_state(
+        self,
+        *,
+        state: GameStateSnapshot,
+        phase: ObjectivePhase,
+    ) -> ObjectivePhase:
+        if phase != ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS or state.map.status != "ok":
+            return phase
+        player_siphons = self._player_siphon_count(state)
+        if player_siphons is None or player_siphons > 0:
+            return phase
+        if state.map.siphons:
+            return ObjectivePhase.COLLECT_SIPHONS
+        return ObjectivePhase.EXIT_SECTOR
 
     def meta_feature_vector(
         self,
@@ -456,10 +525,9 @@ class HybridCoordinator:
         scripted_mode = not bool(use_meta_controller)
 
         allowed_phases = self.allowed_meta_phases(state)
-        scripted_phase = allowed_phases[0]
-        scripted_target = self.resolve_target_for_phase(
+        scripted_phase, scripted_target = self.resolve_objective_for_phase(
             state=state,
-            phase=scripted_phase,
+            phase=allowed_phases[0],
             scripted_mode=scripted_mode,
         )
         meta_features = self.meta_feature_vector(
@@ -481,17 +549,19 @@ class HybridCoordinator:
         if selected_phase not in allowed_phases:
             selected_phase = scripted_phase
             meta_reason = f"{meta_reason}|invalid_phase_fallback"
-        objective_target = self._target_for_decision_phase(
+        requested_phase = selected_phase
+        selected_phase, objective_target = self._objective_for_decision_phase(
             state=state,
             phase=selected_phase,
             scripted_mode=scripted_mode,
         )
+        if selected_phase != requested_phase:
+            meta_reason = f"{meta_reason}|phase_resolved_to_{selected_phase.value}"
         objective_distance = self.objective_distance(state=state, target=objective_target)
         if selected_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS and objective_target is None:
-            selected_phase = ObjectivePhase.EXIT_SECTOR
-            objective_target = self.resolve_target_for_phase(
+            selected_phase, objective_target = self._objective_for_decision_phase(
                 state=state,
-                phase=selected_phase,
+                phase=ObjectivePhase.EXIT_SECTOR,
                 scripted_mode=scripted_mode,
             )
             objective_distance = self.objective_distance(state=state, target=objective_target)
@@ -569,36 +639,37 @@ class HybridCoordinator:
         if self._locked_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS and self._locked_target == target:
             self._locked_target = None
 
-    def _target_for_decision_phase(
+    def _objective_for_decision_phase(
         self,
         *,
         state: GameStateSnapshot,
         phase: ObjectivePhase,
         scripted_mode: bool,
-    ) -> GridPosition | None:
-        if self._locked_phase is not None and self._locked_phase != phase:
+    ) -> tuple[ObjectivePhase, GridPosition | None]:
+        resolved_phase = self._resolved_phase_for_state(state=state, phase=phase)
+        if self._locked_phase is not None and self._locked_phase != resolved_phase:
             self._locked_phase = None
             self._locked_target = None
         if (
-            self._locked_phase == phase
+            self._locked_phase == resolved_phase
             and self._locked_target is not None
             and self._is_target_valid_for_phase(
                 state=state,
-                phase=phase,
+                phase=resolved_phase,
                 target=self._locked_target,
                 scripted_mode=scripted_mode,
             )
         ):
-            return self._locked_target
+            return (resolved_phase, self._locked_target)
 
-        resolved = self.resolve_target_for_phase(
+        resolved_phase, resolved_target = self.resolve_objective_for_phase(
             state=state,
-            phase=phase,
+            phase=resolved_phase,
             scripted_mode=scripted_mode,
         )
-        self._locked_phase = phase
-        self._locked_target = resolved
-        return resolved
+        self._locked_phase = resolved_phase
+        self._locked_target = resolved_target
+        return (resolved_phase, resolved_target)
 
     def _is_target_valid_for_phase(
         self,

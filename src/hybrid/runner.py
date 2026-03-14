@@ -824,10 +824,9 @@ def _run_rollouts(
             threat_reward_total += float(threat_breakdown.total)
 
             next_allowed_phases = coordinator.allowed_meta_phases(next_state)
-            next_scripted_phase = next_allowed_phases[0]
-            next_target = coordinator.resolve_target_for_phase(
+            next_scripted_phase, next_target = coordinator.resolve_objective_for_phase(
                 state=next_state,
-                phase=next_scripted_phase,
+                phase=next_allowed_phases[0],
             )
             next_meta_features = coordinator.meta_feature_vector(
                 state=next_state,
