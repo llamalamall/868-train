@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 import pytest
 
 from src.env import dqn_policy_runner
 from src.hybrid import runner as hybrid_runner
 from src.gui.dqn_runner_gui import (
+    _AUTO_LATEST_BETA_META_CHECKPOINT,
     _HYBRID_CHECKPOINT_DIR,
     _SMOKE_TEST_REWARD_DESTS,
     _CHECKPOINT_DIR,
@@ -25,12 +29,48 @@ from src.gui.dqn_runner_gui import (
     _parse_next_available_actions,
     _parse_episode_progress,
     _resolve_reward_metric_value,
+    _resolve_preset_overrides,
     _run_dqn_preset_overrides,
     _run_hybrid_preset_overrides,
     _strip_textual_markup,
     _sort_form_actions,
 )
 from src.training.rewards import RewardWeights
+
+
+def _write_hybrid_run(
+    root: Path,
+    *,
+    name: str,
+    command: str,
+    saved_at_utc: str,
+    episodes_requested: int = 10,
+    episodes_completed: int = 10,
+) -> Path:
+    run_dir = root / name
+    run_dir.mkdir()
+    (run_dir / "hybrid_config.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "command": command,
+            }
+        ),
+        encoding="utf-8",
+    )
+    (run_dir / "training_state.json").write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "episodes_requested": episodes_requested,
+                "episodes_completed": episodes_completed,
+                "saved_at_utc": saved_at_utc,
+                "results": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+    return run_dir
 
 
 def test_sort_form_actions_prioritizes_exe_and_checkpoint() -> None:
@@ -81,10 +121,117 @@ def test_run_hybrid_presets_include_expected_profiles() -> None:
     assert "gate a smoke" in movement
     assert "defaults" in meta
     assert "gate b baseline" in meta
+    assert "beta efficient warmstart" in meta
     assert "defaults" in full
     assert "gate c baseline" in full
+    assert "beta full fixed meta" in full
+    assert "beta full long warmup" in full
     assert "defaults" in evaluate
     assert "eval quick" in evaluate
+    assert "beta verification" in evaluate
+
+
+def test_beta_meta_preset_uses_expected_efficiency_settings() -> None:
+    presets = _run_hybrid_preset_overrides(command_name="train-meta-no-enemies")
+    profile = presets["beta efficient warmstart"]
+
+    assert profile == {
+        "episodes": 120,
+        "max_steps": 320,
+        "no_enemies": True,
+        "meta_learning_rate": 0.0005,
+        "meta_epsilon_decay_steps": 3000,
+        "run_tag": "hybrid-meta-beta-efficient",
+    }
+
+
+def test_beta_full_presets_resolve_latest_beta_meta_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    older_beta = _write_hybrid_run(
+        tmp_path,
+        name="20260314-03-hybrid-beta",
+        command="train-meta-no-enemies",
+        saved_at_utc="2026-03-14T14:14:50Z",
+    )
+    latest_beta = _write_hybrid_run(
+        tmp_path,
+        name="20260314-07-hybrid-beta",
+        command="train-meta-no-enemies",
+        saved_at_utc="2026-03-14T17:20:00Z",
+    )
+    _write_hybrid_run(
+        tmp_path,
+        name="20260314-04-hybrid-full-beta",
+        command="train-full-hierarchical",
+        saved_at_utc="2026-03-14T14:46:10Z",
+    )
+    monkeypatch.setattr("src.gui.dqn_runner_gui._HYBRID_CHECKPOINT_DIR", tmp_path)
+
+    presets = _run_hybrid_preset_overrides(command_name="train-full-hierarchical")
+    fixed_meta = _resolve_preset_overrides(overrides=presets["beta full fixed meta"])
+    long_warmup = _resolve_preset_overrides(overrides=presets["beta full long warmup"])
+
+    assert fixed_meta["warmstart_checkpoint"] == str(latest_beta)
+    assert fixed_meta["episodes"] == 320
+    assert fixed_meta["joint_finetune"] is False
+    assert fixed_meta["meta_freeze_episodes"] == 0
+    assert fixed_meta["threat_learning_rate"] == pytest.approx(0.0007)
+    assert fixed_meta["threat_epsilon_start"] == pytest.approx(0.80)
+    assert fixed_meta["threat_epsilon_end"] == pytest.approx(0.05)
+    assert fixed_meta["threat_epsilon_decay_steps"] == 15000
+    assert fixed_meta["run_tag"] == "hybrid-full-beta-fixedmeta"
+    assert long_warmup["warmstart_checkpoint"] == str(latest_beta)
+    assert long_warmup["joint_finetune"] is True
+    assert long_warmup["meta_freeze_episodes"] == 80
+    assert long_warmup["run_tag"] == "hybrid-full-beta-longwarmup"
+    assert older_beta != latest_beta
+
+
+def test_resolve_preset_overrides_falls_back_to_latest_non_beta_meta_checkpoint(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_hybrid_run(
+        tmp_path,
+        name="20260314-03-hybrid-beta",
+        command="train-meta-no-enemies",
+        saved_at_utc="2026-03-14T14:14:50Z",
+        episodes_requested=120,
+        episodes_completed=60,
+    )
+    latest_non_beta = _write_hybrid_run(
+        tmp_path,
+        name="20260314-02-hybrid-quicktune",
+        command="train-meta-no-enemies",
+        saved_at_utc="2026-03-14T15:00:00Z",
+    )
+    monkeypatch.setattr("src.gui.dqn_runner_gui._HYBRID_CHECKPOINT_DIR", tmp_path)
+
+    resolved = _resolve_preset_overrides(
+        overrides={"warmstart_checkpoint": _AUTO_LATEST_BETA_META_CHECKPOINT}
+    )
+
+    assert resolved["warmstart_checkpoint"] == str(latest_non_beta)
+
+
+def test_resolve_preset_overrides_raises_when_no_completed_meta_checkpoint_exists(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr("src.gui.dqn_runner_gui._HYBRID_CHECKPOINT_DIR", tmp_path)
+
+    with pytest.raises(ValueError, match="No completed train-meta-no-enemies hybrid checkpoints found"):
+        _resolve_preset_overrides(overrides={"warmstart_checkpoint": _AUTO_LATEST_BETA_META_CHECKPOINT})
+
+
+def test_beta_eval_preset_uses_verification_settings() -> None:
+    presets = _run_hybrid_preset_overrides(command_name="eval-hybrid")
+    profile = presets["beta verification"]
+
+    assert profile == {
+        "episodes": 30,
+        "max_steps": 450,
+        "no_enemies": False,
+    }
 
 
 def test_phase_progression_profile_ignores_enemy_rewards() -> None:

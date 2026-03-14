@@ -15,6 +15,7 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
@@ -58,6 +59,7 @@ _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
 _TEXTUAL_MARKUP_PATTERN = re.compile(r"\[[^\]]+\]")
 _TEXTUAL_MARKUP_SEGMENT_PATTERN = re.compile(r"\[([a-zA-Z0-9_]+)\](.*?)\[/\]", re.DOTALL)
 _REWARD_HISTORY_LIMIT = 500
+_AUTO_LATEST_BETA_META_CHECKPOINT = "__AUTO_LATEST_BETA_META_CHECKPOINT__"
 _MONITOR_KEY_LABELS: tuple[str, ...] = (
     "1",
     "2",
@@ -394,6 +396,14 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "meta_learning_rate": 0.0005,
                 "meta_epsilon_decay_steps": 3000,
             },
+            "beta efficient warmstart": {
+                "episodes": 120,
+                "max_steps": 320,
+                "no_enemies": True,
+                "meta_learning_rate": 0.0005,
+                "meta_epsilon_decay_steps": 3000,
+                "run_tag": "hybrid-meta-beta-efficient",
+            },
         }
     if command_name == "train-full-hierarchical":
         return {
@@ -414,6 +424,34 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "joint_finetune": True,
                 "threat_learning_rate": 0.0007,
             },
+            "beta full fixed meta": {
+                "episodes": 320,
+                "max_steps": 450,
+                "no_enemies": False,
+                "warmstart_checkpoint": _AUTO_LATEST_BETA_META_CHECKPOINT,
+                "meta_freeze_episodes": 0,
+                "joint_finetune": False,
+                "threat_learning_rate": 0.0007,
+                "threat_epsilon_start": 0.80,
+                "threat_epsilon_end": 0.05,
+                "threat_epsilon_decay_steps": 15000,
+                "threat_trigger_distance": 2,
+                "run_tag": "hybrid-full-beta-fixedmeta",
+            },
+            "beta full long warmup": {
+                "episodes": 320,
+                "max_steps": 450,
+                "no_enemies": False,
+                "warmstart_checkpoint": _AUTO_LATEST_BETA_META_CHECKPOINT,
+                "meta_freeze_episodes": 80,
+                "joint_finetune": True,
+                "threat_learning_rate": 0.0007,
+                "threat_epsilon_start": 0.80,
+                "threat_epsilon_end": 0.05,
+                "threat_epsilon_decay_steps": 15000,
+                "threat_trigger_distance": 2,
+                "run_tag": "hybrid-full-beta-longwarmup",
+            },
         }
     if command_name == "eval-hybrid":
         return {
@@ -428,8 +466,98 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "max_steps": 500,
                 "no_enemies": False,
             },
+            "beta verification": {
+                "episodes": 30,
+                "max_steps": 450,
+                "no_enemies": False,
+            },
         }
     return {"defaults": {}}
+
+
+def _parse_saved_at_utc(value: object, *, fallback_path: Path) -> datetime:
+    if isinstance(value, str):
+        normalized = value.strip()
+        if normalized:
+            try:
+                parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+                if parsed.tzinfo is None:
+                    return parsed.replace(tzinfo=timezone.utc)
+                return parsed
+            except ValueError:
+                pass
+    return datetime.fromtimestamp(fallback_path.stat().st_mtime, tz=timezone.utc)
+
+
+def _is_completed_training_state(training_state: dict[str, object]) -> bool:
+    requested_raw = training_state.get("episodes_requested")
+    completed_raw = training_state.get("episodes_completed")
+    results_raw = training_state.get("results")
+    try:
+        requested = int(requested_raw) if requested_raw is not None else 0
+    except (TypeError, ValueError):
+        requested = 0
+    try:
+        completed = int(completed_raw) if completed_raw is not None else 0
+    except (TypeError, ValueError):
+        completed = 0
+    if requested <= 0 and isinstance(results_raw, list):
+        requested = len(results_raw)
+    if completed <= 0 and isinstance(results_raw, list):
+        completed = len(results_raw)
+    return requested > 0 and completed >= requested
+
+
+def _latest_completed_meta_checkpoint(*, checkpoint_root: Path | None = None) -> Path:
+    resolved_root = checkpoint_root or _HYBRID_CHECKPOINT_DIR
+    if not resolved_root.exists():
+        raise ValueError(
+            f"No completed train-meta-no-enemies hybrid checkpoints found under {resolved_root}."
+        )
+    candidates: list[tuple[datetime, Path, bool]] = []
+    for child in resolved_root.iterdir():
+        if not child.is_dir():
+            continue
+        config_path = child / "hybrid_config.json"
+        training_state_path = child / "training_state.json"
+        if not config_path.exists() or not training_state_path.exists():
+            continue
+        try:
+            config = json.loads(config_path.read_text(encoding="utf-8"))
+            training_state = json.loads(training_state_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(config, dict) or not isinstance(training_state, dict):
+            continue
+        if str(config.get("command") or "").strip() != "train-meta-no-enemies":
+            continue
+        if not _is_completed_training_state(training_state):
+            continue
+        saved_at = _parse_saved_at_utc(training_state.get("saved_at_utc"), fallback_path=child)
+        candidates.append((saved_at, child, "beta" in child.name.lower()))
+
+    if not candidates:
+        raise ValueError(
+            f"No completed train-meta-no-enemies hybrid checkpoints found under {resolved_root}."
+        )
+
+    beta_candidates = [item for item in candidates if item[2]]
+    selected_pool = beta_candidates or candidates
+    _saved_at, selected_path, _is_beta = max(selected_pool, key=lambda item: (item[0], item[1].name))
+    return selected_path
+
+
+def _resolve_preset_overrides(*, overrides: dict[str, object]) -> dict[str, object]:
+    resolved: dict[str, object] = {}
+    latest_meta_checkpoint: str | None = None
+    for dest, value in overrides.items():
+        if value == _AUTO_LATEST_BETA_META_CHECKPOINT:
+            if latest_meta_checkpoint is None:
+                latest_meta_checkpoint = str(_latest_completed_meta_checkpoint())
+            resolved[dest] = latest_meta_checkpoint
+            continue
+        resolved[dest] = value
+    return resolved
 
 
 def _validate_text_input(action: argparse.Action, *, value: str, field_name: str) -> None:
@@ -830,6 +958,11 @@ class _ArgForm(ttk.Frame):
         overrides = self._presets.get(preset_name)
         if overrides is None:
             return
+        try:
+            resolved_overrides = _resolve_preset_overrides(overrides=overrides)
+        except ValueError as error:
+            messagebox.showerror("Preset Error", str(error), parent=self)
+            return
 
         for field in self._fields:
             action = field.action
@@ -842,7 +975,7 @@ class _ArgForm(ttk.Frame):
             else:
                 field.variable.set(str(default))
 
-        for dest, value in overrides.items():
+        for dest, value in resolved_overrides.items():
             field = self._field_by_dest.get(dest)
             if field is None:
                 continue

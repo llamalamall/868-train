@@ -6,8 +6,11 @@ import pytest
 
 from src.hybrid.rewards import HybridMetaRewardWeights
 from src.hybrid.runner import (
+    HybridEpisodeSummary,
+    _build_hybrid_config_payload,
     _build_meta_reward_weights,
     _build_parser,
+    _build_training_state_payload,
     _format_monitor_action_line,
     _format_monitor_actions,
     _format_monitor_training_line,
@@ -198,6 +201,128 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
         sector_advance=1.3,
         final_sector_win=30.0,
     )
+
+
+def test_build_hybrid_config_payload_includes_run_tag_and_warmstart_metadata() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "train-full-hierarchical",
+            "--warmstart-checkpoint",
+            "artifacts/hybrid/20260314-03-hybrid-beta",
+            "--run-tag",
+            "hybrid-full-beta-fixedmeta",
+            "--episodes",
+            "320",
+            "--no-joint-finetune",
+        ]
+    )
+
+    payload = _build_hybrid_config_payload(
+        args,
+        command="train-full-hierarchical",
+        restore_save_source=None,
+        meta_reward_weights=_build_meta_reward_weights(args),
+    )
+
+    assert payload["run_tag"] == "hybrid-full-beta-fixedmeta"
+    assert payload["warmstart_checkpoint"] == "artifacts/hybrid/20260314-03-hybrid-beta"
+    assert payload["resume_checkpoint"] is None
+    assert payload["meta_reward_weights"]["final_sector_win"] == pytest.approx(25.0)
+
+
+def test_build_hybrid_config_payload_records_resume_checkpoint_for_meta_training() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "train-meta-no-enemies",
+            "--resume-checkpoint",
+            "artifacts/hybrid/20260314-03-hybrid-beta",
+            "--run-tag",
+            "hybrid-meta-beta-efficient",
+        ]
+    )
+
+    payload = _build_hybrid_config_payload(
+        args,
+        command="train-meta-no-enemies",
+        restore_save_source=None,
+        meta_reward_weights=_build_meta_reward_weights(args),
+    )
+
+    assert payload["run_tag"] == "hybrid-meta-beta-efficient"
+    assert payload["warmstart_checkpoint"] is None
+    assert payload["resume_checkpoint"] == "artifacts/hybrid/20260314-03-hybrid-beta"
+
+
+def test_build_training_state_payload_includes_summary_and_extended_episode_fields() -> None:
+    results = (
+        HybridEpisodeSummary(
+            episode_id="episode-00001",
+            steps=320,
+            done=False,
+            terminal_reason=None,
+            total_reward=18.0,
+            meta_reward_total=12.0,
+            threat_reward_total=6.0,
+            invalid_actions=5,
+            premature_exit_attempts=0,
+            route_length_total=180,
+            route_replans=7,
+            hit_step_limit=True,
+            terminal_classification="step_limit",
+            phase_switches=4,
+            threat_active_steps=9,
+        ),
+        HybridEpisodeSummary(
+            episode_id="episode-00002",
+            steps=210,
+            done=True,
+            terminal_reason="state:start_screen",
+            total_reward=24.0,
+            meta_reward_total=18.0,
+            threat_reward_total=6.0,
+            invalid_actions=2,
+            premature_exit_attempts=1,
+            route_length_total=120,
+            route_replans=3,
+            hit_step_limit=False,
+            terminal_classification="non_death_terminal",
+            phase_switches=2,
+            threat_active_steps=0,
+        ),
+    )
+
+    payload = _build_training_state_payload(
+        results=results,
+        episodes_requested=2,
+        max_steps=320,
+        saved_at_utc="2026-03-14T15:00:00Z",
+    )
+
+    assert payload["episodes_requested"] == 2
+    assert payload["episodes_completed"] == 2
+    assert payload["max_steps_per_episode"] == 320
+    assert payload["saved_at_utc"] == "2026-03-14T15:00:00Z"
+    assert payload["summary"]["episodes"] == 2
+    assert payload["summary"]["done_episodes"] == 1
+    assert payload["summary"]["non_death_terminal_episodes"] == 1
+    assert payload["summary"]["hit_step_limit_episodes"] == 1
+    assert payload["summary"]["non_death_terminal_rate"] == pytest.approx(0.5)
+    assert payload["summary"]["hit_step_limit_rate"] == pytest.approx(0.5)
+    assert payload["summary"]["terminal_reason_counts"] == {
+        "none": 1,
+        "state:start_screen": 1,
+    }
+    assert payload["summary"]["terminal_classification_counts"] == {
+        "non_death_terminal": 1,
+        "step_limit": 1,
+    }
+    assert payload["results"][0]["hit_step_limit"] is True
+    assert payload["results"][0]["terminal_classification"] == "step_limit"
+    assert payload["results"][0]["phase_switches"] == 4
+    assert payload["results"][0]["threat_active_steps"] == 9
+    assert payload["results"][1]["terminal_classification"] == "non_death_terminal"
 
 
 def test_format_monitor_action_line_includes_phase_and_target_coordinates() -> None:

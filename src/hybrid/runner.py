@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import re
 import time
+from collections import Counter
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -52,7 +53,7 @@ def _terminal_is_fail(reason: object) -> bool:
     normalized = reason.strip().lower()
     if not normalized:
         return False
-    return any(token in normalized for token in ("fail", "loss", "dead", "start_screen"))
+    return any(token in normalized for token in ("fail", "loss", "dead", "player_health"))
 
 
 def _format_monitor_target(target: object) -> str:
@@ -129,6 +130,10 @@ class HybridEpisodeSummary:
     premature_exit_attempts: int
     route_length_total: int
     route_replans: int
+    hit_step_limit: bool
+    terminal_classification: str
+    phase_switches: int
+    threat_active_steps: int
 
 
 def _add_common_runner_args(
@@ -636,15 +641,96 @@ def _format_reward_line(
     )
 
 
+def _classify_terminal_reason(
+    *,
+    done: bool,
+    terminal_reason: str | None,
+    hit_step_limit: bool,
+) -> str:
+    if hit_step_limit:
+        return "step_limit"
+    if not done:
+        return "incomplete"
+    normalized = str(terminal_reason or "").strip().lower()
+    if not normalized:
+        return "terminal_other"
+    if normalized in {"state:start_screen", "state:victory"}:
+        return "non_death_terminal"
+    if _terminal_is_fail(normalized):
+        return "fail_or_death"
+    return "terminal_other"
+
+
+def _terminal_reason_key(reason: str | None) -> str:
+    normalized = str(reason or "").strip()
+    return normalized if normalized else "none"
+
+
+def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[str, Any]:
+    if not results:
+        return {
+            "episodes": 0,
+            "done_episodes": 0,
+            "non_death_terminal_episodes": 0,
+            "hit_step_limit_episodes": 0,
+            "done_rate": 0.0,
+            "non_death_terminal_rate": 0.0,
+            "hit_step_limit_rate": 0.0,
+            "avg_steps": 0.0,
+            "avg_total_reward": 0.0,
+            "avg_meta_reward": 0.0,
+            "avg_threat_reward": 0.0,
+            "avg_invalid_actions": 0.0,
+            "avg_premature_exit_attempts": 0.0,
+            "avg_route_length": 0.0,
+            "avg_route_replans": 0.0,
+            "avg_phase_switches": 0.0,
+            "avg_threat_active_steps": 0.0,
+            "terminal_reason_counts": {},
+            "terminal_classification_counts": {},
+        }
+
+    episode_count = len(results)
+    terminal_reason_counts = Counter(_terminal_reason_key(item.terminal_reason) for item in results)
+    terminal_classification_counts = Counter(item.terminal_classification for item in results)
+    done_count = sum(1 for item in results if item.done)
+    non_death_terminal_count = terminal_classification_counts.get("non_death_terminal", 0)
+    hit_step_limit_count = sum(1 for item in results if item.hit_step_limit)
+
+    return {
+        "episodes": episode_count,
+        "done_episodes": done_count,
+        "non_death_terminal_episodes": non_death_terminal_count,
+        "hit_step_limit_episodes": hit_step_limit_count,
+        "done_rate": done_count / episode_count,
+        "non_death_terminal_rate": non_death_terminal_count / episode_count,
+        "hit_step_limit_rate": hit_step_limit_count / episode_count,
+        "avg_steps": mean(item.steps for item in results),
+        "avg_total_reward": mean(item.total_reward for item in results),
+        "avg_meta_reward": mean(item.meta_reward_total for item in results),
+        "avg_threat_reward": mean(item.threat_reward_total for item in results),
+        "avg_invalid_actions": mean(item.invalid_actions for item in results),
+        "avg_premature_exit_attempts": mean(item.premature_exit_attempts for item in results),
+        "avg_route_length": mean(item.route_length_total for item in results),
+        "avg_route_replans": mean(item.route_replans for item in results),
+        "avg_phase_switches": mean(item.phase_switches for item in results),
+        "avg_threat_active_steps": mean(item.threat_active_steps for item in results),
+        "terminal_reason_counts": dict(sorted(terminal_reason_counts.items())),
+        "terminal_classification_counts": dict(sorted(terminal_classification_counts.items())),
+    }
+
+
 def _print_results(results: tuple[HybridEpisodeSummary, ...]) -> None:
     print(
         "episode_id\tsteps\tdone\ttotal_reward\tmeta_reward\tthreat_reward\t"
-        "invalid_actions\tpremature_exit\troute_len\treplans\tterminal_reason"
+        "invalid_actions\tpremature_exit\troute_len\treplans\tphase_switches\t"
+        "threat_active_steps\thit_step_limit\tterminal_classification\tterminal_reason"
     )
     for result in results:
         print(
             "{episode}\t{steps}\t{done}\t{total:.3f}\t{meta:.3f}\t{threat:.3f}\t"
-            "{invalid}\t{premature}\t{route_len}\t{replans}\t{reason}".format(
+            "{invalid}\t{premature}\t{route_len}\t{replans}\t{phase_switches}\t"
+            "{threat_steps}\t{hit_step_limit}\t{terminal_classification}\t{reason}".format(
                 episode=result.episode_id,
                 steps=result.steps,
                 done=result.done,
@@ -655,24 +741,30 @@ def _print_results(results: tuple[HybridEpisodeSummary, ...]) -> None:
                 premature=result.premature_exit_attempts,
                 route_len=result.route_length_total,
                 replans=result.route_replans,
+                phase_switches=result.phase_switches,
+                threat_steps=result.threat_active_steps,
+                hit_step_limit=result.hit_step_limit,
+                terminal_classification=result.terminal_classification,
                 reason=result.terminal_reason or "",
             )
         )
-    avg_steps = mean(item.steps for item in results)
-    avg_total = mean(item.total_reward for item in results)
-    avg_invalid = mean(item.invalid_actions for item in results)
-    avg_premature = mean(item.premature_exit_attempts for item in results)
-    done_rate = sum(1 for item in results if item.done) / len(results)
+    summary = _build_training_summary(results)
     print(
         "\nsummary episodes={episodes} avg_steps={avg_steps:.2f} avg_total_reward={avg_total:.3f} "
-        "done_rate={done_rate:.2%} avg_invalid_actions={avg_invalid:.2f} "
-        "avg_premature_exit={avg_premature:.2f}".format(
-            episodes=len(results),
-            avg_steps=avg_steps,
-            avg_total=avg_total,
-            done_rate=done_rate,
-            avg_invalid=avg_invalid,
-            avg_premature=avg_premature,
+        "done_rate={done_rate:.2%} non_death_terminal_rate={non_death_rate:.2%} "
+        "hit_step_limit_rate={hit_limit_rate:.2%} avg_invalid_actions={avg_invalid:.2f} "
+        "avg_premature_exit={avg_premature:.2f} avg_phase_switches={avg_phase_switches:.2f} "
+        "avg_threat_active_steps={avg_threat_steps:.2f}".format(
+            episodes=summary["episodes"],
+            avg_steps=summary["avg_steps"],
+            avg_total=summary["avg_total_reward"],
+            done_rate=summary["done_rate"],
+            non_death_rate=summary["non_death_terminal_rate"],
+            hit_limit_rate=summary["hit_step_limit_rate"],
+            avg_invalid=summary["avg_invalid_actions"],
+            avg_premature=summary["avg_premature_exit_attempts"],
+            avg_phase_switches=summary["avg_phase_switches"],
+            avg_threat_steps=summary["avg_threat_active_steps"],
         )
     )
 
@@ -691,9 +783,67 @@ def _serialize_results(results: tuple[HybridEpisodeSummary, ...]) -> list[dict[s
             "premature_exit_attempts": item.premature_exit_attempts,
             "route_length_total": item.route_length_total,
             "route_replans": item.route_replans,
+            "hit_step_limit": item.hit_step_limit,
+            "terminal_classification": item.terminal_classification,
+            "phase_switches": item.phase_switches,
+            "threat_active_steps": item.threat_active_steps,
         }
         for item in results
     ]
+
+
+def _build_training_state_payload(
+    *,
+    results: tuple[HybridEpisodeSummary, ...],
+    episodes_requested: int,
+    max_steps: int,
+    saved_at_utc: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "episodes_requested": int(episodes_requested),
+        "episodes_completed": len(results),
+        "max_steps_per_episode": int(max_steps),
+        "saved_at_utc": saved_at_utc or (datetime.utcnow().isoformat() + "Z"),
+        "summary": _build_training_summary(results),
+        "results": _serialize_results(results),
+    }
+
+
+def _build_hybrid_config_payload(
+    args: argparse.Namespace,
+    *,
+    command: str,
+    restore_save_source: Path | None,
+    meta_reward_weights: HybridMetaRewardWeights,
+) -> dict[str, Any]:
+    return {
+        "command": command,
+        "run_tag": str(args.run_tag),
+        "no_enemies_mode": bool(args.no_enemies),
+        "movement_keys": str(args.movement_keys),
+        "siphon_key": str(args.siphon_key),
+        "prog_actions": bool(args.prog_actions),
+        "restore_save_file": (
+            str(restore_save_source)
+            if restore_save_source is not None
+            else None
+        ),
+        "restore_save_delay": float(args.restore_save_delay),
+        "threat_trigger_distance": int(args.threat_trigger_distance),
+        "warmstart_checkpoint": (
+            str(args.warmstart_checkpoint)
+            if getattr(args, "warmstart_checkpoint", None)
+            else None
+        ),
+        "resume_checkpoint": (
+            str(args.resume_checkpoint)
+            if getattr(args, "resume_checkpoint", None)
+            else None
+        ),
+        "meta_reward_weights": asdict(meta_reward_weights),
+        "meta_config": vars(_build_meta_config(args)),
+        "threat_config": vars(_build_threat_config(args)),
+    }
 
 
 def _run_rollouts(
@@ -729,7 +879,10 @@ def _run_rollouts(
         premature_exit_attempts = 0
         route_length_total = 0
         route_replans = 0
+        phase_switches = 0
+        threat_active_steps = 0
         updates_applied = 0
+        last_phase: ObjectivePhase | None = None
         last_target_signature: tuple[str, int, int] | None = None
 
         while steps < max_steps and not done:
@@ -746,6 +899,11 @@ def _run_rollouts(
                 explore_meta=explore_meta,
                 explore_threat=explore_threat,
             )
+            if last_phase is not None and trace.decision.objective.phase != last_phase:
+                phase_switches += 1
+            last_phase = trace.decision.objective.phase
+            if trace.threat_active:
+                threat_active_steps += 1
             target = trace.decision.objective.target_position
             if target is not None:
                 route_length_total += max(int(trace.objective_distance_before or 0), 0)
@@ -911,6 +1069,12 @@ def _run_rollouts(
             state = next_state
             steps += 1
 
+        hit_step_limit = steps >= max_steps and not done
+        terminal_classification = _classify_terminal_reason(
+            done=done,
+            terminal_reason=terminal_reason,
+            hit_step_limit=hit_step_limit,
+        )
         results.append(
             HybridEpisodeSummary(
                 episode_id=episode_id,
@@ -924,6 +1088,10 @@ def _run_rollouts(
                 premature_exit_attempts=premature_exit_attempts,
                 route_length_total=route_length_total,
                 route_replans=route_replans,
+                hit_step_limit=hit_step_limit,
+                terminal_classification=terminal_classification,
+                phase_switches=phase_switches,
+                threat_active_steps=threat_active_steps,
             )
         )
     return tuple(results)
@@ -1146,30 +1314,17 @@ def main() -> None:
                 run_directory=run_directory,
                 meta_controller=coordinator.meta_controller,
                 threat_controller=coordinator.threat_controller,
-                hybrid_config={
-                    "command": command,
-                    "no_enemies_mode": bool(args.no_enemies),
-                    "movement_keys": str(args.movement_keys),
-                    "siphon_key": str(args.siphon_key),
-                    "prog_actions": bool(args.prog_actions),
-                    "restore_save_file": (
-                        str(restore_save_source)
-                        if restore_save_source is not None
-                        else None
-                    ),
-                    "restore_save_delay": float(args.restore_save_delay),
-                    "threat_trigger_distance": int(args.threat_trigger_distance),
-                    "meta_reward_weights": asdict(meta_reward_weights),
-                    "meta_config": vars(_build_meta_config(args)),
-                    "threat_config": vars(_build_threat_config(args)),
-                },
-                training_state={
-                    "episodes_requested": int(args.episodes),
-                    "episodes_completed": len(finalized),
-                    "max_steps_per_episode": int(args.max_steps),
-                    "saved_at_utc": datetime.utcnow().isoformat() + "Z",
-                    "results": _serialize_results(finalized),
-                },
+                hybrid_config=_build_hybrid_config_payload(
+                    args,
+                    command=command,
+                    restore_save_source=restore_save_source,
+                    meta_reward_weights=meta_reward_weights,
+                ),
+                training_state=_build_training_state_payload(
+                    results=finalized,
+                    episodes_requested=int(args.episodes),
+                    max_steps=int(args.max_steps),
+                ),
             )
             print(f"hybrid_checkpoint_saved\t{bundle.run_directory}")
     finally:
