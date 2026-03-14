@@ -57,7 +57,41 @@ _APPDATA_GAME_SAVE_DIR = (
 _STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
 _TEXTUAL_MARKUP_PATTERN = re.compile(r"\[[^\]]+\]")
 _TEXTUAL_MARKUP_SEGMENT_PATTERN = re.compile(r"\[([a-zA-Z0-9_]+)\](.*?)\[/\]", re.DOTALL)
-_REWARD_HISTORY_LIMIT = 30
+_REWARD_HISTORY_LIMIT = 500
+_MONITOR_KEY_LABELS: tuple[str, ...] = (
+    "1",
+    "2",
+    "3",
+    "4",
+    "5",
+    "6",
+    "7",
+    "8",
+    "9",
+    "0",
+    "UP",
+    "LEFT",
+    "DOWN",
+    "RIGHT",
+    "SPACE",
+)
+_MONITOR_ACTION_TO_KEY_LABEL = {
+    "move_up": "UP",
+    "move_left": "LEFT",
+    "move_down": "DOWN",
+    "move_right": "RIGHT",
+    "space": "SPACE",
+    "prog_slot_1": "1",
+    "prog_slot_2": "2",
+    "prog_slot_3": "3",
+    "prog_slot_4": "4",
+    "prog_slot_5": "5",
+    "prog_slot_6": "6",
+    "prog_slot_7": "7",
+    "prog_slot_8": "8",
+    "prog_slot_9": "9",
+    "prog_slot_10": "0",
+}
 _PALETTE = {
     "bg": "#0b0f14",
     "surface": "#121922",
@@ -441,6 +475,65 @@ def _resolve_reward_metric_value(
     if reward_total:
         return reward_total
     return previous_value
+
+
+def _monitor_action_card_values(action_line: str) -> dict[str, str]:
+    action_values = _parse_status_values(action_line)
+    return {
+        "action": action_values.get("action", "-"),
+        "reason": action_values.get("reason", "-"),
+        "phase": action_values.get("phase", "-"),
+        "target": action_values.get("next_target", "-"),
+        "loss": action_values.get("loss", "-"),
+    }
+
+
+def _parse_next_available_actions(next_available_actions_line: str) -> tuple[str, ...]:
+    status_values = _parse_status_values(next_available_actions_line)
+    raw_actions = status_values.get("next_available_actions", "")
+    if not raw_actions or raw_actions == "-":
+        return ()
+    return tuple(
+        token
+        for token in (item.strip() for item in raw_actions.split(","))
+        if token and token != "-" and not token.startswith("...(")
+    )
+
+
+def _monitor_key_label_for_action(action_name: str) -> str | None:
+    return _MONITOR_ACTION_TO_KEY_LABEL.get(str(action_name).strip())
+
+
+def _status_key_label(key: str) -> str:
+    return str(key).replace("_", " ")
+
+
+def _format_reward_breakdown_tooltip(reward_line: str) -> str:
+    reward_values = _parse_status_values(reward_line)
+    if not reward_values:
+        return "Reward breakdown unavailable"
+    label_width = max(len(_status_key_label(key)) for key in reward_values)
+    lines = ["reward breakdown"]
+    for key, value in reward_values.items():
+        lines.append(f"{_status_key_label(key):<{label_width}}  {value}")
+    return "\n".join(lines)
+
+
+def _format_phase_breakdown_tooltip(action_line: str) -> str:
+    action_values = _monitor_action_card_values(action_line)
+    fields = (
+        ("Reason", action_values["reason"]),
+        ("Action", action_values["action"]),
+        ("Phase", action_values["phase"]),
+        ("Target", action_values["target"]),
+    )
+    if all(value == "-" for _, value in fields):
+        return "Phase detail unavailable"
+    label_width = max(len(label) for label, _ in fields)
+    lines = ["phase detail"]
+    for label, value in fields:
+        lines.append(f"{label:<{label_width}}  {value}")
+    return "\n".join(lines)
 
 
 def _parse_episode_progress(
@@ -972,6 +1065,15 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_resume_button: ttk.Button | None = None
         self._monitor_metric_vars: dict[str, tk.StringVar] = {}
         self._reward_history: list[float] = []
+        self._monitor_keycap_labels: dict[str, tk.Label] = {}
+        self._monitor_available_key_labels: set[str] = set()
+        self._monitor_selected_key_label: str | None = None
+        self._reward_tooltip: tk.Toplevel | None = None
+        self._reward_tooltip_label: tk.Label | None = None
+        self._reward_hover_widgets: tuple[tk.Misc, ...] = ()
+        self._phase_tooltip: tk.Toplevel | None = None
+        self._phase_tooltip_label: tk.Label | None = None
+        self._phase_hover_widgets: tuple[tk.Misc, ...] = ()
         self._epsilon_progress_value = tk.DoubleVar(value=0.0)
         self._epsilon_progress_text = tk.StringVar(value="0.0%")
         self._monitor_total_episodes: int | None = None
@@ -1038,9 +1140,6 @@ class DqnRunnerGui(tk.Tk):
         controls = ttk.Frame(self, padding=(10, 8, 10, 8), style="Surface.TFrame")
         controls.grid(row=2, column=0, sticky="ew")
         controls.columnconfigure(0, weight=1)
-        controls.columnconfigure(1, weight=1)
-        controls.columnconfigure(2, weight=1)
-        controls.columnconfigure(3, weight=0)
 
         self._command_preview = tk.StringVar(value="")
         ttk.Label(controls, text="Command Preview", style="SectionLabel.TLabel").grid(
@@ -1054,30 +1153,72 @@ class DqnRunnerGui(tk.Tk):
             textvariable=self._command_preview,
             font=_FONTS["mono"],
         )
-        preview_entry.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        preview_entry.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+
+        action_strip = ttk.Frame(controls, style="Surface.TFrame")
+        action_strip.grid(row=2, column=0, sticky="ew")
+        action_strip.columnconfigure(0, weight=1)
+        action_strip.columnconfigure(1, weight=0)
+        action_strip.columnconfigure(2, weight=1)
 
         self._preview_button = ttk.Button(
-            controls,
+            action_strip,
             text="Preview Command",
             command=self._refresh_preview,
             style="Secondary.TButton",
         )
-        self._preview_button.grid(row=2, column=0, sticky="w")
+        self._preview_button.grid(row=0, column=0, sticky="w")
+
+        run_group = ttk.Frame(action_strip, style="Surface.TFrame")
+        run_group.grid(row=0, column=1)
+
         self._run_button = ttk.Button(
-            controls,
+            run_group,
             text="Launch",
             command=self._run_selected,
             style="Primary.TButton",
         )
-        self._run_button.grid(row=2, column=1)
+        self._run_button.grid(row=0, column=0)
         self._stop_button = ttk.Button(
-            controls,
+            run_group,
             text="Stop",
             command=self._stop_process,
             state="disabled",
             style="Danger.TButton",
         )
-        self._stop_button.grid(row=2, column=2, sticky="e")
+        self._stop_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
+        self._monitor_pause_button = ttk.Button(
+            run_group,
+            text="||",
+            command=self._pause_monitor_session,
+            style="MonitorPause.TButton",
+            state="disabled",
+            width=3,
+        )
+        self._monitor_pause_button.grid(row=0, column=2, sticky="w", padx=(16, 0))
+        self._monitor_step_button = ttk.Button(
+            run_group,
+            text=">|",
+            command=self._step_monitor_session,
+            style="MonitorStep.TButton",
+            state="disabled",
+            width=3,
+        )
+        self._monitor_step_button.grid(row=0, column=3, sticky="w", padx=(8, 0))
+        self._monitor_resume_button = ttk.Button(
+            run_group,
+            text=">",
+            command=self._resume_monitor_session,
+            style="MonitorResume.TButton",
+            state="disabled",
+            width=3,
+        )
+        self._monitor_resume_button.grid(row=0, column=4, sticky="w", padx=(8, 0))
+        ttk.Label(
+            action_strip,
+            textvariable=self._monitor_control_state,
+            style="FormHelp.TLabel",
+        ).grid(row=0, column=2, sticky="e")
 
         output_frame = ttk.Frame(self, padding=(10, 0, 10, 10), style="Surface.TFrame")
         output_frame.grid(row=3, column=0, sticky="nsew")
@@ -1158,7 +1299,6 @@ class DqnRunnerGui(tk.Tk):
             foreground=_PALETTE["text"],
             font=("Consolas", 11, "bold"),
         )
-
         style.configure("StatusReady.TLabel", background=_PALETTE["surface"], foreground=_PALETTE["accent"])
         style.configure("StatusRun.TLabel", background="#2a3522", foreground=_PALETTE["accent_alt"])
         style.configure("StatusStop.TLabel", background="#3d2026", foreground=_PALETTE["danger"])
@@ -1222,6 +1362,45 @@ class DqnRunnerGui(tk.Tk):
         style.map("Secondary.TButton", background=[("active", "#35485f")])
         style.configure("Danger.TButton", background="#5a2630", foreground="#ffdce1", borderwidth=0, padding=(8, 5))
         style.map("Danger.TButton", background=[("active", "#70313d"), ("disabled", "#3f2730")])
+        style.configure(
+            "MonitorPause.TButton",
+            background="#3c3426",
+            foreground="#ffd38a",
+            borderwidth=0,
+            padding=(7, 4),
+            font=("Consolas", 10, "bold"),
+        )
+        style.map(
+            "MonitorPause.TButton",
+            background=[("active", "#534834"), ("disabled", "#2b2a28")],
+            foreground=[("disabled", "#786b58")],
+        )
+        style.configure(
+            "MonitorStep.TButton",
+            background="#2a3a4d",
+            foreground=_PALETTE["text"],
+            borderwidth=0,
+            padding=(7, 4),
+            font=("Consolas", 10, "bold"),
+        )
+        style.map(
+            "MonitorStep.TButton",
+            background=[("active", "#35485f"), ("disabled", "#222b34")],
+            foreground=[("disabled", "#738396")],
+        )
+        style.configure(
+            "MonitorResume.TButton",
+            background="#1f8f81",
+            foreground="#ffffff",
+            borderwidth=0,
+            padding=(7, 4),
+            font=("Consolas", 10, "bold"),
+        )
+        style.map(
+            "MonitorResume.TButton",
+            background=[("active", "#28a594"), ("disabled", "#345955")],
+            foreground=[("disabled", "#93b7b1")],
+        )
 
     def _build_profiles(self) -> None:
         run_parser = dqn_policy_runner._build_parser()
@@ -1307,8 +1486,7 @@ class DqnRunnerGui(tk.Tk):
     def _build_monitor_tab(self) -> None:
         monitor = ttk.Frame(self._notebook, padding=(10, 10, 10, 10), style="Surface.TFrame")
         monitor.columnconfigure(0, weight=1)
-        monitor.rowconfigure(1, weight=0)
-        monitor.rowconfigure(4, weight=1)
+        monitor.rowconfigure(3, weight=1)
 
         ttk.Label(
             monitor,
@@ -1325,6 +1503,7 @@ class DqnRunnerGui(tk.Tk):
             ("Episode", "episode"),
             ("Step", "step"),
             ("Reward", "reward"),
+            ("Phase", "phase"),
             ("Total", "total"),
             ("Epsilon", "epsilon"),
             ("Threat Epsilon", "threat_epsilon"),
@@ -1340,104 +1519,93 @@ class DqnRunnerGui(tk.Tk):
             card = ttk.Frame(metric_grid, style="MetricCard.TFrame", padding=(8, 6, 8, 6))
             card.grid(row=row, column=col, sticky="ew", padx=3, pady=3)
             self._monitor_metric_vars[key] = tk.StringVar(value="-")
-            ttk.Label(card, text=label, style="MetricName.TLabel").grid(row=0, column=0, sticky="w")
-            ttk.Label(card, textvariable=self._monitor_metric_vars[key], style="MetricValue.TLabel").grid(
+            name_label = ttk.Label(card, text=label, style="MetricName.TLabel")
+            name_label.grid(row=0, column=0, sticky="w")
+            value_label = ttk.Label(card, textvariable=self._monitor_metric_vars[key], style="MetricValue.TLabel")
+            value_label.grid(
                 row=1,
                 column=0,
                 sticky="w",
             )
-
-        ttk.Label(monitor, text="training_line", style="FormLabel.TLabel").grid(row=2, column=0, sticky="w")
-        ttk.Label(
-            monitor,
-            textvariable=self._monitor_training_line,
-            style="FormHelp.TLabel",
-        ).grid(row=2, column=0, sticky="e", padx=(120, 0))
-
-        controls = ttk.Frame(monitor, style="Surface.TFrame")
-        controls.grid(row=3, column=0, sticky="ew", pady=(12, 0))
-        controls.columnconfigure(0, weight=0)
-        controls.columnconfigure(1, weight=0)
-        controls.columnconfigure(2, weight=0)
-        controls.columnconfigure(3, weight=1)
-        controls.columnconfigure(4, weight=0)
-
-        self._monitor_pause_button = ttk.Button(
-            controls,
-            text="Pause Session",
-            command=self._pause_monitor_session,
-            style="Secondary.TButton",
-            state="disabled",
-        )
-        self._monitor_pause_button.grid(row=0, column=0, sticky="w")
-        self._monitor_step_button = ttk.Button(
-            controls,
-            text="Step Once",
-            command=self._step_monitor_session,
-            style="Primary.TButton",
-            state="disabled",
-        )
-        self._monitor_step_button.grid(row=0, column=1, sticky="w", padx=(8, 0))
-        self._monitor_resume_button = ttk.Button(
-            controls,
-            text="Resume Auto",
-            command=self._resume_monitor_session,
-            style="Secondary.TButton",
-            state="disabled",
-        )
-        self._monitor_resume_button.grid(row=0, column=2, sticky="w", padx=(8, 0))
-        ttk.Label(
-            controls,
-            textvariable=self._monitor_control_state,
-            style="FormHelp.TLabel",
-        ).grid(row=0, column=4, sticky="e")
+            if key == "reward":
+                self._reward_hover_widgets = (card, name_label, value_label)
+                for widget in self._reward_hover_widgets:
+                    widget.bind("<Enter>", self._show_reward_tooltip, add="+")
+                    widget.bind("<Motion>", self._move_reward_tooltip, add="+")
+                    widget.bind("<Leave>", self._hide_reward_tooltip, add="+")
+            if key == "phase":
+                self._phase_hover_widgets = (card, name_label, value_label)
+                for widget in self._phase_hover_widgets:
+                    widget.bind("<Enter>", self._show_phase_tooltip, add="+")
+                    widget.bind("<Motion>", self._move_phase_tooltip, add="+")
+                    widget.bind("<Leave>", self._hide_phase_tooltip, add="+")
 
         graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
-        graph_shell.grid(row=4, column=0, sticky="nsew", pady=(20, 0))
+        graph_shell.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
         graph_shell.columnconfigure(0, weight=1)
-        graph_shell.rowconfigure(4, weight=1)
-        ttk.Label(graph_shell, text="action_line", style="FormLabel.TLabel").grid(
+        graph_shell.rowconfigure(3, weight=1)
+
+        ttk.Label(graph_shell, text="Input Deck", style="SectionLabel.TLabel").grid(
             row=0,
             column=0,
             sticky="w",
         )
-        ttk.Label(graph_shell, textvariable=self._monitor_action_line, style="FormHelp.TLabel").grid(
-            row=0,
-            column=0,
-            sticky="e",
-            padx=(140, 0),
-            pady=(0, 4),
-        )
-        ttk.Label(graph_shell, text="reward_line", style="FormLabel.TLabel").grid(
-            row=1,
-            column=0,
-            sticky="w",
-        )
-        ttk.Label(graph_shell, textvariable=self._monitor_reward_line, style="FormHelp.TLabel").grid(
-            row=1,
-            column=0,
-            sticky="e",
-            padx=(140, 0),
-            pady=(0, 8),
-        )
-        ttk.Label(graph_shell, text="next_available_actions", style="FormLabel.TLabel").grid(
-            row=2,
-            column=0,
-            sticky="w",
-        )
-        ttk.Label(
+        input_shell = tk.Frame(
             graph_shell,
-            textvariable=self._monitor_next_available_actions_line,
-            style="FormHelp.TLabel",
-        ).grid(
-            row=2,
-            column=0,
-            sticky="e",
-            padx=(220, 0),
-            pady=(0, 8),
+            bg="#0d141d",
+            highlightthickness=1,
+            highlightbackground="#243244",
+            padx=12,
+            pady=10,
         )
+        input_shell.grid(row=1, column=0, sticky="ew", pady=(6, 10))
+        for col in range(10):
+            input_shell.grid_columnconfigure(col, weight=1, uniform="monitor-input-cols")
+        for key_label in _MONITOR_KEY_LABELS[:10]:
+            key_widget = tk.Label(
+                input_shell,
+                text=key_label,
+                font=("Consolas", 10, "bold"),
+                bd=1,
+                relief="solid",
+                width=4,
+                padx=2,
+                pady=6,
+            )
+            key_widget.grid(row=0, column=("1234567890".index(key_label)), padx=3, pady=3, sticky="ew")
+            self._monitor_keycap_labels[key_label] = key_widget
+        for key_label, row, col in (
+            ("UP", 1, 4),
+            ("LEFT", 2, 3),
+            ("DOWN", 2, 4),
+            ("RIGHT", 2, 5),
+        ):
+            key_widget = tk.Label(
+                input_shell,
+                text=key_label,
+                font=("Consolas", 10, "bold"),
+                bd=1,
+                relief="solid",
+                width=6 if key_label == "RIGHT" else 5,
+                padx=2,
+                pady=6,
+            )
+            key_widget.grid(row=row, column=col, padx=3, pady=3, sticky="ew")
+            self._monitor_keycap_labels[key_label] = key_widget
+        space_widget = tk.Label(
+            input_shell,
+            text="SPACE",
+            font=("Consolas", 10, "bold"),
+            bd=1,
+            relief="solid",
+            padx=2,
+            pady=6,
+        )
+        space_widget.grid(row=3, column=2, columnspan=6, padx=3, pady=(5, 2), sticky="ew")
+        self._monitor_keycap_labels["SPACE"] = space_widget
+
         epsilon_row = ttk.Frame(graph_shell, style="Surface.TFrame")
-        epsilon_row.grid(row=3, column=0, sticky="ew", pady=(0, 10))
+        epsilon_row.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         epsilon_row.columnconfigure(0, weight=1)
         ttk.Label(epsilon_row, text="epsilon_progress", style="FormLabel.TLabel").grid(
             row=0,
@@ -1465,8 +1633,9 @@ class DqnRunnerGui(tk.Tk):
             highlightthickness=1,
             highlightbackground="#243244",
         )
-        self._reward_canvas.grid(row=4, column=0, sticky="nsew")
+        self._reward_canvas.grid(row=3, column=0, sticky="nsew")
         self._reward_canvas.bind("<Configure>", lambda _: self._draw_reward_graph())
+        self._update_monitor_keycaps(action_line="", next_available_actions_line="")
         self._set_monitor_controls_enabled(False)
 
         self._notebook.add(monitor, text="Live Monitor")
@@ -1631,6 +1800,9 @@ class DqnRunnerGui(tk.Tk):
         self._monitor_action_line.set("action=idle")
         self._monitor_reward_line.set("reward=idle")
         self._monitor_next_available_actions_line.set("next_available_actions=unavailable")
+        self._update_monitor_keycaps(action_line="", next_available_actions_line="")
+        self._hide_reward_tooltip(force=True)
+        self._hide_phase_tooltip(force=True)
         if control_file is not None:
             snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_AUTO)
             self._monitor_control_state.set(
@@ -1689,6 +1861,8 @@ class DqnRunnerGui(tk.Tk):
             self._external_control_file = None
         self._monitor_control_state.set("session=idle")
         self._set_monitor_controls_enabled(False)
+        self._hide_reward_tooltip(force=True)
+        self._hide_phase_tooltip(force=True)
 
     def _poll_external_status(self) -> None:
         status_file = self._external_status_file
@@ -1711,7 +1885,17 @@ class DqnRunnerGui(tk.Tk):
                     self._monitor_next_available_actions_line.set(
                         next_available_actions_line or "next_available_actions=unavailable"
                     )
-                    self._update_monitor_metrics(training_line, reward_line=reward_line)
+                    self._update_monitor_keycaps(
+                        action_line=action_line,
+                        next_available_actions_line=next_available_actions_line,
+                    )
+                    self._refresh_reward_tooltip_contents()
+                    self._refresh_phase_tooltip_contents()
+                    self._update_monitor_metrics(
+                        training_line,
+                        action_line=action_line,
+                        reward_line=reward_line,
+                    )
         self._refresh_monitor_control_state()
         self.after(200, self._poll_external_status)
 
@@ -2021,6 +2205,142 @@ class DqnRunnerGui(tk.Tk):
             if button is not None:
                 button.configure(state=state)
 
+    def _update_monitor_keycaps(self, *, action_line: str, next_available_actions_line: str) -> None:
+        available_actions = _parse_next_available_actions(next_available_actions_line)
+        self._monitor_available_key_labels = {
+            key_label
+            for action in available_actions
+            for key_label in (_monitor_key_label_for_action(action),)
+            if key_label is not None
+        }
+        current_action = _parse_status_values(action_line).get("action", "")
+        self._monitor_selected_key_label = _monitor_key_label_for_action(current_action or "")
+
+        for key_label, widget in self._monitor_keycap_labels.items():
+            is_selected = key_label == self._monitor_selected_key_label
+            is_available = key_label in self._monitor_available_key_labels
+            if is_selected:
+                background = _PALETTE["accent_alt"]
+                foreground = _PALETTE["bg"]
+                border = "#ffe0a3"
+            elif is_available:
+                background = "#18342f"
+                foreground = "#a9f5e7"
+                border = "#2d7b70"
+            else:
+                background = "#121a23"
+                foreground = "#5f6e80"
+                border = "#23303d"
+            widget.configure(
+                bg=background,
+                fg=foreground,
+                highlightbackground=border,
+                highlightcolor=border,
+                highlightthickness=1,
+            )
+
+    def _refresh_reward_tooltip_contents(self) -> None:
+        if self._reward_tooltip_label is None:
+            return
+        self._reward_tooltip_label.configure(
+            text=_format_reward_breakdown_tooltip(self._monitor_reward_line.get())
+        )
+
+    def _refresh_phase_tooltip_contents(self) -> None:
+        if self._phase_tooltip_label is None:
+            return
+        self._phase_tooltip_label.configure(
+            text=_format_phase_breakdown_tooltip(self._monitor_action_line.get())
+        )
+
+    def _create_monitor_tooltip(self, text: str) -> tuple[tk.Toplevel, tk.Label]:
+        tooltip = tk.Toplevel(self)
+        tooltip.withdraw()
+        tooltip.overrideredirect(True)
+        try:
+            tooltip.attributes("-topmost", True)
+        except tk.TclError:
+            pass
+        label = tk.Label(
+            tooltip,
+            text=text,
+            justify="left",
+            anchor="w",
+            bg="#101821",
+            fg=_PALETTE["text"],
+            relief="solid",
+            bd=1,
+            padx=10,
+            pady=8,
+            font=("Consolas", 9),
+        )
+        label.pack()
+        return (tooltip, label)
+
+    def _show_reward_tooltip(self, event: tk.Event[tk.Misc] | None = None) -> None:
+        tooltip_text = _format_reward_breakdown_tooltip(self._monitor_reward_line.get())
+        if self._reward_tooltip is None or not self._reward_tooltip.winfo_exists():
+            self._reward_tooltip, self._reward_tooltip_label = self._create_monitor_tooltip(tooltip_text)
+        else:
+            self._refresh_reward_tooltip_contents()
+        self._hide_phase_tooltip(force=True)
+        self._move_reward_tooltip(event)
+        if self._reward_tooltip is not None:
+            self._reward_tooltip.deiconify()
+
+    def _move_reward_tooltip(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        if self._reward_tooltip is None or not self._reward_tooltip.winfo_exists():
+            return
+        pointer_x = self.winfo_pointerx() + 16
+        pointer_y = self.winfo_pointery() + 18
+        self._reward_tooltip.geometry(f"+{pointer_x}+{pointer_y}")
+
+    def _show_phase_tooltip(self, event: tk.Event[tk.Misc] | None = None) -> None:
+        tooltip_text = _format_phase_breakdown_tooltip(self._monitor_action_line.get())
+        if self._phase_tooltip is None or not self._phase_tooltip.winfo_exists():
+            self._phase_tooltip, self._phase_tooltip_label = self._create_monitor_tooltip(tooltip_text)
+        else:
+            self._refresh_phase_tooltip_contents()
+        self._hide_reward_tooltip(force=True)
+        self._move_phase_tooltip(event)
+        if self._phase_tooltip is not None:
+            self._phase_tooltip.deiconify()
+
+    def _move_phase_tooltip(self, _event: tk.Event[tk.Misc] | None = None) -> None:
+        if self._phase_tooltip is None or not self._phase_tooltip.winfo_exists():
+            return
+        pointer_x = self.winfo_pointerx() + 16
+        pointer_y = self.winfo_pointery() + 18
+        self._phase_tooltip.geometry(f"+{pointer_x}+{pointer_y}")
+
+    def _hide_reward_tooltip(
+        self,
+        _event: tk.Event[tk.Misc] | None = None,
+        *,
+        force: bool = False,
+    ) -> None:
+        hovered_widget = self.winfo_containing(self.winfo_pointerx(), self.winfo_pointery())
+        if not force and hovered_widget in self._reward_hover_widgets:
+            return
+        if self._reward_tooltip is not None and self._reward_tooltip.winfo_exists():
+            self._reward_tooltip.destroy()
+        self._reward_tooltip = None
+        self._reward_tooltip_label = None
+
+    def _hide_phase_tooltip(
+        self,
+        _event: tk.Event[tk.Misc] | None = None,
+        *,
+        force: bool = False,
+    ) -> None:
+        hovered_widget = self.winfo_containing(self.winfo_pointerx(), self.winfo_pointery())
+        if not force and hovered_widget in self._phase_hover_widgets:
+            return
+        if self._phase_tooltip is not None and self._phase_tooltip.winfo_exists():
+            self._phase_tooltip.destroy()
+        self._phase_tooltip = None
+        self._phase_tooltip_label = None
+
     def _refresh_monitor_control_state(self) -> None:
         control_file = self._external_control_file
         if control_file is None or not control_file.exists():
@@ -2057,8 +2377,15 @@ class DqnRunnerGui(tk.Tk):
             f"session={snapshot.mode} advance={snapshot.advance_counter}"
         )
 
-    def _update_monitor_metrics(self, training_line: str, *, reward_line: str = "") -> None:
+    def _update_monitor_metrics(
+        self,
+        training_line: str,
+        *,
+        action_line: str = "",
+        reward_line: str = "",
+    ) -> None:
         status_values = _parse_status_values(training_line)
+        action_values = _monitor_action_card_values(action_line)
         now = time.monotonic()
         new_step_event = False
 
@@ -2141,6 +2468,7 @@ class DqnRunnerGui(tk.Tk):
             "episode": status_values.get("episode", "-"),
             "step": status_values.get("step", "-"),
             "reward": reward_value,
+            "phase": action_values.get("phase", "-"),
             "total": status_values.get("total", "-"),
             "epsilon": status_values.get("epsilon", "-"),
             "threat_epsilon": status_values.get("threat_epsilon", "-"),
@@ -2204,14 +2532,17 @@ class DqnRunnerGui(tk.Tk):
         top = 10
         bottom = height - 18
         canvas.create_rectangle(left, top, right, bottom, outline="#263546")
-        for ratio in (0.25, 0.5, 0.75):
+        for ratio in (0.0, 0.25, 0.5, 0.75, 1.0):
             y = top + int((bottom - top) * ratio)
-            canvas.create_line(left, y, right, y, fill="#1a2432")
+            canvas.create_line(left, y, right, y, fill="#172231")
+        for ratio in (0.1, 0.2, 0.3, 0.4, 0.6, 0.7, 0.8, 0.9):
+            x = left + int((right - left) * ratio)
+            canvas.create_line(x, top, x, bottom, fill="#111a24")
         canvas.create_text(
             left,
             top - 2,
-            text=f"reward (last {_REWARD_HISTORY_LIMIT} steps)",
-            fill=_PALETTE["accent"],
+            text=f"reward pulse (last {_REWARD_HISTORY_LIMIT} steps)",
+            fill="#7cf5a6",
             anchor="sw",
             font=("Segoe UI", 8, "bold"),
         )
@@ -2253,32 +2584,35 @@ class DqnRunnerGui(tk.Tk):
         )
         zero_ratio = (0.0 - min_reward) / reward_span
         zero_y = bottom - ((bottom - top) * zero_ratio)
-        canvas.create_line(left, zero_y, right, zero_y, fill="#31445b", dash=(3, 3))
+        canvas.create_line(left, zero_y, right, zero_y, fill="#29445a", dash=(3, 3))
 
-        positive_color = "#3ac26d"
-        negative_color = _PALETTE["danger"]
-        neutral_color = "#6f8195"
         point_count = len(points)
-        bar_slot = max((right - left) / float(point_count), 1.0)
-        bar_width = max(1.0, (bar_slot * 0.75) - 1.0)
+        if point_count == 1:
+            x = (left + right) / 2
+            y_ratio = (points[0] - min_reward) / reward_span
+            y = bottom - ((bottom - top) * y_ratio)
+            canvas.create_oval(x - 3, y - 3, x + 3, y + 3, fill="#7cf5a6", outline="")
+            return
 
+        coordinates: list[float] = []
         for index, value in enumerate(points):
+            x = left + ((right - left) * (index / float(point_count - 1)))
             y_ratio = (value - min_reward) / reward_span
             y = bottom - ((bottom - top) * y_ratio)
-            x_center = left + ((index + 0.5) * bar_slot)
-            x0 = x_center - (bar_width / 2.0)
-            x1 = x_center + (bar_width / 2.0)
-            y0 = min(zero_y, y)
-            y1 = max(zero_y, y)
-            if math.isclose(y0, y1):
-                y1 = y0 + 1.0
-            if value > 0:
-                color = positive_color
-            elif value < 0:
-                color = negative_color
-            else:
-                color = neutral_color
-            canvas.create_rectangle(x0, y0, x1, y1, fill=color, outline="")
+            coordinates.extend((x, y))
+
+        canvas.create_line(*coordinates, fill="#0f4022", width=6, capstyle="round", joinstyle="round")
+        canvas.create_line(*coordinates, fill="#7cf5a6", width=2, capstyle="round", joinstyle="round")
+        latest_x = coordinates[-2]
+        latest_y = coordinates[-1]
+        canvas.create_oval(
+            latest_x - 4,
+            latest_y - 4,
+            latest_x + 4,
+            latest_y + 4,
+            fill="#d6ffe5",
+            outline="#7cf5a6",
+        )
 
     def _run_process(self, command: list[str]) -> None:
         try:
@@ -2355,6 +2689,8 @@ class DqnRunnerGui(tk.Tk):
             self._stop_process()
         self._stop_state_monitor()
         self._clear_monitor_files()
+        self._hide_reward_tooltip(force=True)
+        self._hide_phase_tooltip(force=True)
         self.destroy()
 
 

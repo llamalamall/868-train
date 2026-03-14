@@ -245,10 +245,10 @@ def test_restore_selected_save_file_copies_contents(tmp_path: Path) -> None:
     assert target.read_text(encoding="utf-8") == "save-data"
 
 
-def test_format_monitor_actions_truncates_long_lists() -> None:
+def test_format_monitor_actions_preserves_full_action_list() -> None:
     formatted = _format_monitor_actions(
         ("move_up", "move_down", "move_left", "move_right", "confirm"),
         limit=3,
     )
 
-    assert formatted == "move_up,move_down,move_left,...(+2)"
+    assert formatted == "move_up,move_down,move_left,move_right,confirm"

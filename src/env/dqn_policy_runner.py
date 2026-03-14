@@ -40,13 +40,7 @@ def _format_monitor_actions(actions: object, *, limit: int = 8) -> str:
     normalized = tuple(str(item).strip() for item in actions if str(item).strip())
     if not normalized:
         return "-"
-    if len(normalized) <= limit:
-        return ",".join(normalized)
-    remaining = len(normalized) - limit
-    return "{head},...(+{remaining})".format(
-        head=",".join(normalized[:limit]),
-        remaining=remaining,
-    )
+    return ",".join(normalized)
 
 
 _FAIL_TERMINAL_REASON_TOKENS: tuple[str, ...] = ("fail", "loss", "dead", "start_screen")
