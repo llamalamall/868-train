@@ -172,6 +172,13 @@ class HybridLiveEnv:
     def current_episode_id(self) -> str | None:
         return self._game_env.current_episode_id
 
+    @property
+    def attached_pid(self) -> int | None:
+        return self._game_env.attached_pid
+
+    def add_runtime_binding_callback(self, callback: Callable[[int], None]) -> None:
+        self._game_env.add_runtime_binding_callback(callback)
+
     def reset(self) -> Any:
         return self._game_env.reset()
 

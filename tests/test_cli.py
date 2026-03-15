@@ -106,3 +106,12 @@ def test_master_cli_dispatches_dqn_gui(monkeypatch) -> None:
     cli.main(["dqn-gui"])
 
     assert captured == [("dqn_gui_main", [])]
+
+
+def test_master_cli_dispatches_victory_monitor_with_passthrough(monkeypatch) -> None:
+    captured: list[tuple[str, list[str]]] = []
+    _install_stub(monkeypatch, "src.cli.victory_transition_monitor_main", captured)
+
+    cli.main(["victory-monitor", "--max-events", "3", "--timeout-seconds", "1.5"])
+
+    assert captured == [("victory_transition_monitor_main", ["--max-events", "3", "--timeout-seconds", "1.5"])]

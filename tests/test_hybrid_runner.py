@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 
 from src.hybrid.rewards import HybridMetaRewardWeights, HybridRewardSuite
@@ -15,6 +17,7 @@ from src.hybrid.runner import (
     _format_monitor_action_line,
     _format_monitor_actions,
     _format_monitor_training_line,
+    _hook_event_is_victory_signal,
     _run_rollouts,
     _validate_args,
 )
@@ -252,6 +255,7 @@ def test_hybrid_parser_train_meta_defaults() -> None:
     assert args.meta_reward_final_sector_win == pytest.approx(25.00)
     assert args.phase_lock_min_steps == 6
     assert args.target_stall_release_steps == 4
+    assert args.victory_monitor is True
     assert args.restore_save_file is None
     assert args.restore_save_delay == pytest.approx(0.35)
 
@@ -266,6 +270,7 @@ def test_hybrid_parser_train_full_meta_reward_defaults() -> None:
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
     assert args.meta_reward_final_sector_win == pytest.approx(25.00)
+    assert args.victory_monitor is True
     assert args.restore_save_file is None
     assert args.restore_save_delay == pytest.approx(0.35)
 
@@ -408,9 +413,15 @@ def test_build_hybrid_config_payload_includes_run_tag_and_warmstart_metadata() -
         command="train-full-hierarchical",
         restore_save_source=None,
         meta_reward_weights=_build_meta_reward_weights(args),
+        victory_monitor_enabled=True,
+        victory_monitor_output_path=Path("artifacts/hybrid/20260315-09-test/victory-transition-events.jsonl"),
+        victory_monitor_log_path=Path("artifacts/hybrid/20260315-09-test/victory-transition-monitor.log"),
     )
 
     assert payload["run_tag"] == "hybrid-full-beta-fixedmeta"
+    assert payload["victory_monitor_enabled"] is True
+    assert payload["victory_monitor_output_path"].endswith("victory-transition-events.jsonl")
+    assert payload["victory_monitor_log_path"].endswith("victory-transition-monitor.log")
     assert payload["warmstart_checkpoint"] == "artifacts/hybrid/20260314-03-hybrid-beta"
     assert payload["resume_checkpoint"] is None
     assert payload["phase_lock_min_steps"] == 6
@@ -435,9 +446,15 @@ def test_build_hybrid_config_payload_records_resume_checkpoint_for_meta_training
         command="train-meta-no-enemies",
         restore_save_source=None,
         meta_reward_weights=_build_meta_reward_weights(args),
+        victory_monitor_enabled=False,
+        victory_monitor_output_path=None,
+        victory_monitor_log_path=None,
     )
 
     assert payload["run_tag"] == "hybrid-meta-beta-efficient"
+    assert payload["victory_monitor_enabled"] is False
+    assert payload["victory_monitor_output_path"] is None
+    assert payload["victory_monitor_log_path"] is None
     assert payload["warmstart_checkpoint"] is None
     assert payload["resume_checkpoint"] == "artifacts/hybrid/20260314-03-hybrid-beta"
 
@@ -545,6 +562,16 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
     assert payload["results"][1]["final_action"] == "move_right"
     assert payload["results"][1]["last_known_player_position"] == {"x": 4, "y": 5}
     assert payload["results"][1]["last_known_exit_position"] == {"x": 5, "y": 5}
+
+
+def test_hook_event_is_victory_signal_matches_victory_flag_targets() -> None:
+    normal_victory_event = {"target_name": "normal_victory_flag_set", "snapshot": {}}
+    points_victory_event = {"target_name": "points_victory_flag_set", "snapshot": {}}
+    unrelated_event = {"target_name": "game_over_flag_set", "snapshot": {}}
+
+    assert _hook_event_is_victory_signal(normal_victory_event) is True
+    assert _hook_event_is_victory_signal(points_victory_event) is True
+    assert _hook_event_is_victory_signal(unrelated_event) is False
 
 
 def test_classify_terminal_reason_treats_start_screen_unknown_as_unexpected() -> None:

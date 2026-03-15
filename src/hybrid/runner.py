@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import argparse
+import json
 import re
+import subprocess
+import sys
 import time
 from collections import Counter
 from dataclasses import asdict, dataclass
@@ -30,6 +33,10 @@ from src.hybrid.rewards import (
 )
 from src.hybrid.threat_controller import ThreatControllerDRQN, ThreatDRQNConfig
 from src.hybrid.types import ObjectivePhase, ThreatOverride
+
+_REPO_ROOT = Path(__file__).resolve().parents[2]
+_VICTORY_MONITOR_OUTPUT_FILE = "victory-transition-events.jsonl"
+_VICTORY_MONITOR_LOG_FILE = "victory-transition-monitor.log"
 
 
 def _game_tick_ms_arg(value: str) -> int:
@@ -207,6 +214,170 @@ class HybridEpisodeSummary:
     final_action: str | None
     last_known_player_position: dict[str, int] | None
     last_known_exit_position: dict[str, int] | None
+
+
+class _VictoryMonitorProcess:
+    """Manage the debugger-backed victory monitor as a child process."""
+
+    def __init__(
+        self,
+        *,
+        run_directory: Path,
+        startup_delay_seconds: float = 0.35,
+    ) -> None:
+        self.output_path = Path(run_directory) / _VICTORY_MONITOR_OUTPUT_FILE
+        self.log_path = Path(run_directory) / _VICTORY_MONITOR_LOG_FILE
+        self._startup_delay_seconds = max(float(startup_delay_seconds), 0.0)
+        self._process: subprocess.Popen[str] | None = None
+        self._log_handle: Any | None = None
+        self._attached_pid: int | None = None
+        self._read_offset = 0
+        self._pending_fragment = ""
+
+    def update_pid(self, pid: int) -> None:
+        resolved_pid = int(pid)
+        if self._attached_pid == resolved_pid and self._process is not None and self._process.poll() is None:
+            return
+        self._stop_current()
+        self._start_for_pid(resolved_pid)
+
+    def close(self) -> None:
+        self._stop_current()
+
+    def start_episode(self) -> None:
+        self.consume_new_events()
+
+    def consume_new_events(self) -> tuple[dict[str, Any], ...]:
+        if not self.output_path.exists():
+            return ()
+        with self.output_path.open("r", encoding="utf-8") as handle:
+            handle.seek(self._read_offset)
+            chunk = handle.read()
+            self._read_offset = handle.tell()
+        if not chunk:
+            return ()
+        buffered = self._pending_fragment + chunk
+        lines = buffered.splitlines(keepends=True)
+        if lines and not lines[-1].endswith("\n"):
+            self._pending_fragment = lines.pop()
+        else:
+            self._pending_fragment = ""
+        parsed: list[dict[str, Any]] = []
+        for line in lines:
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
+            if isinstance(payload, dict):
+                parsed.append(payload)
+        return tuple(parsed)
+
+    def _start_for_pid(self, pid: int) -> None:
+        self.output_path.parent.mkdir(parents=True, exist_ok=True)
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        self._log_handle = self.log_path.open("a", encoding="utf-8", buffering=1)
+        command = [
+            sys.executable,
+            "-m",
+            "src.memory.victory_transition_monitor",
+            "--pid",
+            str(int(pid)),
+            "--output",
+            str(self.output_path),
+        ]
+        try:
+            self._process = subprocess.Popen(
+                command,
+                cwd=str(_REPO_ROOT),
+                stdout=self._log_handle,
+                stderr=subprocess.STDOUT,
+                text=True,
+            )
+        except OSError:
+            self._close_log_handle()
+            raise
+        self._attached_pid = int(pid)
+        if self._startup_delay_seconds > 0:
+            time.sleep(self._startup_delay_seconds)
+        if self._process.poll() is not None:
+            exit_code = int(self._process.returncode or 0)
+            log_tail = self._read_log_tail()
+            self._stop_current()
+            detail = f" Monitor log tail:\n{log_tail}" if log_tail else ""
+            raise RuntimeError(
+                "Victory transition monitor exited during startup "
+                f"for pid={pid} with code={exit_code}.{detail}"
+            )
+
+    def _stop_current(self) -> None:
+        process = self._process
+        if process is not None:
+            if process.poll() is None:
+                process.terminate()
+                try:
+                    process.wait(timeout=2.0)
+                except subprocess.TimeoutExpired:
+                    process.kill()
+                    process.wait(timeout=2.0)
+            self._process = None
+        self._attached_pid = None
+        self._close_log_handle()
+
+    def _close_log_handle(self) -> None:
+        if self._log_handle is None:
+            return
+        try:
+            self._log_handle.close()
+        finally:
+            self._log_handle = None
+
+    def _read_log_tail(self, *, max_lines: int = 12) -> str:
+        if not self.log_path.exists():
+            return ""
+        lines = self.log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+        return "\n".join(lines[-max_lines:])
+
+
+def _hook_snapshot_value(event: dict[str, Any], field_name: str) -> Any | None:
+    snapshot = event.get("snapshot")
+    if not isinstance(snapshot, dict):
+        return None
+    field = snapshot.get(field_name)
+    if not isinstance(field, dict) or field.get("status") != "ok":
+        return None
+    return field.get("value")
+
+
+def _hook_snapshot_int(event: dict[str, Any], field_name: str) -> int | None:
+    value = _hook_snapshot_value(event, field_name)
+    try:
+        if value is None:
+            return None
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _hook_snapshot_bool(event: dict[str, Any], field_name: str) -> bool | None:
+    value = _hook_snapshot_value(event, field_name)
+    if isinstance(value, bool):
+        return value
+    try:
+        if value is None:
+            return None
+        return bool(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _hook_event_is_victory_signal(event: dict[str, Any]) -> bool:
+    return str(event.get("target_name") or "").strip() in {
+        "normal_victory_flag_set",
+        "points_victory_flag_set",
+    }
 
 
 def _add_common_runner_args(
@@ -416,6 +587,12 @@ def _add_common_runner_args(
         action=argparse.BooleanOptionalAction,
         default=False,
         help="Print per-step split reward components.",
+    )
+    parser.add_argument(
+        "--victory-monitor",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Run the debugger-backed victory transition monitor during hybrid runs.",
     )
     parser.add_argument(
         "--meta-reward-objective-complete",
@@ -944,10 +1121,24 @@ def _build_hybrid_config_payload(
     command: str,
     restore_save_source: Path | None,
     meta_reward_weights: HybridMetaRewardWeights,
+    victory_monitor_enabled: bool,
+    victory_monitor_output_path: Path | None,
+    victory_monitor_log_path: Path | None,
 ) -> dict[str, Any]:
     return {
         "command": command,
         "run_tag": str(args.run_tag),
+        "victory_monitor_enabled": bool(victory_monitor_enabled),
+        "victory_monitor_output_path": (
+            str(victory_monitor_output_path)
+            if victory_monitor_output_path is not None
+            else None
+        ),
+        "victory_monitor_log_path": (
+            str(victory_monitor_log_path)
+            if victory_monitor_log_path is not None
+            else None
+        ),
         "no_enemies_mode": bool(args.no_enemies),
         "movement_keys": str(args.movement_keys),
         "siphon_key": str(args.siphon_key),
@@ -993,11 +1184,14 @@ def _run_rollouts(
     tui: RunnerTuiSession,
     monitor_enabled: bool,
     print_reward_breakdown: bool,
+    victory_monitor_session: _VictoryMonitorProcess | None = None,
 ) -> tuple[HybridEpisodeSummary, ...]:
     results: list[HybridEpisodeSummary] = []
 
     for _ in range(episodes):
         state = env.reset()
+        if victory_monitor_session is not None:
+            victory_monitor_session.start_episode()
         coordinator.start_episode()
         episode_id = env.current_episode_id or f"episode-{len(results) + 1:05d}"
         steps = 0
@@ -1027,6 +1221,7 @@ def _run_rollouts(
         final_action: str | None = None
         last_known_player_position: dict[str, int] | None = None
         last_known_exit_position: dict[str, int] | None = None
+        hook_victory_signal_seen = False
 
         while steps < max_steps and not done:
             last_known_player_position, last_known_exit_position = _update_last_known_positions(
@@ -1090,6 +1285,37 @@ def _run_rollouts(
 
             final_action = trace.decision.action
             next_state, _env_reward, done, info = env.step(trace.decision.action)
+            hook_events = (
+                victory_monitor_session.consume_new_events()
+                if victory_monitor_session is not None
+                else ()
+            )
+            for hook_event in hook_events:
+                if _hook_event_is_victory_signal(hook_event):
+                    hook_victory_signal_seen = True
+            if (
+                done
+                and str(info.get("terminal_reason") or "").strip().lower() == "state:start_screen_unknown"
+            ):
+                if victory_monitor_session is not None and not hook_victory_signal_seen:
+                    for _ in range(3):
+                        time.sleep(0.05)
+                        hook_events = victory_monitor_session.consume_new_events()
+                        if not hook_events:
+                            continue
+                        for hook_event in hook_events:
+                            if _hook_event_is_victory_signal(hook_event):
+                                hook_victory_signal_seen = True
+                        if hook_victory_signal_seen:
+                            break
+                if hook_victory_signal_seen:
+                    info = {
+                        **info,
+                        "terminal_reason": "state:victory",
+                        "victory_detected": True,
+                        "victory_inferred_from_start_screen": True,
+                        "start_screen_unknown_detected": False,
+                    }
             last_known_player_position, last_known_exit_position = _update_last_known_positions(
                 state=next_state,
                 last_player_position=last_known_player_position,
@@ -1303,6 +1529,16 @@ def main() -> None:
     args = parser.parse_args()
     _validate_args(parser, args)
 
+    command = str(args.command)
+    training_commands = {"train-meta-no-enemies", "train-full-hierarchical"}
+    victory_monitor_enabled = bool(args.victory_monitor) and command in training_commands
+    run_directory: Path | None = None
+    if command in training_commands:
+        checkpoint_root = Path(str(args.checkpoint_root))
+        run_directory = _next_run_directory(root=checkpoint_root, tag=str(args.run_tag))
+        if victory_monitor_enabled:
+            run_directory.mkdir(parents=True, exist_ok=True)
+
     monitor_enabled = bool(args.tui) or bool(args.external_status_file)
     effective_window_input = bool(args.window_input) or bool(args.step_through) or bool(args.tui)
     if effective_window_input and not bool(args.window_input):
@@ -1347,6 +1583,7 @@ def main() -> None:
             time.sleep(restore_save_delay_seconds)
 
     env: HybridLiveEnv | None = None
+    victory_monitor_session: _VictoryMonitorProcess | None = None
     tui = RunnerTuiSession(
         executable_name=str(args.exe),
         enabled=monitor_enabled,
@@ -1366,9 +1603,18 @@ def main() -> None:
                 else None
             ),
         )
+        if victory_monitor_enabled:
+            assert run_directory is not None
+            victory_monitor_session = _VictoryMonitorProcess(run_directory=run_directory)
+            env.add_runtime_binding_callback(victory_monitor_session.update_pid)
+            print(
+                "victory_transition_monitor_enabled\toutput={output}\tlog={log}".format(
+                    output=victory_monitor_session.output_path,
+                    log=victory_monitor_session.log_path,
+                )
+            )
         tui.start()
 
-        command = str(args.command)
         meta_reward_weights = _build_meta_reward_weights(args)
         reward_suite = HybridRewardSuite(meta_weights=meta_reward_weights)
         coordinator_config = HybridCoordinatorConfig(
@@ -1465,6 +1711,7 @@ def main() -> None:
                     tui=tui,
                     monitor_enabled=monitor_enabled,
                     print_reward_breakdown=bool(args.print_reward_breakdown),
+                    victory_monitor_session=victory_monitor_session,
                 )
                 results.extend(warmup_results)
 
@@ -1486,6 +1733,7 @@ def main() -> None:
                     tui=tui,
                     monitor_enabled=monitor_enabled,
                     print_reward_breakdown=bool(args.print_reward_breakdown),
+                    victory_monitor_session=victory_monitor_session,
                 )
                 results.extend(finetune_results)
         else:
@@ -1504,6 +1752,7 @@ def main() -> None:
                 tui=tui,
                 monitor_enabled=monitor_enabled,
                 print_reward_breakdown=bool(args.print_reward_breakdown),
+                victory_monitor_session=victory_monitor_session,
             )
             results.extend(rollout_results)
 
@@ -1511,8 +1760,7 @@ def main() -> None:
         _print_results(finalized)
 
         if command in {"train-meta-no-enemies", "train-full-hierarchical"}:
-            checkpoint_root = Path(str(args.checkpoint_root))
-            run_directory = _next_run_directory(root=checkpoint_root, tag=str(args.run_tag))
+            assert run_directory is not None
             bundle = HybridCheckpointManager.save_bundle(
                 run_directory=run_directory,
                 meta_controller=coordinator.meta_controller,
@@ -1522,6 +1770,17 @@ def main() -> None:
                     command=command,
                     restore_save_source=restore_save_source,
                     meta_reward_weights=meta_reward_weights,
+                    victory_monitor_enabled=victory_monitor_enabled,
+                    victory_monitor_output_path=(
+                        victory_monitor_session.output_path
+                        if victory_monitor_session is not None
+                        else None
+                    ),
+                    victory_monitor_log_path=(
+                        victory_monitor_session.log_path
+                        if victory_monitor_session is not None
+                        else None
+                    ),
                 ),
                 training_state=_build_training_state_payload(
                     results=finalized,
@@ -1531,6 +1790,8 @@ def main() -> None:
             )
             print(f"hybrid_checkpoint_saved\t{bundle.run_directory}")
     finally:
+        if victory_monitor_session is not None:
+            victory_monitor_session.close()
         if env is not None:
             env.close()
         tui.close()

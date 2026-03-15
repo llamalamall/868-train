@@ -74,6 +74,18 @@
       "notes": "Static UI and game-flow references indicate +0x19B8 stores zero-based current sector index (displayed as sector+1 of 8). Runtime validation recommended."
     },
     {
+      "name": "sector_progression_index",
+      "data_type": "int32",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x1BD4",
+      "confidence": "high",
+      "notes": "Confirmed from constructor init, save/load serialization, HUD rendering, and the sector-completion progression branch. The branch increments +0x1BD4 on qualifying sector exits; when the incremented value reaches 8, the game sets victory_pending at +0x1B98. Ordinary sector-transition code can still run with this field at 0, so observing 0 at a transition hook indicates the hook likely fired on the generic transition-clear path rather than disproving the offset."
+    },
+    {
       "name": "player_credits",
       "data_type": "int32",
       "base": {
@@ -118,8 +130,20 @@
       },
       "pointer_chain": ["0x115808"],
       "read_offset": "0x1B96",
-      "confidence": "medium",
-      "notes": "Decompiled UI, load/save, and end-of-run flow show +0x1B96 toggles the final victory state after exiting sector 8."
+      "confidence": "high",
+      "notes": "Confirmed from load/save, UI, and end-of-run flow. Important caveat: ordinary sector-transition code also writes +0x1B96 back to 0 before calling the shared transition routine, so write-to-0 events are not victory-specific."
+    },
+    {
+      "name": "victory_pending",
+      "data_type": "bool",
+      "base": {
+        "kind": "module",
+        "value": "868-HACK.exe"
+      },
+      "pointer_chain": ["0x115808"],
+      "read_offset": "0x1B98",
+      "confidence": "high",
+      "notes": "Direct static evidence: the sector-completion progression branch writes +0x1B98 when the run reaches the final sector completion threshold, and the main loop later converts that pending bit into victory_active at +0x1B96 once the transition countdown expires. This is the strongest victory-specific latch currently identified."
     },
     {
       "name": "collected_progs",

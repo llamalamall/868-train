@@ -109,6 +109,16 @@ def _player_on_exit(snapshot: GameStateSnapshot) -> bool:
     return player is not None and exit_position is not None and player == exit_position
 
 
+def _player_adjacent_to_exit(snapshot: GameStateSnapshot) -> bool:
+    if snapshot.map.status != "ok":
+        return False
+    player = snapshot.map.player_position
+    exit_position = snapshot.map.exit_position
+    if player is None or exit_position is None:
+        return False
+    return abs(int(player.x) - int(exit_position.x)) + abs(int(player.y) - int(exit_position.y)) == 1
+
+
 def _action_moves_player_onto_exit(
     *,
     snapshot: GameStateSnapshot,
@@ -400,6 +410,10 @@ def _state_indicates_victory(snapshot: GameStateSnapshot) -> bool:
     return _state_extra_bool(snapshot, key="victory_active") is True
 
 
+def _state_indicates_victory_pending(snapshot: GameStateSnapshot) -> bool:
+    return _state_extra_bool(snapshot, key="victory_pending") is True
+
+
 def _state_is_final_sector(snapshot: GameStateSnapshot) -> bool:
     sector = _state_extra_numeric(snapshot, key="current_sector")
     return sector is not None and sector >= 7.0
@@ -409,32 +423,52 @@ def _final_exit_victory_fallback(
     *,
     previous_state: GameStateSnapshot,
     current_state: GameStateSnapshot,
+    last_visible_state: GameStateSnapshot | None = None,
     action: str | None = None,
 ) -> bool:
-    if _state_indicates_victory(previous_state) or _state_indicates_victory(current_state):
+    context_states = [previous_state, current_state]
+    if last_visible_state is not None:
+        context_states.append(last_visible_state)
+    if any(_state_indicates_victory(state) for state in context_states):
         return True
-    if not (_state_is_final_sector(previous_state) or _state_is_final_sector(current_state)):
+    if any(_state_indicates_victory_pending(state) for state in context_states):
+        return True
+    if not any(_state_is_final_sector(state) for state in context_states):
         return False
-    if _player_on_exit(previous_state) or _player_on_exit(current_state):
+    if any(_player_on_exit(state) for state in context_states):
+        return True
+    if any(_player_adjacent_to_exit(state) for state in context_states):
         return True
     if action is None:
         return False
-    return _action_moves_player_onto_exit(snapshot=previous_state, action=action)
+    return any(
+        _action_moves_player_onto_exit(snapshot=state, action=action)
+        for state in context_states
+    )
 
 
 def _sector_exit_to_start_screen_fallback(
     *,
     previous_state: GameStateSnapshot,
     current_state: GameStateSnapshot,
+    last_visible_state: GameStateSnapshot | None = None,
     action: str | None = None,
 ) -> bool:
-    if _state_is_final_sector(previous_state) or _state_is_final_sector(current_state):
+    context_states = [previous_state, current_state]
+    if last_visible_state is not None:
+        context_states.append(last_visible_state)
+    if any(_state_is_final_sector(state) for state in context_states):
         return False
-    if _player_on_exit(previous_state) or _player_on_exit(current_state):
+    if any(_player_on_exit(state) for state in context_states):
+        return True
+    if any(_player_adjacent_to_exit(state) for state in context_states):
         return True
     if action is None:
         return False
-    return _action_moves_player_onto_exit(snapshot=previous_state, action=action)
+    return any(
+        _action_moves_player_onto_exit(snapshot=state, action=action)
+        for state in context_states
+    )
 
 
 def _state_terminal_reason(snapshot: GameStateSnapshot) -> str | None:
@@ -480,6 +514,7 @@ def _start_screen_transition_terminal_reason(
     *,
     previous_state: GameStateSnapshot,
     current_state: GameStateSnapshot,
+    last_visible_state: GameStateSnapshot | None = None,
     terminal_reason: str | None,
     detector_info: dict[str, Any],
     action: str | None = None,
@@ -487,6 +522,7 @@ def _start_screen_transition_terminal_reason(
     if _final_exit_victory_fallback(
         previous_state=previous_state,
         current_state=current_state,
+        last_visible_state=last_visible_state,
         action=action,
     ):
         return "state:victory"
@@ -504,6 +540,7 @@ def _start_screen_transition_terminal_reason(
     if _sector_exit_to_start_screen_fallback(
         previous_state=previous_state,
         current_state=current_state,
+        last_visible_state=last_visible_state,
         action=action,
     ):
         return "state:sector_exit_to_start_screen"
@@ -542,6 +579,7 @@ class GameEnv:
         sleep_fn: Callable[[float], None] = time.sleep,
         monotonic_fn: Callable[[], float] = time.monotonic,
         logger: logging.Logger | None = None,
+        attached_pid: int | None = None,
     ) -> None:
         self._action_api = action_api
         self._state_provider = state_provider
@@ -563,8 +601,12 @@ class GameEnv:
         self._current_episode_id: str | None = None
         self._episode_counter = 0
         self._step_index = 0
+        self._last_visible_state: GameStateSnapshot | None = None
+        self._last_visible_state_step_index: int | None = None
         self._prog_action_backoff: dict[str, int] = {}
         self._cleanup_callbacks: list[Callable[[], None]] = []
+        self._runtime_binding_callbacks: list[Callable[[int], None]] = []
+        self._attached_pid: int | None = (int(attached_pid) if attached_pid is not None else None)
 
     @property
     def action_space(self) -> tuple[str, ...]:
@@ -646,6 +688,22 @@ class GameEnv:
         """Episode identifier for current active episode."""
         return self._current_episode_id
 
+    @property
+    def attached_pid(self) -> int | None:
+        """Current live process PID backing this environment."""
+        return self._attached_pid
+
+    def add_runtime_binding_callback(self, callback: Callable[[int], None]) -> None:
+        """Register callback invoked when the bound live-process PID changes."""
+        self._runtime_binding_callbacks.append(callback)
+        if self._attached_pid is not None:
+            callback(int(self._attached_pid))
+
+    def _notify_runtime_binding_callbacks(self, pid: int) -> None:
+        self._attached_pid = int(pid)
+        for callback in tuple(self._runtime_binding_callbacks):
+            callback(int(pid))
+
     def add_cleanup_callback(self, callback: Callable[[], None]) -> None:
         """Register callback executed when environment closes."""
         self._cleanup_callbacks.append(callback)
@@ -682,6 +740,9 @@ class GameEnv:
         self._current_episode_id = f"episode-{self._episode_counter:05d}"
         self._step_index = 0
         self._current_state = state
+        self._last_visible_state = None
+        self._last_visible_state_step_index = None
+        self._remember_visible_state(state=state, step_index=0)
         self._prog_action_backoff.clear()
 
         if self._telemetry_logger is not None:
@@ -708,6 +769,7 @@ class GameEnv:
         assert self._current_episode_id is not None
         previous_state = self._current_state
         step_index = self._step_index
+        self._remember_visible_state(state=previous_state, step_index=step_index)
         self._advance_prog_action_backoff()
 
         self._perform_action_with_retries(action=action, error_cls=StepTimeoutError)
@@ -723,6 +785,8 @@ class GameEnv:
             action=action,
             previous_state=previous_state,
         )
+        self._remember_visible_state(state=current_state, step_index=step_index)
+        last_visible_state = self._recent_visible_state(step_index=step_index)
         terminal_reason = _state_terminal_reason(current_state)
         done = terminal_reason is not None
 
@@ -752,6 +816,7 @@ class GameEnv:
         if _final_exit_victory_fallback(
             previous_state=previous_state,
             current_state=current_state,
+            last_visible_state=last_visible_state,
             action=action,
         ) and (
             terminal_reason == "state:victory" or start_screen_like
@@ -769,6 +834,7 @@ class GameEnv:
             terminal_reason = _start_screen_transition_terminal_reason(
                 previous_state=previous_state,
                 current_state=current_state,
+                last_visible_state=last_visible_state,
                 terminal_reason=terminal_reason,
                 detector_info=detector_info,
                 action=action,
@@ -851,6 +917,19 @@ class GameEnv:
         self._step_index += 1
         return (current_state, reward_value, done, info)
 
+    def _remember_visible_state(self, *, state: GameStateSnapshot, step_index: int) -> None:
+        if state.map.status != "ok":
+            return
+        self._last_visible_state = state
+        self._last_visible_state_step_index = int(step_index)
+
+    def _recent_visible_state(self, *, step_index: int) -> GameStateSnapshot | None:
+        if self._last_visible_state is None or self._last_visible_state_step_index is None:
+            return None
+        if int(step_index) - int(self._last_visible_state_step_index) > 1:
+            return None
+        return self._last_visible_state
+
     def _read_state_after_action(
         self,
         *,
@@ -858,6 +937,7 @@ class GameEnv:
         previous_state: GameStateSnapshot,
     ) -> tuple[GameStateSnapshot, bool, str, int]:
         current_state = self._read_state_once_for_step()
+        self._remember_visible_state(state=current_state, step_index=self._step_index)
         polls = 1
         acknowledged, reason = self._is_action_acknowledged(
             action=action,
@@ -880,6 +960,7 @@ class GameEnv:
             if poll_interval > 0:
                 self._sleep_fn(poll_interval)
             current_state = self._read_state_once_for_step()
+            self._remember_visible_state(state=current_state, step_index=self._step_index)
             polls += 1
             acknowledged, reason = self._is_action_acknowledged(
                 action=action,
@@ -1547,6 +1628,7 @@ class GameEnv:
                 previous_map_state = None
 
             _apply_runtime_patches(new_process)
+            env._notify_runtime_binding_callbacks(int(new_process.pid))
             if int(previous_process.handle) != int(new_process.handle):
                 _close_process_handle_safe(previous_process)
 
@@ -1698,12 +1780,14 @@ class GameEnv:
                 if (focus_window_on_attach or enemy_spawn_suppressor.enabled)
                 else None
             ),
+            attached_pid=int(attached_process.pid),
         )
 
         def _cleanup_live_bindings() -> None:
             with runtime_lock:
                 active_process = runtime.get("attached_process")
                 runtime["attached_process"] = None
+            env._attached_pid = None
             if active_process is not None:
                 _close_process_handle_safe(active_process)
 

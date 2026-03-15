@@ -16,6 +16,7 @@ from src.gui.dqn_runner_gui import main as dqn_gui_main
 from src.hybrid.runner import main as hybrid_runner_main
 from src.memory.offset_smoke_test import main as offset_smoke_main
 from src.memory.state_monitor_tui import main as state_monitor_main
+from src.memory.victory_transition_monitor import main as victory_transition_monitor_main
 from src.training.evaluate import main as evaluate_main
 
 CommandHandler = Callable[[], None]
@@ -80,6 +81,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_passthrough_parser(
         subparsers,
+        name="victory-monitor",
+        summary="Debugger-style victory transition monitor.",
+        details=(
+            "Runs src.memory.victory_transition_monitor and captures snapshots when the game "
+            "writes victory_pending, writes victory_active, or enters the victory transition."
+        ),
+    )
+    _add_passthrough_parser(
+        subparsers,
         name="run-random",
         summary="Run random baseline episodes.",
         details="Runs src.env.random_policy_runner against the live game environment.",
@@ -138,6 +148,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         "fingerprint": fingerprint_main,
         "offset-smoke": offset_smoke_main,
         "state-monitor": state_monitor_main,
+        "victory-monitor": victory_transition_monitor_main,
         "run-random": random_runner_main,
         "run-heuristic": heuristic_runner_main,
         "run-dqn": dqn_runner_main,

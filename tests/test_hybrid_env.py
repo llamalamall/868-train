@@ -50,7 +50,9 @@ def _build_snapshot(
 class _StubGameEnv:
     action_space: tuple[str, ...]
     current_episode_id: str | None = None
+    attached_pid: int | None = None
     _actions: tuple[str, ...] = ()
+    runtime_callbacks: list[Any] | None = None
 
     def reset(self) -> Any:
         raise NotImplementedError
@@ -63,6 +65,11 @@ class _StubGameEnv:
 
     def close(self) -> None:
         return
+
+    def add_runtime_binding_callback(self, callback: Any) -> None:
+        if self.runtime_callbacks is None:
+            self.runtime_callbacks = []
+        self.runtime_callbacks.append(callback)
 
 
 def test_hybrid_available_actions_adds_space_when_adjacent_siphon_marker_exists() -> None:
@@ -101,3 +108,17 @@ def test_hybrid_available_actions_does_not_add_space_for_previously_siphoned_til
     )
 
     assert env.available_actions(state) == ("move_up",)
+
+
+def test_hybrid_env_exposes_attached_pid_and_runtime_callback_proxy() -> None:
+    game_env = _StubGameEnv(
+        action_space=("move_up",),
+        attached_pid=4242,
+    )
+    env = HybridLiveEnv(game_env=game_env, no_enemies_mode=True)
+    callback = lambda pid: pid
+
+    env.add_runtime_binding_callback(callback)
+
+    assert env.attached_pid == 4242
+    assert game_env.runtime_callbacks == [callback]
