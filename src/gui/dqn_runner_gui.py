@@ -1274,6 +1274,7 @@ class DqnRunnerGui(tk.Tk):
         self._state_monitor_status = tk.StringVar(value="state_monitor=idle")
         self._state_monitor_timestamp = tk.StringVar(value="last_snapshot=-")
         self._state_monitor_pid = tk.StringVar(value="pid=-")
+        self._live_monitor_tab_widget: ttk.Frame | None = None
         self._state_tab_widget: ttk.Frame | None = None
         self._ascii_maps_tab_widget: ttk.Frame | None = None
         self._state_fields_tree: ttk.Treeview | None = None
@@ -1720,6 +1721,41 @@ class DqnRunnerGui(tk.Tk):
                     widget.bind("<Motion>", self._move_phase_tooltip, add="+")
                     widget.bind("<Leave>", self._hide_phase_tooltip, add="+")
 
+        monitor_meta = ttk.Frame(monitor, style="Surface.TFrame")
+        monitor_meta.grid(row=2, column=0, sticky="ew", pady=(2, 8))
+        monitor_meta.columnconfigure(0, weight=0)
+        monitor_meta.columnconfigure(1, weight=0)
+        monitor_meta.columnconfigure(2, weight=1)
+        monitor_meta.columnconfigure(3, weight=1)
+        monitor_meta.columnconfigure(4, weight=1)
+        ttk.Button(
+            monitor_meta,
+            text="Attach",
+            command=self._ensure_state_monitor_started,
+            style="Primary.TButton",
+        ).grid(row=0, column=0, sticky="w")
+        ttk.Button(
+            monitor_meta,
+            text="Detach",
+            command=self._stop_state_monitor,
+            style="Secondary.TButton",
+        ).grid(row=0, column=1, sticky="w", padx=(8, 12))
+        ttk.Label(monitor_meta, textvariable=self._state_monitor_status, style="FormHelp.TLabel").grid(
+            row=0,
+            column=2,
+            sticky="w",
+        )
+        ttk.Label(monitor_meta, textvariable=self._state_monitor_pid, style="FormHelp.TLabel").grid(
+            row=0,
+            column=3,
+            sticky="w",
+        )
+        ttk.Label(monitor_meta, textvariable=self._state_monitor_timestamp, style="FormHelp.TLabel").grid(
+            row=0,
+            column=4,
+            sticky="e",
+        )
+
         graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
         graph_shell.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
         graph_shell.columnconfigure(0, weight=1)
@@ -1818,6 +1854,7 @@ class DqnRunnerGui(tk.Tk):
         self._update_monitor_keycaps(action_line="", next_available_actions_line="")
         self._set_monitor_controls_enabled(False)
 
+        self._live_monitor_tab_widget = monitor
         self._notebook.add(monitor, text="Live Monitor")
 
     def _refresh_tab_visuals(self) -> None:
@@ -1831,6 +1868,8 @@ class DqnRunnerGui(tk.Tk):
         selected_tab = self._notebook.select()
         current_widget = self.nametowidget(selected_tab)
         if (
+            (self._live_monitor_tab_widget is not None and current_widget == self._live_monitor_tab_widget)
+            or
             (self._state_tab_widget is not None and current_widget == self._state_tab_widget)
             or (self._ascii_maps_tab_widget is not None and current_widget == self._ascii_maps_tab_widget)
         ):
@@ -2094,7 +2133,11 @@ class DqnRunnerGui(tk.Tk):
                 self._ascii_maps_tab_widget is not None
                 and current_widget == self._ascii_maps_tab_widget
             )
-            if not state_selected and not ascii_selected:
+            live_selected = (
+                self._live_monitor_tab_widget is not None
+                and current_widget == self._live_monitor_tab_widget
+            )
+            if not state_selected and not ascii_selected and not live_selected:
                 return
             self._refresh_state_snapshot()
         finally:
