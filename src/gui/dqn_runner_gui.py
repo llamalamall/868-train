@@ -124,6 +124,92 @@ _TEXTUAL_STYLE_COLORS = {
     "bright_white": "#f5f9ff",
     "white": "#d7e0ea",
 }
+_RUNNER_MONITOR_MODULES = {
+    "src.env.dqn_policy_runner",
+    "src.hybrid.runner",
+    "src.training.evaluate",
+    "src.memory.state_monitor_tui",
+}
+
+
+@dataclass(frozen=True)
+class _RunningProcessSnapshot:
+    pid: int
+    args: tuple[str, ...]
+
+
+def _command_option_value(args: tuple[str, ...], option: str) -> str | None:
+    for index, token in enumerate(args):
+        if token == option and index + 1 < len(args):
+            return args[index + 1]
+        if token.startswith(f"{option}="):
+            _, _, value = token.partition("=")
+            return value
+    return None
+
+
+def _discover_monitor_files_from_process_args(
+    *,
+    snapshots: tuple[_RunningProcessSnapshot, ...],
+    executable_name: str,
+) -> tuple[Path, Path | None] | None:
+    target_executable = Path(executable_name).name.lower()
+    candidates: list[tuple[int, Path, Path | None]] = []
+    for snapshot in snapshots:
+        args = snapshot.args
+        if not args:
+            continue
+        module_name = ""
+        if "-m" in args:
+            module_index = args.index("-m")
+            if module_index + 1 < len(args):
+                module_name = args[module_index + 1]
+        if module_name not in _RUNNER_MONITOR_MODULES:
+            continue
+
+        configured_exe = _command_option_value(args, "--exe") or "868-HACK.exe"
+        if Path(configured_exe).name.lower() != target_executable:
+            continue
+
+        status_value = _command_option_value(args, "--external-status-file")
+        if not status_value:
+            continue
+        status_file = Path(status_value)
+        control_value = _command_option_value(args, "--external-control-file")
+        control_file = Path(control_value) if control_value else None
+        priority = 1 if control_file is not None else 0
+        candidates.append((priority, status_file, control_file))
+
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0], reverse=True)
+    _, status_file, control_file = candidates[0]
+    return status_file, control_file
+
+
+def _list_running_python_processes() -> tuple[_RunningProcessSnapshot, ...]:
+    snapshots: list[_RunningProcessSnapshot] = []
+    proc_root = Path("/proc")
+    if not proc_root.exists():
+        return tuple()
+    for entry in proc_root.iterdir():
+        if not entry.name.isdigit():
+            continue
+        cmdline_file = entry / "cmdline"
+        try:
+            raw = cmdline_file.read_bytes()
+        except OSError:
+            continue
+        if not raw:
+            continue
+        args = tuple(arg for arg in raw.decode("utf-8", errors="ignore").split("\x00") if arg)
+        if not args:
+            continue
+        executable = Path(args[0]).name.lower()
+        if "python" not in executable:
+            continue
+        snapshots.append(_RunningProcessSnapshot(pid=int(entry.name), args=args))
+    return tuple(snapshots)
 
 
 def _iter_parser_actions(parser: argparse.ArgumentParser) -> tuple[argparse.Action, ...]:
@@ -2143,6 +2229,36 @@ class DqnRunnerGui(tk.Tk):
         finally:
             self.after(300, self._poll_state_monitor)
 
+
+    def _attach_live_monitor_files_from_running_runner(self, *, executable_name: str) -> bool:
+        if self._external_status_file is not None:
+            return True
+        monitor_files = _discover_monitor_files_from_process_args(
+            snapshots=_list_running_python_processes(),
+            executable_name=executable_name,
+        )
+        if monitor_files is None:
+            return False
+
+        status_file, control_file = monitor_files
+        self._external_status_file = status_file
+        self._external_control_file = control_file
+        self._status_snapshot = ("", "", "", "")
+        self._monitor_training_line.set("training=attached")
+        self._monitor_action_line.set("action=awaiting_runner")
+        self._monitor_reward_line.set("reward=awaiting_runner")
+        self._monitor_next_available_actions_line.set("next_available_actions=awaiting_runner")
+        self._update_monitor_keycaps(action_line="", next_available_actions_line="")
+        self._reward_history.clear()
+        self._draw_reward_graph()
+        if control_file is not None:
+            self._set_monitor_controls_enabled(True)
+            self._refresh_monitor_control_state()
+        else:
+            self._monitor_control_state.set("session=unavailable")
+            self._set_monitor_controls_enabled(False)
+        return True
+
     def _resolve_monitor_executable_name(self) -> str:
         try:
             form = self._current_form()
@@ -2157,6 +2273,9 @@ class DqnRunnerGui(tk.Tk):
         if self._state_monitor is not None:
             return
         executable_name = self._resolve_monitor_executable_name()
+        attached_to_runner = self._attach_live_monitor_files_from_running_runner(
+            executable_name=executable_name
+        )
         try:
             monitor = MemoryStateMonitor(
                 executable_name=executable_name,
@@ -2172,7 +2291,10 @@ class DqnRunnerGui(tk.Tk):
             return
         self._state_monitor = monitor
         self._state_monitor_error.set("")
-        self._state_monitor_status.set(f"state_monitor=attached exe={executable_name}")
+        if attached_to_runner:
+            self._state_monitor_status.set(f"state_monitor=attached+runner exe={executable_name}")
+        else:
+            self._state_monitor_status.set(f"state_monitor=attached exe={executable_name}")
         self._state_monitor_pid.set(f"pid={monitor.attached.pid}")
         self._refresh_state_snapshot()
 

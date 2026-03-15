@@ -20,6 +20,8 @@ from src.gui.dqn_runner_gui import (
     _format_phase_breakdown_tooltip,
     _format_reward_breakdown_tooltip,
     _format_duration_seconds,
+    _discover_monitor_files_from_process_args,
+    _RunningProcessSnapshot,
     _initial_browse_dir,
     _is_boolean_flag,
     _get_subparser,
@@ -446,3 +448,81 @@ def test_hybrid_gui_action_discovery_includes_meta_reward_weight_flags() -> None
     assert "meta_reward_premature_exit_penalty" in discovered
     assert "meta_reward_sector_advance" in discovered
     assert "meta_reward_final_sector_win" in discovered
+
+
+def test_discover_monitor_files_from_process_args_prefers_control_enabled_runner() -> None:
+    snapshots = (
+        _RunningProcessSnapshot(
+            pid=1001,
+            args=(
+                "python",
+                "-m",
+                "src.training.evaluate",
+                "compare",
+                "--exe",
+                "868-HACK.exe",
+                "--external-status-file",
+                "C:/tmp/eval-status.json",
+            ),
+        ),
+        _RunningProcessSnapshot(
+            pid=1002,
+            args=(
+                "python",
+                "-m",
+                "src.env.dqn_policy_runner",
+                "--exe",
+                "868-HACK.exe",
+                "--external-status-file",
+                "C:/tmp/dqn-status.json",
+                "--external-control-file",
+                "C:/tmp/dqn-control.json",
+            ),
+        ),
+    )
+
+    monitor_files = _discover_monitor_files_from_process_args(
+        snapshots=snapshots,
+        executable_name="868-HACK.exe",
+    )
+
+    assert monitor_files == (Path("C:/tmp/dqn-status.json"), Path("C:/tmp/dqn-control.json"))
+
+
+def test_discover_monitor_files_from_process_args_matches_by_executable_basename() -> None:
+    snapshots = (
+        _RunningProcessSnapshot(
+            pid=1003,
+            args=(
+                "python",
+                "-m",
+                "src.hybrid.runner",
+                "train-meta-no-enemies",
+                "--exe",
+                "C:/Games/868-HACK.exe",
+                "--external-status-file",
+                "C:/tmp/hybrid-status.json",
+                "--external-control-file",
+                "C:/tmp/hybrid-control.json",
+            ),
+        ),
+        _RunningProcessSnapshot(
+            pid=1004,
+            args=(
+                "python",
+                "-m",
+                "src.env.dqn_policy_runner",
+                "--exe",
+                "OtherGame.exe",
+                "--external-status-file",
+                "C:/tmp/other-status.json",
+            ),
+        ),
+    )
+
+    monitor_files = _discover_monitor_files_from_process_args(
+        snapshots=snapshots,
+        executable_name="868-HACK.exe",
+    )
+
+    assert monitor_files == (Path("C:/tmp/hybrid-status.json"), Path("C:/tmp/hybrid-control.json"))
