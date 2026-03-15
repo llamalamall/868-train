@@ -369,6 +369,8 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "max_steps": 180,
                 "no_enemies": True,
                 "threat_trigger_distance": 2,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
             "long route validation": {
                 "episodes": 10,
@@ -376,6 +378,8 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "no_enemies": True,
                 "threat_trigger_distance": 2,
                 "prog_actions": False,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
         }
     if command_name == "train-meta-no-enemies":
@@ -388,6 +392,8 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "meta_epsilon_start": 0.6,
                 "meta_epsilon_end": 0.05,
                 "meta_epsilon_decay_steps": 5000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
             "quick tune": {
                 "episodes": 60,
@@ -395,6 +401,8 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "no_enemies": True,
                 "meta_learning_rate": 0.0005,
                 "meta_epsilon_decay_steps": 3000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
             "beta efficient warmstart": {
                 "episodes": 120,
@@ -402,7 +410,32 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "no_enemies": True,
                 "meta_learning_rate": 0.0005,
                 "meta_epsilon_decay_steps": 3000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
                 "run_tag": "hybrid-meta-beta-efficient",
+            },
+            "gamma logic rerun": {
+                "episodes": 120,
+                "max_steps": 350,
+                "no_enemies": True,
+                "meta_gamma": 0.99,
+                "meta_learning_rate": 0.001,
+                "meta_epsilon_start": 0.6,
+                "meta_epsilon_end": 0.05,
+                "meta_epsilon_decay_steps": 5000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
+                "run_tag": "hybrid-meta-gamma-fixedlogic",
+            },
+            "efficient anti-churn": {
+                "episodes": 120,
+                "max_steps": 320,
+                "no_enemies": True,
+                "meta_learning_rate": 0.0005,
+                "meta_epsilon_decay_steps": 3000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
+                "run_tag": "hybrid-meta-efficient-fixedlogic",
             },
         }
     if command_name == "train-full-hierarchical":
@@ -415,6 +448,8 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "meta_freeze_episodes": 25,
                 "joint_finetune": True,
                 "threat_trigger_distance": 2,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
             "threat warmup heavy": {
                 "episodes": 240,
@@ -423,6 +458,8 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "meta_freeze_episodes": 60,
                 "joint_finetune": True,
                 "threat_learning_rate": 0.0007,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
             "beta full fixed meta": {
                 "episodes": 320,
@@ -436,6 +473,8 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "threat_epsilon_end": 0.05,
                 "threat_epsilon_decay_steps": 15000,
                 "threat_trigger_distance": 2,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
                 "run_tag": "hybrid-full-beta-fixedmeta",
             },
             "beta full long warmup": {
@@ -450,6 +489,8 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "threat_epsilon_end": 0.05,
                 "threat_epsilon_decay_steps": 15000,
                 "threat_trigger_distance": 2,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
                 "run_tag": "hybrid-full-beta-longwarmup",
             },
         }
@@ -460,16 +501,22 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "episodes": 10,
                 "max_steps": 300,
                 "no_enemies": False,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
             "eval stress": {
                 "episodes": 25,
                 "max_steps": 500,
                 "no_enemies": False,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
             "beta verification": {
                 "episodes": 30,
                 "max_steps": 450,
                 "no_enemies": False,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
             },
         }
     return {"defaults": {}}

@@ -328,7 +328,9 @@ class HybridRewardSuite:
         failed = done and any(token in terminal_reason for token in ("fail", "dead", "loss"))
         health_delta = _health_delta(previous_state=previous_state, current_state=current_state)
         damage_taken = max(-health_delta, 0.0)
-        rejoined_route = bool(info.get("rejoined_route", False))
+        rejoined_route = bool(
+            info.get("route_rejoin_event", info.get("rejoined_route", False))
+        )
         invalid_override = bool(info.get("invalid_override", False))
 
         survival_component = abs(self.threat_weights.survival) if not done else 0.0

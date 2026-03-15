@@ -122,6 +122,8 @@ def test_run_hybrid_presets_include_expected_profiles() -> None:
     assert "defaults" in meta
     assert "gate b baseline" in meta
     assert "beta efficient warmstart" in meta
+    assert "gamma logic rerun" in meta
+    assert "efficient anti-churn" in meta
     assert "defaults" in full
     assert "gate c baseline" in full
     assert "beta full fixed meta" in full
@@ -141,7 +143,44 @@ def test_beta_meta_preset_uses_expected_efficiency_settings() -> None:
         "no_enemies": True,
         "meta_learning_rate": 0.0005,
         "meta_epsilon_decay_steps": 3000,
+        "phase_lock_min_steps": 6,
+        "target_stall_release_steps": 4,
         "run_tag": "hybrid-meta-beta-efficient",
+    }
+
+
+def test_gamma_logic_rerun_profile_matches_latest_gamma_hyperparameters() -> None:
+    presets = _run_hybrid_preset_overrides(command_name="train-meta-no-enemies")
+    profile = presets["gamma logic rerun"]
+
+    assert profile == {
+        "episodes": 120,
+        "max_steps": 350,
+        "no_enemies": True,
+        "meta_gamma": 0.99,
+        "meta_learning_rate": 0.001,
+        "meta_epsilon_start": 0.6,
+        "meta_epsilon_end": 0.05,
+        "meta_epsilon_decay_steps": 5000,
+        "phase_lock_min_steps": 6,
+        "target_stall_release_steps": 4,
+        "run_tag": "hybrid-meta-gamma-fixedlogic",
+    }
+
+
+def test_efficient_anti_churn_profile_sets_phase_lock_knobs() -> None:
+    presets = _run_hybrid_preset_overrides(command_name="train-meta-no-enemies")
+    profile = presets["efficient anti-churn"]
+
+    assert profile == {
+        "episodes": 120,
+        "max_steps": 320,
+        "no_enemies": True,
+        "meta_learning_rate": 0.0005,
+        "meta_epsilon_decay_steps": 3000,
+        "phase_lock_min_steps": 6,
+        "target_stall_release_steps": 4,
+        "run_tag": "hybrid-meta-efficient-fixedlogic",
     }
 
 
@@ -178,10 +217,14 @@ def test_beta_full_presets_resolve_latest_beta_meta_checkpoint(monkeypatch: pyte
     assert fixed_meta["threat_epsilon_start"] == pytest.approx(0.80)
     assert fixed_meta["threat_epsilon_end"] == pytest.approx(0.05)
     assert fixed_meta["threat_epsilon_decay_steps"] == 15000
+    assert fixed_meta["phase_lock_min_steps"] == 6
+    assert fixed_meta["target_stall_release_steps"] == 4
     assert fixed_meta["run_tag"] == "hybrid-full-beta-fixedmeta"
     assert long_warmup["warmstart_checkpoint"] == str(latest_beta)
     assert long_warmup["joint_finetune"] is True
     assert long_warmup["meta_freeze_episodes"] == 80
+    assert long_warmup["phase_lock_min_steps"] == 6
+    assert long_warmup["target_stall_release_steps"] == 4
     assert long_warmup["run_tag"] == "hybrid-full-beta-longwarmup"
     assert older_beta != latest_beta
 
@@ -231,6 +274,8 @@ def test_beta_eval_preset_uses_verification_settings() -> None:
         "episodes": 30,
         "max_steps": 450,
         "no_enemies": False,
+        "phase_lock_min_steps": 6,
+        "target_stall_release_steps": 4,
     }
 
 

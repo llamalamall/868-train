@@ -294,8 +294,152 @@ def test_game_env_step_marks_done_when_fail_detector_reports_null_pointer_start_
     _, _, done, info = env.step("wait")
 
     assert done is True
-    assert info["terminal_reason"] == "state:start_screen"
+    assert info["terminal_reason"] == "state:start_screen_unknown"
     assert info["start_screen_detected"] is True
+    assert info["start_screen_unknown_detected"] is True
+
+
+def test_game_env_step_attributes_start_screen_to_death_when_previous_state_failed() -> None:
+    state_provider = QueueStateProvider([_snapshot(failed=True), _start_screen_snapshot()])
+    actions = FakeActionAPI()
+    fail_detector = SimpleNamespace(
+        check=lambda: SimpleNamespace(
+            is_terminal=False,
+            reason="memory_unavailable",
+            source="memory",
+            error="null_pointer",
+        )
+    )
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        fail_detector=fail_detector,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait", "confirm", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+
+    env.reset()
+    _, _, done, info = env.step("wait")
+
+    assert done is True
+    assert info["terminal_reason"] == "state:death_to_start_screen"
+    assert info["start_screen_detected"] is True
+    assert info["death_to_start_screen_detected"] is True
+
+
+def test_game_env_step_attributes_non_final_exit_transition_to_start_screen() -> None:
+    sector_exit_state = _snapshot(
+        failed=False,
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(4, 5),
+            exit_position=GridPosition(5, 5),
+        ),
+        extra_fields={"current_sector": _field(3)},
+    )
+    state_provider = QueueStateProvider([sector_exit_state, _start_screen_snapshot()])
+    actions = FakeActionAPI()
+    fail_detector = SimpleNamespace(
+        check=lambda: SimpleNamespace(
+            is_terminal=False,
+            reason="memory_unavailable",
+            source="memory",
+            error="null_pointer",
+        )
+    )
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        fail_detector=fail_detector,
+        reset_strategy=NoopResetManager(),
+        action_space=("move_right", "confirm", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+
+    env.reset()
+    _, _, done, info = env.step("move_right")
+
+    assert done is True
+    assert info["terminal_reason"] == "state:sector_exit_to_start_screen"
+    assert info["start_screen_detected"] is True
+    assert info["sector_exit_to_start_screen_detected"] is True
+
+
+def test_game_env_step_inferrs_victory_when_final_exit_transitions_to_start_screen() -> None:
+    final_exit_state = _snapshot(
+        failed=False,
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(5, 5),
+            exit_position=GridPosition(5, 5),
+        ),
+        extra_fields={"current_sector": _field(7)},
+    )
+    state_provider = QueueStateProvider([final_exit_state, _start_screen_snapshot()])
+    actions = FakeActionAPI()
+    fail_detector = SimpleNamespace(
+        check=lambda: SimpleNamespace(
+            is_terminal=False,
+            reason="memory_unavailable",
+            source="memory",
+            error="null_pointer",
+        )
+    )
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        fail_detector=fail_detector,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait", "confirm", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+
+    env.reset()
+    _, _, done, info = env.step("wait")
+
+    assert done is True
+    assert info["terminal_reason"] == "state:victory"
+    assert info["victory_detected"] is True
+    assert info["victory_inferred_from_start_screen"] is True
+
+
+def test_game_env_step_inferrs_victory_when_action_moves_into_final_exit_start_screen() -> None:
+    final_exit_state = _snapshot(
+        failed=False,
+        map_state=MapState(
+            status="ok",
+            player_position=GridPosition(4, 5),
+            exit_position=GridPosition(5, 5),
+        ),
+        extra_fields={"current_sector": _field(7)},
+    )
+    state_provider = QueueStateProvider([final_exit_state, _start_screen_snapshot()])
+    actions = FakeActionAPI()
+    fail_detector = SimpleNamespace(
+        check=lambda: SimpleNamespace(
+            is_terminal=False,
+            reason="memory_unavailable",
+            source="memory",
+            error="null_pointer",
+        )
+    )
+    env = GameEnv(
+        action_api=actions,
+        state_provider=state_provider,
+        fail_detector=fail_detector,
+        reset_strategy=NoopResetManager(),
+        action_space=("move_right", "confirm", "space"),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+
+    env.reset()
+    _, _, done, info = env.step("move_right")
+
+    assert done is True
+    assert info["terminal_reason"] == "state:victory"
+    assert info["victory_detected"] is True
+    assert info["victory_inferred_from_start_screen"] is True
 
 
 def test_game_env_step_marks_done_when_victory_flag_is_active() -> None:
@@ -304,6 +448,32 @@ def test_game_env_step_marks_done_when_victory_flag_is_active() -> None:
             _snapshot(failed=False),
             _snapshot(
                 failed=False,
+                extra_fields={"victory_active": _field(True)},
+            ),
+        ]
+    )
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=state_provider,
+        reset_strategy=NoopResetManager(),
+        action_space=("wait",),
+        config=GameEnvConfig(require_non_terminal_on_reset=False),
+    )
+
+    env.reset()
+    _, _, done, info = env.step("wait")
+
+    assert done is True
+    assert info["terminal_reason"] == "state:victory"
+    assert info["victory_detected"] is True
+
+
+def test_game_env_step_prioritizes_victory_over_fail_flag() -> None:
+    state_provider = QueueStateProvider(
+        [
+            _snapshot(failed=False),
+            _snapshot(
+                failed=True,
                 extra_fields={"victory_active": _field(True)},
             ),
         ]

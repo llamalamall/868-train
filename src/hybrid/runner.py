@@ -23,7 +23,11 @@ from src.hybrid.checkpoint import HybridCheckpointManager
 from src.hybrid.coordinator import HybridCoordinator, HybridCoordinatorConfig
 from src.hybrid.env import HybridLiveEnv, HybridLiveEnvConfig
 from src.hybrid.meta_controller import MetaControllerDQN, MetaDQNConfig
-from src.hybrid.rewards import HybridMetaRewardWeights, HybridRewardSuite
+from src.hybrid.rewards import (
+    HybridMetaRewardWeights,
+    HybridRewardSuite,
+    HybridThreatRewardBreakdown,
+)
 from src.hybrid.threat_controller import ThreatControllerDRQN, ThreatDRQNConfig
 from src.hybrid.types import ObjectivePhase, ThreatOverride
 
@@ -53,7 +57,64 @@ def _terminal_is_fail(reason: object) -> bool:
     normalized = reason.strip().lower()
     if not normalized:
         return False
-    return any(token in normalized for token in ("fail", "loss", "dead", "player_health"))
+    return any(token in normalized for token in ("fail", "loss", "dead", "death", "player_health"))
+
+
+def _serialize_position(position: object | None) -> dict[str, int] | None:
+    if position is None:
+        return None
+    x_value = getattr(position, "x", None)
+    y_value = getattr(position, "y", None)
+    if not isinstance(x_value, int) or not isinstance(y_value, int):
+        return None
+    return {"x": x_value, "y": y_value}
+
+
+def _update_last_known_positions(
+    *,
+    state: object,
+    last_player_position: dict[str, int] | None,
+    last_exit_position: dict[str, int] | None,
+) -> tuple[dict[str, int] | None, dict[str, int] | None]:
+    map_state = getattr(state, "map", None)
+    if getattr(map_state, "status", None) != "ok":
+        return (last_player_position, last_exit_position)
+    player_position = _serialize_position(getattr(map_state, "player_position", None))
+    exit_position = _serialize_position(getattr(map_state, "exit_position", None))
+    return (
+        player_position if player_position is not None else last_player_position,
+        exit_position if exit_position is not None else last_exit_position,
+    )
+
+
+def _zero_threat_reward_breakdown() -> HybridThreatRewardBreakdown:
+    return HybridThreatRewardBreakdown(
+        survival=0.0,
+        damage_taken_penalty=0.0,
+        fail_penalty=0.0,
+        route_rejoin_bonus=0.0,
+        invalid_override_penalty=0.0,
+        total=0.0,
+    )
+
+
+def _health_damage_taken(
+    *,
+    previous_state: object,
+    current_state: object,
+) -> float:
+    previous_health = getattr(previous_state, "health", None)
+    current_health = getattr(current_state, "health", None)
+    previous_value = getattr(previous_health, "value", None)
+    current_value = getattr(current_health, "value", None)
+    if getattr(previous_health, "status", None) != "ok" or getattr(current_health, "status", None) != "ok":
+        return 0.0
+    try:
+        previous_numeric = float(previous_value)
+        current_numeric = float(current_value)
+    except (TypeError, ValueError):
+        return 0.0
+    return max(previous_numeric - current_numeric, 0.0)
 
 
 def _format_monitor_target(target: object) -> str:
@@ -134,6 +195,18 @@ class HybridEpisodeSummary:
     terminal_classification: str
     phase_switches: int
     threat_active_steps: int
+    threat_rewarded_steps: int
+    route_rejoin_events: int
+    phase_lock_overrides: int
+    stall_releases: int
+    start_screen_detected: bool
+    victory_detected: bool
+    victory_inferred_from_start_screen: bool
+    death_to_start_screen_detected: bool
+    start_screen_unknown_detected: bool
+    final_action: str | None
+    last_known_player_position: dict[str, int] | None
+    last_known_exit_position: dict[str, int] | None
 
 
 def _add_common_runner_args(
@@ -327,6 +400,18 @@ def _add_common_runner_args(
         help="Threat activation distance threshold in grid tiles.",
     )
     parser.add_argument(
+        "--phase-lock-min-steps",
+        type=int,
+        default=6,
+        help="Minimum steps to keep a resource/exit phase lock before allowing a phase switch.",
+    )
+    parser.add_argument(
+        "--target-stall-release-steps",
+        type=int,
+        default=4,
+        help="Consecutive non-progress steps before releasing the current locked objective.",
+    )
+    parser.add_argument(
         "--print-reward-breakdown",
         action=argparse.BooleanOptionalAction,
         default=False,
@@ -507,6 +592,10 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--restore-save-delay must be >= 0.")
     if int(args.prog_backoff_steps) < 0:
         parser.error("--prog-backoff-steps must be >= 0.")
+    if int(args.phase_lock_min_steps) < 0:
+        parser.error("--phase-lock-min-steps must be >= 0.")
+    if int(args.target_stall_release_steps) < 0:
+        parser.error("--target-stall-release-steps must be >= 0.")
     if bool(args.step_through) and not bool(args.tui):
         parser.error("--step-through requires --tui.")
     restore_source = _resolve_restore_save_source_path(args)
@@ -654,8 +743,10 @@ def _classify_terminal_reason(
     normalized = str(terminal_reason or "").strip().lower()
     if not normalized:
         return "terminal_other"
-    if normalized in {"state:start_screen", "state:victory"}:
+    if normalized in {"state:victory", "state:sector_exit_to_start_screen"}:
         return "non_death_terminal"
+    if normalized in {"state:start_screen", "state:start_screen_unknown"}:
+        return "unexpected_start_screen"
     if _terminal_is_fail(normalized):
         return "fail_or_death"
     return "terminal_other"
@@ -672,9 +763,11 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
             "episodes": 0,
             "done_episodes": 0,
             "non_death_terminal_episodes": 0,
+            "unexpected_start_screen_episodes": 0,
             "hit_step_limit_episodes": 0,
             "done_rate": 0.0,
             "non_death_terminal_rate": 0.0,
+            "unexpected_start_screen_rate": 0.0,
             "hit_step_limit_rate": 0.0,
             "avg_steps": 0.0,
             "avg_total_reward": 0.0,
@@ -686,6 +779,10 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
             "avg_route_replans": 0.0,
             "avg_phase_switches": 0.0,
             "avg_threat_active_steps": 0.0,
+            "avg_threat_rewarded_steps": 0.0,
+            "avg_route_rejoin_events": 0.0,
+            "avg_phase_lock_overrides": 0.0,
+            "avg_stall_releases": 0.0,
             "terminal_reason_counts": {},
             "terminal_classification_counts": {},
         }
@@ -695,15 +792,18 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
     terminal_classification_counts = Counter(item.terminal_classification for item in results)
     done_count = sum(1 for item in results if item.done)
     non_death_terminal_count = terminal_classification_counts.get("non_death_terminal", 0)
+    unexpected_start_screen_count = terminal_classification_counts.get("unexpected_start_screen", 0)
     hit_step_limit_count = sum(1 for item in results if item.hit_step_limit)
 
     return {
         "episodes": episode_count,
         "done_episodes": done_count,
         "non_death_terminal_episodes": non_death_terminal_count,
+        "unexpected_start_screen_episodes": unexpected_start_screen_count,
         "hit_step_limit_episodes": hit_step_limit_count,
         "done_rate": done_count / episode_count,
         "non_death_terminal_rate": non_death_terminal_count / episode_count,
+        "unexpected_start_screen_rate": unexpected_start_screen_count / episode_count,
         "hit_step_limit_rate": hit_step_limit_count / episode_count,
         "avg_steps": mean(item.steps for item in results),
         "avg_total_reward": mean(item.total_reward for item in results),
@@ -715,6 +815,10 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
         "avg_route_replans": mean(item.route_replans for item in results),
         "avg_phase_switches": mean(item.phase_switches for item in results),
         "avg_threat_active_steps": mean(item.threat_active_steps for item in results),
+        "avg_threat_rewarded_steps": mean(item.threat_rewarded_steps for item in results),
+        "avg_route_rejoin_events": mean(item.route_rejoin_events for item in results),
+        "avg_phase_lock_overrides": mean(item.phase_lock_overrides for item in results),
+        "avg_stall_releases": mean(item.stall_releases for item in results),
         "terminal_reason_counts": dict(sorted(terminal_reason_counts.items())),
         "terminal_classification_counts": dict(sorted(terminal_classification_counts.items())),
     }
@@ -724,13 +828,17 @@ def _print_results(results: tuple[HybridEpisodeSummary, ...]) -> None:
     print(
         "episode_id\tsteps\tdone\ttotal_reward\tmeta_reward\tthreat_reward\t"
         "invalid_actions\tpremature_exit\troute_len\treplans\tphase_switches\t"
-        "threat_active_steps\thit_step_limit\tterminal_classification\tterminal_reason"
+        "threat_active_steps\tthreat_rewarded_steps\troute_rejoin_events\t"
+        "phase_lock_overrides\tstall_releases\thit_step_limit\t"
+        "terminal_classification\tterminal_reason"
     )
     for result in results:
         print(
             "{episode}\t{steps}\t{done}\t{total:.3f}\t{meta:.3f}\t{threat:.3f}\t"
             "{invalid}\t{premature}\t{route_len}\t{replans}\t{phase_switches}\t"
-            "{threat_steps}\t{hit_step_limit}\t{terminal_classification}\t{reason}".format(
+            "{threat_steps}\t{threat_rewarded_steps}\t{route_rejoin_events}\t"
+            "{phase_lock_overrides}\t{stall_releases}\t{hit_step_limit}\t"
+            "{terminal_classification}\t{reason}".format(
                 episode=result.episode_id,
                 steps=result.steps,
                 done=result.done,
@@ -743,6 +851,10 @@ def _print_results(results: tuple[HybridEpisodeSummary, ...]) -> None:
                 replans=result.route_replans,
                 phase_switches=result.phase_switches,
                 threat_steps=result.threat_active_steps,
+                threat_rewarded_steps=result.threat_rewarded_steps,
+                route_rejoin_events=result.route_rejoin_events,
+                phase_lock_overrides=result.phase_lock_overrides,
+                stall_releases=result.stall_releases,
                 hit_step_limit=result.hit_step_limit,
                 terminal_classification=result.terminal_classification,
                 reason=result.terminal_reason or "",
@@ -752,19 +864,24 @@ def _print_results(results: tuple[HybridEpisodeSummary, ...]) -> None:
     print(
         "\nsummary episodes={episodes} avg_steps={avg_steps:.2f} avg_total_reward={avg_total:.3f} "
         "done_rate={done_rate:.2%} non_death_terminal_rate={non_death_rate:.2%} "
+        "unexpected_start_screen_rate={unexpected_start_rate:.2%} "
         "hit_step_limit_rate={hit_limit_rate:.2%} avg_invalid_actions={avg_invalid:.2f} "
         "avg_premature_exit={avg_premature:.2f} avg_phase_switches={avg_phase_switches:.2f} "
-        "avg_threat_active_steps={avg_threat_steps:.2f}".format(
+        "avg_threat_active_steps={avg_threat_steps:.2f} avg_threat_rewarded_steps={avg_rewarded_steps:.2f} "
+        "avg_route_rejoin_events={avg_rejoin_events:.2f}".format(
             episodes=summary["episodes"],
             avg_steps=summary["avg_steps"],
             avg_total=summary["avg_total_reward"],
             done_rate=summary["done_rate"],
             non_death_rate=summary["non_death_terminal_rate"],
+            unexpected_start_rate=summary["unexpected_start_screen_rate"],
             hit_limit_rate=summary["hit_step_limit_rate"],
             avg_invalid=summary["avg_invalid_actions"],
             avg_premature=summary["avg_premature_exit_attempts"],
             avg_phase_switches=summary["avg_phase_switches"],
             avg_threat_steps=summary["avg_threat_active_steps"],
+            avg_rewarded_steps=summary["avg_threat_rewarded_steps"],
+            avg_rejoin_events=summary["avg_route_rejoin_events"],
         )
     )
 
@@ -787,6 +904,18 @@ def _serialize_results(results: tuple[HybridEpisodeSummary, ...]) -> list[dict[s
             "terminal_classification": item.terminal_classification,
             "phase_switches": item.phase_switches,
             "threat_active_steps": item.threat_active_steps,
+            "threat_rewarded_steps": item.threat_rewarded_steps,
+            "route_rejoin_events": item.route_rejoin_events,
+            "phase_lock_overrides": item.phase_lock_overrides,
+            "stall_releases": item.stall_releases,
+            "start_screen_detected": item.start_screen_detected,
+            "victory_detected": item.victory_detected,
+            "victory_inferred_from_start_screen": item.victory_inferred_from_start_screen,
+            "death_to_start_screen_detected": item.death_to_start_screen_detected,
+            "start_screen_unknown_detected": item.start_screen_unknown_detected,
+            "final_action": item.final_action,
+            "last_known_player_position": item.last_known_player_position,
+            "last_known_exit_position": item.last_known_exit_position,
         }
         for item in results
     ]
@@ -830,6 +959,8 @@ def _build_hybrid_config_payload(
         ),
         "restore_save_delay": float(args.restore_save_delay),
         "threat_trigger_distance": int(args.threat_trigger_distance),
+        "phase_lock_min_steps": int(args.phase_lock_min_steps),
+        "target_stall_release_steps": int(args.target_stall_release_steps),
         "warmstart_checkpoint": (
             str(args.warmstart_checkpoint)
             if getattr(args, "warmstart_checkpoint", None)
@@ -881,11 +1012,28 @@ def _run_rollouts(
         route_replans = 0
         phase_switches = 0
         threat_active_steps = 0
+        threat_rewarded_steps = 0
+        route_rejoin_events = 0
         updates_applied = 0
         last_phase: ObjectivePhase | None = None
         last_target_signature: tuple[str, int, int] | None = None
+        last_threat_active = False
+        last_threat_override = ThreatOverride.ROUTE_DEFAULT
+        start_screen_detected = False
+        victory_detected = False
+        victory_inferred_from_start_screen = False
+        death_to_start_screen_detected = False
+        start_screen_unknown_detected = False
+        final_action: str | None = None
+        last_known_player_position: dict[str, int] | None = None
+        last_known_exit_position: dict[str, int] | None = None
 
         while steps < max_steps and not done:
+            last_known_player_position, last_known_exit_position = _update_last_known_positions(
+                state=state,
+                last_player_position=last_known_player_position,
+                last_exit_position=last_known_exit_position,
+            )
             available_actions = env.available_actions(state)
             if not available_actions:
                 available_actions = tuple(action for action in env.action_space if action != "cancel")
@@ -940,13 +1088,30 @@ def _run_rollouts(
                     ),
                 )
 
+            final_action = trace.decision.action
             next_state, _env_reward, done, info = env.step(trace.decision.action)
+            last_known_player_position, last_known_exit_position = _update_last_known_positions(
+                state=next_state,
+                last_player_position=last_known_player_position,
+                last_exit_position=last_known_exit_position,
+            )
             terminal_reason = str(info.get("terminal_reason") or terminal_reason or "").strip() or None
             if trace.decision.used_fallback or info.get("invalid_action_reason") is not None:
                 invalid_actions += 1
             if bool(info.get("premature_exit_attempt", False)):
                 premature_exit_attempts += 1
-            coordinator.observe_step_result(trace=trace, info=info)
+            start_screen_detected = start_screen_detected or bool(info.get("start_screen_detected", False))
+            victory_detected = victory_detected or bool(info.get("victory_detected", False))
+            victory_inferred_from_start_screen = victory_inferred_from_start_screen or bool(
+                info.get("victory_inferred_from_start_screen", False)
+            )
+            death_to_start_screen_detected = death_to_start_screen_detected or bool(
+                info.get("death_to_start_screen_detected", False)
+            )
+            start_screen_unknown_detected = start_screen_unknown_detected or bool(
+                info.get("start_screen_unknown_detected", False)
+            )
+            coordinator.observe_step_result(trace=trace, info=info, next_state=next_state)
 
             meta_breakdown = reward_suite.compute_meta_reward(
                 previous_state=state,
@@ -959,27 +1124,49 @@ def _run_rollouts(
                     "objective_distance_before": trace.objective_distance_before,
                 },
             )
-            threat_breakdown = reward_suite.compute_threat_reward(
-                previous_state=state,
-                current_state=next_state,
-                done=done,
-                threat_override=trace.decision.threat_override,
-                info={
-                    **info,
-                    "invalid_override": bool(
-                        trace.decision.used_fallback
-                        and trace.decision.threat_override != ThreatOverride.ROUTE_DEFAULT
-                    ),
-                    "rejoined_route": bool(
-                        trace.decision.threat_override == ThreatOverride.ROUTE_DEFAULT
-                        and not trace.threat_active
-                    ),
-                },
+            invalid_override = bool(
+                trace.decision.used_fallback
+                and trace.decision.threat_override != ThreatOverride.ROUTE_DEFAULT
+            )
+            route_rejoin_event = bool(
+                use_threat
+                and not trace.threat_active
+                and trace.decision.threat_override == ThreatOverride.ROUTE_DEFAULT
+                and (last_threat_active or last_threat_override != ThreatOverride.ROUTE_DEFAULT)
+            )
+            threat_signal_relevant = bool(
+                use_threat
+                and (
+                    trace.threat_active
+                    or route_rejoin_event
+                    or invalid_override
+                    or _health_damage_taken(previous_state=state, current_state=next_state) > 0.0
+                    or (done and _terminal_is_fail(terminal_reason))
+                )
+            )
+            threat_breakdown = (
+                reward_suite.compute_threat_reward(
+                    previous_state=state,
+                    current_state=next_state,
+                    done=done,
+                    threat_override=trace.decision.threat_override,
+                    info={
+                        **info,
+                        "invalid_override": invalid_override,
+                        "route_rejoin_event": route_rejoin_event,
+                    },
+                )
+                if threat_signal_relevant
+                else _zero_threat_reward_breakdown()
             )
             step_reward = float(meta_breakdown.total + threat_breakdown.total)
             total_reward += step_reward
             meta_reward_total += float(meta_breakdown.total)
             threat_reward_total += float(threat_breakdown.total)
+            if threat_signal_relevant:
+                threat_rewarded_steps += 1
+            if route_rejoin_event:
+                route_rejoin_events += 1
 
             next_allowed_phases = coordinator.allowed_meta_phases(next_state)
             next_scripted_phase, next_target = coordinator.resolve_objective_for_phase(
@@ -1012,7 +1199,7 @@ def _run_rollouts(
                 )
                 if update.did_update:
                     updates_applied += 1
-            if train_threat:
+            if train_threat and threat_signal_relevant:
                 update = coordinator.threat_controller.observe(
                     features=trace.threat_features,
                     chosen_override=trace.decision.threat_override,
@@ -1066,6 +1253,8 @@ def _run_rollouts(
                         override=trace.decision.threat_override,
                     )
                 )
+            last_threat_active = trace.threat_active
+            last_threat_override = trace.decision.threat_override
             state = next_state
             steps += 1
 
@@ -1092,6 +1281,18 @@ def _run_rollouts(
                 terminal_classification=terminal_classification,
                 phase_switches=phase_switches,
                 threat_active_steps=threat_active_steps,
+                threat_rewarded_steps=threat_rewarded_steps,
+                route_rejoin_events=route_rejoin_events,
+                phase_lock_overrides=coordinator.phase_lock_overrides,
+                stall_releases=coordinator.stall_releases,
+                start_screen_detected=start_screen_detected,
+                victory_detected=victory_detected,
+                victory_inferred_from_start_screen=victory_inferred_from_start_screen,
+                death_to_start_screen_detected=death_to_start_screen_detected,
+                start_screen_unknown_detected=start_screen_unknown_detected,
+                final_action=final_action,
+                last_known_player_position=last_known_player_position,
+                last_known_exit_position=last_known_exit_position,
             )
         )
     return tuple(results)
@@ -1173,6 +1374,8 @@ def main() -> None:
         coordinator_config = HybridCoordinatorConfig(
             threat_trigger_distance=max(int(args.threat_trigger_distance), 1),
             exit_after_siphons_when_scripted=False,
+            phase_lock_min_steps=max(int(args.phase_lock_min_steps), 0),
+            target_stall_release_steps=max(int(args.target_stall_release_steps), 0),
         )
         coordinator = HybridCoordinator(
             meta_controller=MetaControllerDQN(config=_build_meta_config(args), seed=args.seed),

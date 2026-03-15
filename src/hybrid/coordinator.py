@@ -34,6 +34,8 @@ class HybridCoordinatorConfig:
     threat_trigger_distance: int = 2
     enable_prog_override: bool = True
     exit_after_siphons_when_scripted: bool = False
+    phase_lock_min_steps: int = 6
+    target_stall_release_steps: int = 4
 
 
 def _manhattan(a: GridPosition, b: GridPosition) -> int:
@@ -299,14 +301,30 @@ class HybridCoordinator:
         self.config = config
         self._locked_phase: ObjectivePhase | None = None
         self._locked_target: GridPosition | None = None
+        self._locked_phase_steps = 0
+        self._locked_target_stall_steps = 0
         self._completed_resource_targets: set[GridPosition] = set()
+        self._phase_lock_overrides = 0
+        self._stall_releases = 0
 
     def start_episode(self) -> None:
         self.meta_controller.start_episode()
         self.threat_controller.start_episode()
         self._locked_phase = None
         self._locked_target = None
+        self._locked_phase_steps = 0
+        self._locked_target_stall_steps = 0
         self._completed_resource_targets.clear()
+        self._phase_lock_overrides = 0
+        self._stall_releases = 0
+
+    @property
+    def phase_lock_overrides(self) -> int:
+        return int(self._phase_lock_overrides)
+
+    @property
+    def stall_releases(self) -> int:
+        return int(self._stall_releases)
 
     def allowed_meta_phases(self, state: GameStateSnapshot) -> tuple[ObjectivePhase, ...]:
         if state.map.status != "ok":
@@ -625,19 +643,23 @@ class HybridCoordinator:
         *,
         trace: HybridDecisionTrace,
         info: dict[str, object] | None = None,
+        next_state: GameStateSnapshot | None = None,
     ) -> None:
+        details = info or {}
         if trace.decision.objective.phase != ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
+            self._observe_locked_target_progress(trace=trace, next_state=next_state)
             return
         target = trace.decision.objective.target_position
-        if target is None:
-            return
-        if trace.decision.action not in {"space", "z"}:
-            return
-        if not bool((info or {}).get("action_effective", False)):
-            return
-        self._completed_resource_targets.update(_siphon_reach_positions(target))
-        if self._locked_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS and self._locked_target == target:
-            self._locked_target = None
+        if (
+            target is not None
+            and trace.decision.action in {"space", "z"}
+            and bool(details.get("action_effective", False))
+        ):
+            self._completed_resource_targets.update(_siphon_reach_positions(target))
+            if self._locked_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS and self._locked_target == target:
+                self._locked_target = None
+                self._locked_target_stall_steps = 0
+        self._observe_locked_target_progress(trace=trace, next_state=next_state)
 
     def _objective_for_decision_phase(
         self,
@@ -647,29 +669,124 @@ class HybridCoordinator:
         scripted_mode: bool,
     ) -> tuple[ObjectivePhase, GridPosition | None]:
         resolved_phase = self._resolved_phase_for_state(state=state, phase=phase)
+        if self._locked_phase is not None and not self._is_locked_phase_valid(state=state):
+            self._clear_locked_objective()
         if self._locked_phase is not None and self._locked_phase != resolved_phase:
-            self._locked_phase = None
-            self._locked_target = None
-        if (
-            self._locked_phase == resolved_phase
-            and self._locked_target is not None
-            and self._is_target_valid_for_phase(
+            min_steps = self._phase_lock_min_steps(self._locked_phase)
+            if self._locked_phase_steps < min_steps:
+                self._phase_lock_overrides += 1
+                target = self._locked_target
+                if target is None:
+                    locked_phase, target = self.resolve_objective_for_phase(
+                        state=state,
+                        phase=self._locked_phase,
+                        scripted_mode=scripted_mode,
+                    )
+                    if locked_phase != self._locked_phase:
+                        self._clear_locked_objective()
+                    else:
+                        self._record_locked_objective(phase=locked_phase, target=target)
+                        return (locked_phase, target)
+                else:
+                    self._record_locked_objective(phase=self._locked_phase, target=target)
+                    return (self._locked_phase, target)
+            self._clear_locked_objective()
+        if self._locked_phase == resolved_phase:
+            locked_target = self._locked_target
+            if locked_target is not None and self._is_target_valid_for_phase(
                 state=state,
                 phase=resolved_phase,
-                target=self._locked_target,
+                target=locked_target,
                 scripted_mode=scripted_mode,
-            )
-        ):
-            return (resolved_phase, self._locked_target)
+            ):
+                self._record_locked_objective(phase=resolved_phase, target=locked_target)
+                return (resolved_phase, locked_target)
 
         resolved_phase, resolved_target = self.resolve_objective_for_phase(
             state=state,
             phase=resolved_phase,
             scripted_mode=scripted_mode,
         )
-        self._locked_phase = resolved_phase
-        self._locked_target = resolved_target
+        self._record_locked_objective(phase=resolved_phase, target=resolved_target)
         return (resolved_phase, resolved_target)
+
+    def _clear_locked_objective(self) -> None:
+        self._locked_phase = None
+        self._locked_target = None
+        self._locked_phase_steps = 0
+        self._locked_target_stall_steps = 0
+
+    def _record_locked_objective(
+        self,
+        *,
+        phase: ObjectivePhase,
+        target: GridPosition | None,
+    ) -> None:
+        continuing_phase = self._locked_phase == phase
+        previous_target = self._locked_target if continuing_phase else None
+        self._locked_phase = phase
+        self._locked_target = target
+        if continuing_phase:
+            self._locked_phase_steps += 1
+        else:
+            self._locked_phase_steps = 1
+        if previous_target != target:
+            self._locked_target_stall_steps = 0
+
+    def _phase_lock_min_steps(self, phase: ObjectivePhase) -> int:
+        if phase not in {
+            ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+            ObjectivePhase.EXIT_SECTOR,
+        }:
+            return 0
+        return max(int(self.config.phase_lock_min_steps), 0)
+
+    def _is_locked_phase_valid(self, *, state: GameStateSnapshot) -> bool:
+        locked_phase = self._locked_phase
+        if locked_phase is None or state.map.status != "ok" or state.map.player_position is None:
+            return False
+        if self._resolved_phase_for_state(state=state, phase=locked_phase) != locked_phase:
+            return False
+        if locked_phase == ObjectivePhase.COLLECT_SIPHONS:
+            return bool(state.map.siphons)
+        if locked_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS:
+            return bool(self._available_resource_targets(state=state))
+        if locked_phase == ObjectivePhase.EXIT_SECTOR:
+            return state.map.exit_position is not None
+        return False
+
+    def _observe_locked_target_progress(
+        self,
+        *,
+        trace: HybridDecisionTrace,
+        next_state: GameStateSnapshot | None,
+    ) -> None:
+        if (
+            next_state is None
+            or self._locked_phase is None
+            or self._locked_target is None
+            or trace.decision.objective.phase != self._locked_phase
+            or trace.decision.objective.target_position != self._locked_target
+        ):
+            return
+        if not self._is_locked_phase_valid(state=next_state):
+            self._clear_locked_objective()
+            return
+        previous_distance = trace.objective_distance_before
+        if previous_distance is None:
+            return
+        next_distance = self.objective_distance(state=next_state, target=self._locked_target)
+        if next_distance is None or next_distance < previous_distance:
+            self._locked_target_stall_steps = 0
+            return
+        stall_limit = max(int(self.config.target_stall_release_steps), 0)
+        if stall_limit <= 0:
+            return
+        self._locked_target_stall_steps += 1
+        if self._locked_target_stall_steps < stall_limit:
+            return
+        self._stall_releases += 1
+        self._clear_locked_objective()
 
     def _is_target_valid_for_phase(
         self,

@@ -117,6 +117,28 @@ class _StubThreatController:
         return (ThreatOverride.WAIT, "force_wait", 0.0)
 
 
+@dataclass
+class _SequenceMetaController:
+    selected_phases: list[ObjectivePhase]
+    feature_count: int = 18
+    epsilon: float = 0.0
+
+    def start_episode(self) -> None:
+        return
+
+    def select_objective(
+        self,
+        *,
+        features: Sequence[float],
+        allowed_phases: Sequence[ObjectivePhase] | None = None,
+        explore: bool = True,
+    ) -> tuple[ObjectivePhase, str, float | None]:
+        assert len(tuple(features)) == self.feature_count
+        assert allowed_phases is not None
+        phase = self.selected_phases.pop(0) if self.selected_phases else allowed_phases[0]
+        return (phase, "sequence_meta", 0.0)
+
+
 def test_allowed_meta_phases_prioritize_siphons() -> None:
     coordinator = HybridCoordinator(
         meta_controller=_StubMetaController(),
@@ -200,6 +222,90 @@ def test_invalid_threat_override_falls_back_to_route_action() -> None:
     assert trace.decision.threat_override == ThreatOverride.WAIT
     assert trace.decision.used_fallback is True
     assert trace.decision.action == "move_right"
+
+
+def test_phase_lock_holds_resource_phase_until_min_steps_elapsed() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_SequenceMetaController(
+            selected_phases=[
+                ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+                ObjectivePhase.EXIT_SECTOR,
+                ObjectivePhase.EXIT_SECTOR,
+                ObjectivePhase.EXIT_SECTOR,
+                ObjectivePhase.EXIT_SECTOR,
+                ObjectivePhase.EXIT_SECTOR,
+                ObjectivePhase.EXIT_SECTOR,
+            ]
+        ),
+        threat_controller=_StubThreatController(),
+        config=HybridCoordinatorConfig(phase_lock_min_steps=6, target_stall_release_steps=4),
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        resource_cells=(ResourceCellState(position=GridPosition(2, 0), credits=3),),
+        exit_position=GridPosition(5, 5),
+    )
+
+    traces = [
+        coordinator.decide(
+            state=state,
+            available_actions=("move_up", "move_right"),
+            use_meta_controller=True,
+            use_threat_controller=False,
+            explore_meta=False,
+            explore_threat=False,
+        )
+        for _ in range(7)
+    ]
+
+    assert traces[0].decision.objective.phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS
+    assert all(
+        trace.decision.objective.phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS
+        for trace in traces[1:6]
+    )
+    assert traces[6].decision.objective.phase == ObjectivePhase.EXIT_SECTOR
+    assert coordinator.phase_lock_overrides == 5
+
+
+def test_phase_lock_releases_after_configured_stall_steps() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_SequenceMetaController(
+            selected_phases=[
+                ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+                ObjectivePhase.EXIT_SECTOR,
+            ]
+        ),
+        threat_controller=_StubThreatController(),
+        config=HybridCoordinatorConfig(phase_lock_min_steps=6, target_stall_release_steps=4),
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        resource_cells=(ResourceCellState(position=GridPosition(2, 0), credits=3),),
+        exit_position=GridPosition(5, 5),
+    )
+
+    trace = coordinator.decide(
+        state=state,
+        available_actions=("move_up", "move_right"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+    for _ in range(4):
+        coordinator.observe_step_result(trace=trace, info={"action_effective": False}, next_state=state)
+
+    released_trace = coordinator.decide(
+        state=state,
+        available_actions=("move_up", "move_right"),
+        use_meta_controller=True,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert coordinator.stall_releases == 1
+    assert released_trace.decision.objective.phase == ObjectivePhase.EXIT_SECTOR
 
 
 def test_resource_target_lock_persists_until_target_invalidates() -> None:

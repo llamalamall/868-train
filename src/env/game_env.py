@@ -109,6 +109,24 @@ def _player_on_exit(snapshot: GameStateSnapshot) -> bool:
     return player is not None and exit_position is not None and player == exit_position
 
 
+def _action_moves_player_onto_exit(
+    *,
+    snapshot: GameStateSnapshot,
+    action: str,
+) -> bool:
+    if snapshot.map.status != "ok":
+        return False
+    player = snapshot.map.player_position
+    exit_position = snapshot.map.exit_position
+    if player is None or exit_position is None:
+        return False
+    delta = _MOVE_ACTION_DELTAS.get(str(action).strip().lower())
+    if delta is None:
+        return False
+    candidate = GridPosition(x=player.x + delta[0], y=player.y + delta[1])
+    return candidate == exit_position
+
+
 def _state_extra_bool(snapshot: GameStateSnapshot, *, key: str) -> bool | None:
     field = snapshot.extra_fields.get(key)
     if field is None or field.status != "ok":
@@ -118,6 +136,16 @@ def _state_extra_bool(snapshot: GameStateSnapshot, *, key: str) -> bool | None:
         return value
     try:
         return bool(int(value))
+    except (TypeError, ValueError):
+        return None
+
+
+def _state_extra_numeric(snapshot: GameStateSnapshot, *, key: str) -> float | None:
+    field = snapshot.extra_fields.get(key)
+    if field is None or field.status != "ok":
+        return None
+    try:
+        return float(field.value)
     except (TypeError, ValueError):
         return None
 
@@ -372,11 +400,48 @@ def _state_indicates_victory(snapshot: GameStateSnapshot) -> bool:
     return _state_extra_bool(snapshot, key="victory_active") is True
 
 
+def _state_is_final_sector(snapshot: GameStateSnapshot) -> bool:
+    sector = _state_extra_numeric(snapshot, key="current_sector")
+    return sector is not None and sector >= 7.0
+
+
+def _final_exit_victory_fallback(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+    action: str | None = None,
+) -> bool:
+    if _state_indicates_victory(previous_state) or _state_indicates_victory(current_state):
+        return True
+    if not (_state_is_final_sector(previous_state) or _state_is_final_sector(current_state)):
+        return False
+    if _player_on_exit(previous_state) or _player_on_exit(current_state):
+        return True
+    if action is None:
+        return False
+    return _action_moves_player_onto_exit(snapshot=previous_state, action=action)
+
+
+def _sector_exit_to_start_screen_fallback(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+    action: str | None = None,
+) -> bool:
+    if _state_is_final_sector(previous_state) or _state_is_final_sector(current_state):
+        return False
+    if _player_on_exit(previous_state) or _player_on_exit(current_state):
+        return True
+    if action is None:
+        return False
+    return _action_moves_player_onto_exit(snapshot=previous_state, action=action)
+
+
 def _state_terminal_reason(snapshot: GameStateSnapshot) -> str | None:
-    if snapshot.fail_state.status == "ok" and bool(snapshot.fail_state.value):
-        return "state:fail_state"
     if _state_indicates_victory(snapshot):
         return "state:victory"
+    if snapshot.fail_state.status == "ok" and bool(snapshot.fail_state.value):
+        return "state:fail_state"
     return None
 
 
@@ -398,6 +463,51 @@ def _is_null_pointer_error(error_code: Any) -> bool:
 def _state_indicates_start_screen(snapshot: GameStateSnapshot) -> bool:
     health = snapshot.health
     return health.status != "ok" and _is_null_pointer_error(health.error_code)
+
+
+def _reason_indicates_fail_terminal(reason: Any) -> bool:
+    normalized = str(reason or "").strip().lower()
+    if not normalized:
+        return False
+    return any(token in normalized for token in ("fail", "loss", "dead", "death", "player_health"))
+
+
+def _snapshot_indicates_terminal_health(snapshot: GameStateSnapshot) -> bool:
+    return _is_terminal_health_value(_state_numeric(snapshot.health))
+
+
+def _start_screen_transition_terminal_reason(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+    terminal_reason: str | None,
+    detector_info: dict[str, Any],
+    action: str | None = None,
+) -> str:
+    if _final_exit_victory_fallback(
+        previous_state=previous_state,
+        current_state=current_state,
+        action=action,
+    ):
+        return "state:victory"
+    if _reason_indicates_fail_terminal(terminal_reason):
+        return str(terminal_reason)
+    if _reason_indicates_fail_terminal(detector_info.get("fail_detector_reason")):
+        return "state:death_to_start_screen"
+    if (
+        (previous_state.fail_state.status == "ok" and bool(previous_state.fail_state.value))
+        or (current_state.fail_state.status == "ok" and bool(current_state.fail_state.value))
+        or _snapshot_indicates_terminal_health(previous_state)
+        or _snapshot_indicates_terminal_health(current_state)
+    ):
+        return "state:death_to_start_screen"
+    if _sector_exit_to_start_screen_fallback(
+        previous_state=previous_state,
+        current_state=current_state,
+        action=action,
+    ):
+        return "state:sector_exit_to_start_screen"
+    return "state:start_screen_unknown"
 
 
 def _resolve_default_action_space(action_api: ActionPerformer) -> tuple[str, ...]:
@@ -634,13 +744,44 @@ class GameEnv:
             if bool(getattr(detector_result, "is_terminal", False)):
                 done = True
                 terminal_reason = str(getattr(detector_result, "reason", "terminal"))
-        if not done and (
+
+        start_screen_like = (
             _state_indicates_start_screen(current_state)
             or _is_null_pointer_error(detector_info.get("fail_detector_error"))
+        )
+        if _final_exit_victory_fallback(
+            previous_state=previous_state,
+            current_state=current_state,
+            action=action,
+        ) and (
+            terminal_reason == "state:victory" or start_screen_like
         ):
             done = True
-            terminal_reason = "state:start_screen"
+            terminal_reason = "state:victory"
+            detector_info["victory_detected"] = True
+            if start_screen_like:
+                detector_info["start_screen_detected"] = True
+            if start_screen_like and not _state_indicates_victory(current_state):
+                detector_info["victory_inferred_from_start_screen"] = True
+        elif not done and start_screen_like:
+            done = True
             detector_info["start_screen_detected"] = True
+            terminal_reason = _start_screen_transition_terminal_reason(
+                previous_state=previous_state,
+                current_state=current_state,
+                terminal_reason=terminal_reason,
+                detector_info=detector_info,
+                action=action,
+            )
+            if terminal_reason == "state:victory":
+                detector_info["victory_detected"] = True
+                detector_info["victory_inferred_from_start_screen"] = True
+            elif terminal_reason == "state:sector_exit_to_start_screen":
+                detector_info["sector_exit_to_start_screen_detected"] = True
+            elif terminal_reason == "state:death_to_start_screen":
+                detector_info["death_to_start_screen_detected"] = True
+            elif terminal_reason == "state:start_screen_unknown":
+                detector_info["start_screen_unknown_detected"] = True
 
         action_effective, invalid_action_reason = self._analyze_action_effectiveness(
             action=action,

@@ -85,6 +85,50 @@ class MemoryFailDetector:
         self._fallback_detectors = tuple(fallback_detectors)
         self._is_terminal_value = is_terminal_value or bool
         self._logger = logger or LOGGER
+        self._last_logged_memory_error: tuple[str, str] | None = None
+
+    def _clear_memory_error_streak(self) -> None:
+        self._last_logged_memory_error = None
+
+    def _log_memory_error(
+        self,
+        *,
+        stage: str,
+        error_code: str,
+        resolved_address: int | None = None,
+    ) -> None:
+        error_key = (stage, error_code)
+        if error_key == self._last_logged_memory_error:
+            return
+        self._last_logged_memory_error = error_key
+        if error_code == "null_pointer":
+            if resolved_address is None:
+                self._logger.debug(
+                    "Fail-state memory resolution unavailable for '%s': %s",
+                    self._fail_entry.name,
+                    error_code,
+                )
+            else:
+                self._logger.debug(
+                    "Fail-state read unavailable for '%s' at 0x%X: %s",
+                    self._fail_entry.name,
+                    resolved_address,
+                    error_code,
+                )
+            return
+        if resolved_address is None:
+            self._logger.warning(
+                "Fail-state memory resolution failed for '%s': %s",
+                self._fail_entry.name,
+                error_code,
+            )
+            return
+        self._logger.warning(
+            "Fail-state read failed for '%s' at 0x%X: %s",
+            self._fail_entry.name,
+            resolved_address,
+            error_code,
+        )
 
     def check(self) -> FailDetectionResult:
         """Evaluate fail state once, with memory as primary and optional fallbacks."""
@@ -99,11 +143,7 @@ class MemoryFailDetector:
             resolve_error = (
                 resolve_result.error.code if resolve_result.error is not None else "resolve_failed"
             )
-            self._logger.warning(
-                "Fail-state memory resolution failed for '%s': %s",
-                self._fail_entry.name,
-                resolve_error,
-            )
+            self._log_memory_error(stage="resolve", error_code=resolve_error)
             return self._fallback_or_default(
                 timestamp=timestamp,
                 memory_error=resolve_error,
@@ -112,11 +152,10 @@ class MemoryFailDetector:
         resolved_address = resolve_result.value
         value, read_error = _read_entry_value(self._reader, self._fail_entry, resolved_address)
         if read_error is not None:
-            self._logger.warning(
-                "Fail-state read failed for '%s' at 0x%X: %s",
-                self._fail_entry.name,
-                resolved_address,
-                read_error,
+            self._log_memory_error(
+                stage="read",
+                error_code=read_error,
+                resolved_address=resolved_address,
             )
             return self._fallback_or_default(
                 timestamp=timestamp,
@@ -124,6 +163,7 @@ class MemoryFailDetector:
                 resolved_address=resolved_address,
             )
 
+        self._clear_memory_error_streak()
         if self._is_terminal_value(value):
             reason = f"memory:{self._fail_entry.name}"
             event = FailDetectionResult(

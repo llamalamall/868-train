@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import logging
 import struct
 from dataclasses import dataclass, field
+
+import pytest
 
 from src.config.offsets import OffsetBase, OffsetEntry
 from src.memory.reader import BackendReadResponse, ProcessMemoryReader
@@ -49,6 +52,18 @@ def _fail_entry(*, data_type: str = "bool") -> OffsetEntry:
         data_type=data_type,
         base=OffsetBase(kind="absolute", value="0x200000"),
         pointer_chain=(),
+        confidence="high",
+        notes="test",
+        read_offset=0,
+    )
+
+
+def _pointer_fail_entry(*, data_type: str = "int32") -> OffsetEntry:
+    return OffsetEntry(
+        name="player_health",
+        data_type=data_type,
+        base=OffsetBase(kind="absolute", value="0x210000"),
+        pointer_chain=(0,),
         confidence="high",
         notes="test",
         read_offset=0,
@@ -130,6 +145,46 @@ def test_memory_fail_detector_reports_unsupported_data_type_as_memory_unavailabl
     assert not result.is_terminal
     assert result.reason == "memory_unavailable"
     assert result.error == "unsupported_fail_data_type:string"
+
+
+def test_memory_fail_detector_does_not_warn_for_null_pointer_resolution(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = FakeMemoryBackend(memory_by_address={0x210000: struct.pack("<Q", 0)})
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+    detector = MemoryFailDetector(reader=reader, fail_entry=_pointer_fail_entry())
+
+    with caplog.at_level(logging.WARNING):
+        result = detector.check()
+
+    assert not result.is_terminal
+    assert result.reason == "memory_unavailable"
+    assert result.error == "null_pointer"
+    assert "Fail-state memory resolution failed" not in caplog.text
+
+
+def test_memory_fail_detector_warns_once_for_repeated_identical_read_failures(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    backend = FakeMemoryBackend(error_by_address={0x200000: 299})
+    reader = ProcessMemoryReader(process_handle=1, backend=backend)
+    detector = MemoryFailDetector(reader=reader, fail_entry=_fail_entry())
+
+    with caplog.at_level(logging.WARNING):
+        first = detector.check()
+        second = detector.check()
+
+    assert not first.is_terminal
+    assert not second.is_terminal
+    assert first.error == "read_failed"
+    assert second.error == "read_failed"
+    warning_messages = [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno == logging.WARNING
+    ]
+    assert len(warning_messages) == 1
+    assert "Fail-state read failed for 'fail_state'" in warning_messages[0]
 
 
 def test_poll_for_fail_state_detects_terminal_within_interval() -> None:
