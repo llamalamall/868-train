@@ -11,7 +11,7 @@
 - For each task: implement, run local checks, verify acceptance criteria, then move on.
 - Use task-scoped commits: `feat(task-XX): <short description>`.
 
-## 3) Architecture Boundaries (Keep Layers Clean)
+## 3) Architecture Boundaries (Keep Layers CAlean)
 - `src/controller`: input and window control only.
 - `src/memory`: process attach/read/pointer resolution only.
 - `src/state`: decode and normalize memory into typed snapshots.

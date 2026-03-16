@@ -446,3 +446,7 @@ def test_hybrid_gui_action_discovery_includes_meta_reward_weight_flags() -> None
     assert "meta_reward_premature_exit_penalty" in discovered
     assert "meta_reward_sector_advance" in discovered
     assert "meta_reward_final_sector_win" in discovered
+    assert "meta_reward_currency_gain" in discovered
+    assert "meta_reward_energy_gain" in discovered
+    assert "meta_reward_score_gain" in discovered
+    assert "meta_reward_prog_gain" in discovered

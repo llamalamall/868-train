@@ -630,6 +630,30 @@ def _add_common_runner_args(
         default=25.00,
         help="Meta reward: large bonus for exiting sector 8 and winning the run.",
     )
+    parser.add_argument(
+        "--meta-reward-currency-gain",
+        type=float,
+        default=0.10,
+        help="Meta reward: coefficient applied to positive currency gain.",
+    )
+    parser.add_argument(
+        "--meta-reward-energy-gain",
+        type=float,
+        default=0.10,
+        help="Meta reward: coefficient applied to positive energy gain.",
+    )
+    parser.add_argument(
+        "--meta-reward-score-gain",
+        type=float,
+        default=0.02,
+        help="Meta reward: coefficient applied to positive score gain.",
+    )
+    parser.add_argument(
+        "--meta-reward-prog-gain",
+        type=float,
+        default=1.50,
+        help="Meta reward: coefficient applied to positive prog inventory gain.",
+    )
 
 
 def _add_meta_model_args(parser: argparse.ArgumentParser) -> None:
@@ -828,6 +852,10 @@ def _build_meta_reward_weights(args: argparse.Namespace) -> HybridMetaRewardWeig
         premature_exit_penalty=float(getattr(args, "meta_reward_premature_exit_penalty", 1.25)),
         sector_advance=float(getattr(args, "meta_reward_sector_advance", 1.00)),
         final_sector_win=float(getattr(args, "meta_reward_final_sector_win", 25.00)),
+        currency_gain=float(getattr(args, "meta_reward_currency_gain", 0.10)),
+        energy_gain=float(getattr(args, "meta_reward_energy_gain", 0.10)),
+        score_gain=float(getattr(args, "meta_reward_score_gain", 0.02)),
+        prog_gain=float(getattr(args, "meta_reward_prog_gain", 1.50)),
     )
 
 

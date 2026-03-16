@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 
 from src.hybrid.types import ObjectivePhase, ThreatOverride
 from src.state.schema import GameStateSnapshot, GridPosition
@@ -19,6 +19,10 @@ class HybridMetaRewardWeights:
     premature_exit_penalty: float = 1.25
     sector_advance: float = 1.00
     final_sector_win: float = 25.00
+    currency_gain: float = 0.10
+    energy_gain: float = 0.10
+    score_gain: float = 0.02
+    prog_gain: float = 1.50
 
 
 @dataclass(frozen=True)
@@ -42,6 +46,10 @@ class HybridMetaRewardBreakdown:
     premature_exit_penalty: float
     sector_advance: float
     final_sector_win: float
+    currency_gain: float
+    energy_gain: float
+    score_gain: float
+    prog_gain: float
     total: float
 
 
@@ -84,6 +92,41 @@ def _state_extra_bool(state: GameStateSnapshot, *, key: str) -> bool | None:
         return bool(int(value))
     except (TypeError, ValueError):
         return None
+
+
+def _field_numeric_delta(
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+    *,
+    accessor: Callable[[GameStateSnapshot], object | None],
+) -> float:
+    previous = _numeric(accessor(previous_state))
+    current = _numeric(accessor(current_state))
+    if previous is None or current is None:
+        return 0.0
+    return max(current - previous, 0.0)
+
+
+def _extra_numeric_delta(
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+    *,
+    key: str,
+) -> float:
+    previous = _state_extra_numeric(previous_state, key=key)
+    current = _state_extra_numeric(current_state, key=key)
+    if previous is None or current is None:
+        return 0.0
+    return max(float(current - previous), 0.0)
+
+
+def _prog_inventory_delta(
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> float:
+    previous = len(previous_state.inventory.raw_prog_ids)
+    current = len(current_state.inventory.raw_prog_ids)
+    return float(max(current - previous, 0))
 
 
 def _siphon_count(state: GameStateSnapshot) -> int | None:
@@ -278,6 +321,18 @@ class HybridRewardSuite:
             done=done,
             info=info,
         )
+        currency_gain = _field_numeric_delta(
+            previous_state,
+            current_state,
+            accessor=lambda state: state.currency.value if state.currency.status == "ok" else None,
+        )
+        energy_gain = _field_numeric_delta(
+            previous_state,
+            current_state,
+            accessor=lambda state: state.energy.value if state.energy.status == "ok" else None,
+        )
+        score_gain = _extra_numeric_delta(previous_state, current_state, key="score")
+        prog_gain = _prog_inventory_delta(previous_state, current_state)
 
         objective_component = (
             abs(self.meta_weights.objective_complete)
@@ -297,6 +352,10 @@ class HybridRewardSuite:
             if final_sector_win
             else 0.0
         )
+        currency_component = currency_gain * abs(self.meta_weights.currency_gain)
+        energy_component = energy_gain * abs(self.meta_weights.energy_gain)
+        score_component = score_gain * abs(self.meta_weights.score_gain)
+        prog_component = prog_gain * abs(self.meta_weights.prog_gain)
         total = (
             objective_component
             + progress_component
@@ -304,6 +363,10 @@ class HybridRewardSuite:
             + premature_component
             + sector_component
             + final_sector_win_component
+            + currency_component
+            + energy_component
+            + score_component
+            + prog_component
         )
         return HybridMetaRewardBreakdown(
             objective_complete=objective_component,
@@ -312,6 +375,10 @@ class HybridRewardSuite:
             premature_exit_penalty=premature_component,
             sector_advance=sector_component,
             final_sector_win=final_sector_win_component,
+            currency_gain=currency_component,
+            energy_gain=energy_component,
+            score_gain=score_component,
+            prog_gain=prog_component,
             total=total,
         )
 

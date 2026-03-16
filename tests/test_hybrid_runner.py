@@ -229,6 +229,10 @@ def test_hybrid_parser_movement_defaults() -> None:
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
     assert args.meta_reward_final_sector_win == pytest.approx(25.00)
+    assert args.meta_reward_currency_gain == pytest.approx(0.10)
+    assert args.meta_reward_energy_gain == pytest.approx(0.10)
+    assert args.meta_reward_score_gain == pytest.approx(0.02)
+    assert args.meta_reward_prog_gain == pytest.approx(1.50)
 
 
 def test_hybrid_parser_train_meta_defaults() -> None:
@@ -253,6 +257,10 @@ def test_hybrid_parser_train_meta_defaults() -> None:
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
     assert args.meta_reward_final_sector_win == pytest.approx(25.00)
+    assert args.meta_reward_currency_gain == pytest.approx(0.10)
+    assert args.meta_reward_energy_gain == pytest.approx(0.10)
+    assert args.meta_reward_score_gain == pytest.approx(0.02)
+    assert args.meta_reward_prog_gain == pytest.approx(1.50)
     assert args.phase_lock_min_steps == 6
     assert args.target_stall_release_steps == 4
     assert args.victory_monitor is True
@@ -270,6 +278,10 @@ def test_hybrid_parser_train_full_meta_reward_defaults() -> None:
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
     assert args.meta_reward_final_sector_win == pytest.approx(25.00)
+    assert args.meta_reward_currency_gain == pytest.approx(0.10)
+    assert args.meta_reward_energy_gain == pytest.approx(0.10)
+    assert args.meta_reward_score_gain == pytest.approx(0.02)
+    assert args.meta_reward_prog_gain == pytest.approx(1.50)
     assert args.victory_monitor is True
     assert args.restore_save_file is None
     assert args.restore_save_delay == pytest.approx(0.35)
@@ -285,6 +297,10 @@ def test_hybrid_parser_eval_meta_reward_defaults() -> None:
     assert args.meta_reward_premature_exit_penalty == pytest.approx(1.25)
     assert args.meta_reward_sector_advance == pytest.approx(1.00)
     assert args.meta_reward_final_sector_win == pytest.approx(25.00)
+    assert args.meta_reward_currency_gain == pytest.approx(0.10)
+    assert args.meta_reward_energy_gain == pytest.approx(0.10)
+    assert args.meta_reward_score_gain == pytest.approx(0.02)
+    assert args.meta_reward_prog_gain == pytest.approx(1.50)
 
 
 def test_hybrid_parser_train_full_requires_warmstart_when_not_resuming() -> None:
@@ -351,6 +367,14 @@ def test_hybrid_parser_accepts_custom_meta_reward_values() -> None:
             "1.75",
             "--meta-reward-final-sector-win",
             "40.0",
+            "--meta-reward-currency-gain",
+            "0.3",
+            "--meta-reward-energy-gain",
+            "0.2",
+            "--meta-reward-score-gain",
+            "0.05",
+            "--meta-reward-prog-gain",
+            "3.5",
         ]
     )
 
@@ -360,6 +384,10 @@ def test_hybrid_parser_accepts_custom_meta_reward_values() -> None:
     assert args.meta_reward_premature_exit_penalty == pytest.approx(3.0)
     assert args.meta_reward_sector_advance == pytest.approx(1.75)
     assert args.meta_reward_final_sector_win == pytest.approx(40.0)
+    assert args.meta_reward_currency_gain == pytest.approx(0.3)
+    assert args.meta_reward_energy_gain == pytest.approx(0.2)
+    assert args.meta_reward_score_gain == pytest.approx(0.05)
+    assert args.meta_reward_prog_gain == pytest.approx(3.5)
 
 
 def test_build_meta_reward_weights_uses_cli_overrides() -> None:
@@ -379,6 +407,14 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
             "1.3",
             "--meta-reward-final-sector-win",
             "30.0",
+            "--meta-reward-currency-gain",
+            "0.4",
+            "--meta-reward-energy-gain",
+            "0.25",
+            "--meta-reward-score-gain",
+            "0.08",
+            "--meta-reward-prog-gain",
+            "2.75",
         ]
     )
 
@@ -390,6 +426,10 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
         premature_exit_penalty=2.2,
         sector_advance=1.3,
         final_sector_win=30.0,
+        currency_gain=0.4,
+        energy_gain=0.25,
+        score_gain=0.08,
+        prog_gain=2.75,
     )
 
 
@@ -427,6 +467,10 @@ def test_build_hybrid_config_payload_includes_run_tag_and_warmstart_metadata() -
     assert payload["phase_lock_min_steps"] == 6
     assert payload["target_stall_release_steps"] == 4
     assert payload["meta_reward_weights"]["final_sector_win"] == pytest.approx(25.0)
+    assert payload["meta_reward_weights"]["currency_gain"] == pytest.approx(0.10)
+    assert payload["meta_reward_weights"]["energy_gain"] == pytest.approx(0.10)
+    assert payload["meta_reward_weights"]["score_gain"] == pytest.approx(0.02)
+    assert payload["meta_reward_weights"]["prog_gain"] == pytest.approx(1.50)
 
 
 def test_build_hybrid_config_payload_records_resume_checkpoint_for_meta_training() -> None:
