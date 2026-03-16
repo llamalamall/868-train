@@ -206,6 +206,13 @@ class HybridEpisodeSummary:
     route_rejoin_events: int
     phase_lock_overrides: int
     stall_releases: int
+    requested_phase_override_steps: int
+    requested_phase_counts: dict[str, int]
+    executed_phase_counts: dict[str, int]
+    requested_executed_phase_pair_counts: dict[str, int]
+    meta_override_updates_skipped: int
+    invalid_action_reason_counts: dict[str, int]
+    action_ack_reason_counts: dict[str, int]
     start_screen_detected: bool
     victory_detected: bool
     victory_inferred_from_start_screen: bool
@@ -505,6 +512,24 @@ def _add_common_runner_args(
         help="Polling interval (seconds) while waiting for post-action state change.",
     )
     parser.add_argument(
+        "--post-action-delay-backoff",
+        type=float,
+        default=0.02,
+        help="Additional post-action delay (seconds) added per active ack-timeout backoff level.",
+    )
+    parser.add_argument(
+        "--action-ack-timeout-backoff",
+        type=float,
+        default=0.10,
+        help="Additional action-ack timeout (seconds) added per active ack-timeout backoff level.",
+    )
+    parser.add_argument(
+        "--action-ack-backoff-max-level",
+        type=int,
+        default=3,
+        help="Maximum adaptive ack-timeout backoff level.",
+    )
+    parser.add_argument(
         "--prog-backoff-steps",
         type=int,
         default=3,
@@ -654,6 +679,24 @@ def _add_common_runner_args(
         default=1.50,
         help="Meta reward: coefficient applied to positive prog inventory gain.",
     )
+    parser.add_argument(
+        "--meta-reward-step-limit-penalty",
+        type=float,
+        default=5.00,
+        help="Meta reward: penalty applied on the final transition of a step-capped episode.",
+    )
+    parser.add_argument(
+        "--meta-reward-stagnation-penalty",
+        type=float,
+        default=0.05,
+        help="Meta reward: penalty applied when the current objective stalls past the grace window.",
+    )
+    parser.add_argument(
+        "--meta-reward-stagnation-grace-steps",
+        type=int,
+        default=3,
+        help="Meta reward: consecutive non-progress steps allowed before stagnation penalty starts.",
+    )
 
 
 def _add_meta_model_args(parser: argparse.ArgumentParser) -> None:
@@ -668,6 +711,12 @@ def _add_meta_model_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--meta-epsilon-decay-steps", type=int, default=5_000, help="Meta epsilon decay steps.")
     parser.add_argument("--meta-hidden-size", type=int, default=64, help="Meta network hidden size.")
     parser.add_argument("--meta-feature-count", type=int, default=18, help="Meta feature vector size.")
+    parser.add_argument(
+        "--meta-phase-override-credit-mode",
+        choices=("executed", "skip_overridden"),
+        default="skip_overridden",
+        help="How to handle meta updates when the coordinator executes a different phase than the meta policy requested.",
+    )
 
 
 def _add_threat_model_args(parser: argparse.ArgumentParser) -> None:
@@ -789,6 +838,12 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--action-ack-poll-interval must be >= 0.")
     if float(args.action_ack_timeout) < 0:
         parser.error("--action-ack-timeout must be >= 0.")
+    if float(args.post_action_delay_backoff) < 0:
+        parser.error("--post-action-delay-backoff must be >= 0.")
+    if float(args.action_ack_timeout_backoff) < 0:
+        parser.error("--action-ack-timeout-backoff must be >= 0.")
+    if int(args.action_ack_backoff_max_level) < 0:
+        parser.error("--action-ack-backoff-max-level must be >= 0.")
     if float(args.restore_save_delay) < 0:
         parser.error("--restore-save-delay must be >= 0.")
     if int(args.prog_backoff_steps) < 0:
@@ -797,6 +852,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--phase-lock-min-steps must be >= 0.")
     if int(args.target_stall_release_steps) < 0:
         parser.error("--target-stall-release-steps must be >= 0.")
+    if int(getattr(args, "meta_reward_stagnation_grace_steps", 0)) < 0:
+        parser.error("--meta-reward-stagnation-grace-steps must be >= 0.")
     if bool(args.step_through) and not bool(args.tui):
         parser.error("--step-through requires --tui.")
     restore_source = _resolve_restore_save_source_path(args)
@@ -856,6 +913,9 @@ def _build_meta_reward_weights(args: argparse.Namespace) -> HybridMetaRewardWeig
         energy_gain=float(getattr(args, "meta_reward_energy_gain", 0.10)),
         score_gain=float(getattr(args, "meta_reward_score_gain", 0.02)),
         prog_gain=float(getattr(args, "meta_reward_prog_gain", 1.50)),
+        step_limit_penalty=float(getattr(args, "meta_reward_step_limit_penalty", 5.00)),
+        stagnation_penalty=float(getattr(args, "meta_reward_stagnation_penalty", 0.05)),
+        stagnation_grace_steps=int(getattr(args, "meta_reward_stagnation_grace_steps", 3)),
     )
 
 
@@ -893,6 +953,9 @@ def _build_hybrid_env(
         wait_for_action_processing=bool(args.wait_for_action_processing),
         action_ack_timeout_seconds=float(args.action_ack_timeout),
         action_ack_poll_interval_seconds=float(args.action_ack_poll_interval),
+        post_action_delay_backoff_seconds=float(args.post_action_delay_backoff),
+        action_ack_timeout_backoff_seconds=float(args.action_ack_timeout_backoff),
+        action_ack_backoff_max_level=int(args.action_ack_backoff_max_level),
         prog_slot_backoff_steps=int(args.prog_backoff_steps),
         require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
         game_tick_ms=int(args.game_tick_ms),
@@ -962,6 +1025,10 @@ def _terminal_reason_key(reason: str | None) -> str:
     return normalized if normalized else "none"
 
 
+def _sorted_counter_dict(counter: Counter[str]) -> dict[str, int]:
+    return {key: counter[key] for key in sorted(counter)}
+
+
 def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[str, Any]:
     if not results:
         return {
@@ -988,13 +1055,31 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
             "avg_route_rejoin_events": 0.0,
             "avg_phase_lock_overrides": 0.0,
             "avg_stall_releases": 0.0,
+            "avg_requested_phase_override_steps": 0.0,
+            "avg_meta_override_updates_skipped": 0.0,
             "terminal_reason_counts": {},
             "terminal_classification_counts": {},
+            "requested_phase_counts": {},
+            "executed_phase_counts": {},
+            "requested_executed_phase_pair_counts": {},
+            "invalid_action_reason_counts": {},
+            "action_ack_reason_counts": {},
         }
 
     episode_count = len(results)
     terminal_reason_counts = Counter(_terminal_reason_key(item.terminal_reason) for item in results)
     terminal_classification_counts = Counter(item.terminal_classification for item in results)
+    requested_phase_counts: Counter[str] = Counter()
+    executed_phase_counts: Counter[str] = Counter()
+    requested_executed_phase_pair_counts: Counter[str] = Counter()
+    invalid_action_reason_counts: Counter[str] = Counter()
+    action_ack_reason_counts: Counter[str] = Counter()
+    for item in results:
+        requested_phase_counts.update(item.requested_phase_counts)
+        executed_phase_counts.update(item.executed_phase_counts)
+        requested_executed_phase_pair_counts.update(item.requested_executed_phase_pair_counts)
+        invalid_action_reason_counts.update(item.invalid_action_reason_counts)
+        action_ack_reason_counts.update(item.action_ack_reason_counts)
     done_count = sum(1 for item in results if item.done)
     non_death_terminal_count = terminal_classification_counts.get("non_death_terminal", 0)
     unexpected_start_screen_count = terminal_classification_counts.get("unexpected_start_screen", 0)
@@ -1024,8 +1109,15 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
         "avg_route_rejoin_events": mean(item.route_rejoin_events for item in results),
         "avg_phase_lock_overrides": mean(item.phase_lock_overrides for item in results),
         "avg_stall_releases": mean(item.stall_releases for item in results),
-        "terminal_reason_counts": dict(sorted(terminal_reason_counts.items())),
-        "terminal_classification_counts": dict(sorted(terminal_classification_counts.items())),
+        "avg_requested_phase_override_steps": mean(item.requested_phase_override_steps for item in results),
+        "avg_meta_override_updates_skipped": mean(item.meta_override_updates_skipped for item in results),
+        "terminal_reason_counts": _sorted_counter_dict(terminal_reason_counts),
+        "terminal_classification_counts": _sorted_counter_dict(terminal_classification_counts),
+        "requested_phase_counts": _sorted_counter_dict(requested_phase_counts),
+        "executed_phase_counts": _sorted_counter_dict(executed_phase_counts),
+        "requested_executed_phase_pair_counts": _sorted_counter_dict(requested_executed_phase_pair_counts),
+        "invalid_action_reason_counts": _sorted_counter_dict(invalid_action_reason_counts),
+        "action_ack_reason_counts": _sorted_counter_dict(action_ack_reason_counts),
     }
 
 
@@ -1113,6 +1205,13 @@ def _serialize_results(results: tuple[HybridEpisodeSummary, ...]) -> list[dict[s
             "route_rejoin_events": item.route_rejoin_events,
             "phase_lock_overrides": item.phase_lock_overrides,
             "stall_releases": item.stall_releases,
+            "requested_phase_override_steps": item.requested_phase_override_steps,
+            "requested_phase_counts": item.requested_phase_counts,
+            "executed_phase_counts": item.executed_phase_counts,
+            "requested_executed_phase_pair_counts": item.requested_executed_phase_pair_counts,
+            "meta_override_updates_skipped": item.meta_override_updates_skipped,
+            "invalid_action_reason_counts": item.invalid_action_reason_counts,
+            "action_ack_reason_counts": item.action_ack_reason_counts,
             "start_screen_detected": item.start_screen_detected,
             "victory_detected": item.victory_detected,
             "victory_inferred_from_start_screen": item.victory_inferred_from_start_screen,
@@ -1177,6 +1276,12 @@ def _build_hybrid_config_payload(
             else None
         ),
         "restore_save_delay": float(args.restore_save_delay),
+        "post_action_delay": float(args.post_action_delay),
+        "action_ack_timeout": float(args.action_ack_timeout),
+        "action_ack_poll_interval": float(args.action_ack_poll_interval),
+        "post_action_delay_backoff": float(args.post_action_delay_backoff),
+        "action_ack_timeout_backoff": float(args.action_ack_timeout_backoff),
+        "action_ack_backoff_max_level": int(args.action_ack_backoff_max_level),
         "threat_trigger_distance": int(args.threat_trigger_distance),
         "phase_lock_min_steps": int(args.phase_lock_min_steps),
         "target_stall_release_steps": int(args.target_stall_release_steps),
@@ -1190,6 +1295,7 @@ def _build_hybrid_config_payload(
             if getattr(args, "resume_checkpoint", None)
             else None
         ),
+        "meta_phase_override_credit_mode": str(getattr(args, "meta_phase_override_credit_mode", "skip_overridden")),
         "meta_reward_weights": asdict(meta_reward_weights),
         "meta_config": vars(_build_meta_config(args)),
         "threat_config": vars(_build_threat_config(args)),
@@ -1212,6 +1318,7 @@ def _run_rollouts(
     tui: RunnerTuiSession,
     monitor_enabled: bool,
     print_reward_breakdown: bool,
+    meta_phase_override_credit_mode: str = "skip_overridden",
     victory_monitor_session: _VictoryMonitorProcess | None = None,
 ) -> tuple[HybridEpisodeSummary, ...]:
     results: list[HybridEpisodeSummary] = []
@@ -1239,6 +1346,15 @@ def _run_rollouts(
         updates_applied = 0
         last_phase: ObjectivePhase | None = None
         last_target_signature: tuple[str, int, int] | None = None
+        last_stagnation_signature: tuple[str, int, int] | None = None
+        objective_stagnation_steps = 0
+        requested_phase_override_steps = 0
+        meta_override_updates_skipped = 0
+        requested_phase_counts: Counter[str] = Counter()
+        executed_phase_counts: Counter[str] = Counter()
+        requested_executed_phase_pair_counts: Counter[str] = Counter()
+        invalid_action_reason_counts: Counter[str] = Counter()
+        action_ack_reason_counts: Counter[str] = Counter()
         last_threat_active = False
         last_threat_override = ThreatOverride.ROUTE_DEFAULT
         start_screen_detected = False
@@ -1270,6 +1386,13 @@ def _run_rollouts(
                 explore_meta=explore_meta,
                 explore_threat=explore_threat,
             )
+            requested_phase_name = trace.requested_phase.value
+            executed_phase_name = trace.decision.objective.phase.value
+            requested_phase_counts[requested_phase_name] += 1
+            executed_phase_counts[executed_phase_name] += 1
+            requested_executed_phase_pair_counts[f"{requested_phase_name}->{executed_phase_name}"] += 1
+            if trace.requested_phase != trace.decision.objective.phase:
+                requested_phase_override_steps += 1
             if last_phase is not None and trace.decision.objective.phase != last_phase:
                 phase_switches += 1
             last_phase = trace.decision.objective.phase
@@ -1286,6 +1409,8 @@ def _run_rollouts(
                 if last_target_signature is not None and target_signature != last_target_signature:
                     route_replans += 1
                 last_target_signature = target_signature
+            else:
+                target_signature = None
 
             threat_monitor_epsilon = (
                 coordinator.threat_controller.epsilon
@@ -1352,6 +1477,12 @@ def _run_rollouts(
             terminal_reason = str(info.get("terminal_reason") or terminal_reason or "").strip() or None
             if trace.decision.used_fallback or info.get("invalid_action_reason") is not None:
                 invalid_actions += 1
+            invalid_action_reason = str(info.get("invalid_action_reason") or "").strip()
+            if invalid_action_reason:
+                invalid_action_reason_counts[invalid_action_reason] += 1
+            action_ack_reason = str(info.get("action_ack_reason") or "").strip()
+            if action_ack_reason:
+                action_ack_reason_counts[action_ack_reason] += 1
             if bool(info.get("premature_exit_attempt", False)):
                 premature_exit_attempts += 1
             start_screen_detected = start_screen_detected or bool(info.get("start_screen_detected", False))
@@ -1366,6 +1497,21 @@ def _run_rollouts(
                 info.get("start_screen_unknown_detected", False)
             )
             coordinator.observe_step_result(trace=trace, info=info, next_state=next_state)
+            objective_distance_after = coordinator.objective_distance(
+                state=next_state,
+                target=target,
+            )
+            if target_signature is None or trace.objective_distance_before is None or objective_distance_after is None:
+                objective_stagnation_steps = 0
+                last_stagnation_signature = target_signature
+            elif last_stagnation_signature != target_signature:
+                objective_stagnation_steps = 0
+                last_stagnation_signature = target_signature
+            elif objective_distance_after < trace.objective_distance_before:
+                objective_stagnation_steps = 0
+            else:
+                objective_stagnation_steps += 1
+            hit_step_limit_imminent = bool((steps + 1) >= max_steps and not done)
 
             meta_breakdown = reward_suite.compute_meta_reward(
                 previous_state=state,
@@ -1376,6 +1522,9 @@ def _run_rollouts(
                     **info,
                     "objective_target": target,
                     "objective_distance_before": trace.objective_distance_before,
+                    "objective_distance_after": objective_distance_after,
+                    "objective_stagnation_steps": objective_stagnation_steps,
+                    "hit_step_limit": hit_step_limit_imminent,
                 },
             )
             invalid_override = bool(
@@ -1443,16 +1592,20 @@ def _run_rollouts(
             )
 
             if train_meta:
-                update = coordinator.meta_controller.observe(
-                    features=trace.meta_features,
-                    chosen_phase=trace.decision.objective.phase,
-                    reward=meta_breakdown.total,
-                    next_features=next_meta_features,
-                    done=done,
-                    next_allowed_phases=next_allowed_phases,
-                )
-                if update.did_update:
-                    updates_applied += 1
+                phase_overridden = trace.requested_phase != trace.decision.objective.phase
+                if phase_overridden and meta_phase_override_credit_mode == "skip_overridden":
+                    meta_override_updates_skipped += 1
+                else:
+                    update = coordinator.meta_controller.observe(
+                        features=trace.meta_features,
+                        chosen_phase=trace.decision.objective.phase,
+                        reward=meta_breakdown.total,
+                        next_features=next_meta_features,
+                        done=done,
+                        next_allowed_phases=next_allowed_phases,
+                    )
+                    if update.did_update:
+                        updates_applied += 1
             if train_threat and threat_signal_relevant:
                 update = coordinator.threat_controller.observe(
                     features=trace.threat_features,
@@ -1539,6 +1692,15 @@ def _run_rollouts(
                 route_rejoin_events=route_rejoin_events,
                 phase_lock_overrides=coordinator.phase_lock_overrides,
                 stall_releases=coordinator.stall_releases,
+                requested_phase_override_steps=requested_phase_override_steps,
+                requested_phase_counts=dict(sorted(requested_phase_counts.items())),
+                executed_phase_counts=dict(sorted(executed_phase_counts.items())),
+                requested_executed_phase_pair_counts=dict(
+                    sorted(requested_executed_phase_pair_counts.items())
+                ),
+                meta_override_updates_skipped=meta_override_updates_skipped,
+                invalid_action_reason_counts=dict(sorted(invalid_action_reason_counts.items())),
+                action_ack_reason_counts=dict(sorted(action_ack_reason_counts.items())),
                 start_screen_detected=start_screen_detected,
                 victory_detected=victory_detected,
                 victory_inferred_from_start_screen=victory_inferred_from_start_screen,
@@ -1739,6 +1901,9 @@ def main() -> None:
                     tui=tui,
                     monitor_enabled=monitor_enabled,
                     print_reward_breakdown=bool(args.print_reward_breakdown),
+                    meta_phase_override_credit_mode=str(
+                        getattr(args, "meta_phase_override_credit_mode", "skip_overridden")
+                    ),
                     victory_monitor_session=victory_monitor_session,
                 )
                 results.extend(warmup_results)
@@ -1761,6 +1926,9 @@ def main() -> None:
                     tui=tui,
                     monitor_enabled=monitor_enabled,
                     print_reward_breakdown=bool(args.print_reward_breakdown),
+                    meta_phase_override_credit_mode=str(
+                        getattr(args, "meta_phase_override_credit_mode", "skip_overridden")
+                    ),
                     victory_monitor_session=victory_monitor_session,
                 )
                 results.extend(finetune_results)
@@ -1780,6 +1948,9 @@ def main() -> None:
                 tui=tui,
                 monitor_enabled=monitor_enabled,
                 print_reward_breakdown=bool(args.print_reward_breakdown),
+                meta_phase_override_credit_mode=str(
+                    getattr(args, "meta_phase_override_credit_mode", "skip_overridden")
+                ),
                 victory_monitor_session=victory_monitor_session,
             )
             results.extend(rollout_results)

@@ -23,6 +23,9 @@ class HybridMetaRewardWeights:
     energy_gain: float = 0.10
     score_gain: float = 0.02
     prog_gain: float = 1.50
+    step_limit_penalty: float = 5.00
+    stagnation_penalty: float = 0.05
+    stagnation_grace_steps: int = 3
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,8 @@ class HybridMetaRewardBreakdown:
     energy_gain: float
     score_gain: float
     prog_gain: float
+    step_limit_penalty: float
+    stagnation_penalty: float
     total: float
 
 
@@ -296,7 +301,9 @@ class HybridRewardSuite:
         distance_before = info.get("objective_distance_before")
         if distance_before is None:
             distance_before = _distance_to_target(previous_state, target=target)
-        distance_after = _distance_to_target(current_state, target=target)
+        distance_after = info.get("objective_distance_after")
+        if distance_after is None:
+            distance_after = _distance_to_target(current_state, target=target)
         progress_delta = 0.0
         if distance_before is not None and distance_after is not None:
             progress_delta = float(distance_before - distance_after)
@@ -333,6 +340,10 @@ class HybridRewardSuite:
         )
         score_gain = _extra_numeric_delta(previous_state, current_state, key="score")
         prog_gain = _prog_inventory_delta(previous_state, current_state)
+        step_limit_hit = bool(info.get("hit_step_limit", False))
+        stagnation_steps = max(int(info.get("objective_stagnation_steps", 0)), 0)
+        stagnation_grace = max(int(self.meta_weights.stagnation_grace_steps), 0)
+        stagnation_threshold = max(stagnation_grace, 1)
 
         objective_component = (
             abs(self.meta_weights.objective_complete)
@@ -356,6 +367,16 @@ class HybridRewardSuite:
         energy_component = energy_gain * abs(self.meta_weights.energy_gain)
         score_component = score_gain * abs(self.meta_weights.score_gain)
         prog_component = prog_gain * abs(self.meta_weights.prog_gain)
+        step_limit_component = (
+            -abs(self.meta_weights.step_limit_penalty)
+            if step_limit_hit
+            else 0.0
+        )
+        stagnation_component = (
+            -abs(self.meta_weights.stagnation_penalty)
+            if not completion and stagnation_steps >= stagnation_threshold
+            else 0.0
+        )
         total = (
             objective_component
             + progress_component
@@ -367,6 +388,8 @@ class HybridRewardSuite:
             + energy_component
             + score_component
             + prog_component
+            + step_limit_component
+            + stagnation_component
         )
         return HybridMetaRewardBreakdown(
             objective_complete=objective_component,
@@ -379,6 +402,8 @@ class HybridRewardSuite:
             energy_gain=energy_component,
             score_gain=score_component,
             prog_gain=prog_component,
+            step_limit_penalty=step_limit_component,
+            stagnation_penalty=stagnation_component,
             total=total,
         )
 

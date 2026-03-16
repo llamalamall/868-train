@@ -252,3 +252,95 @@ def test_compute_meta_reward_ignores_negative_loot_deltas() -> None:
     assert result.score_gain == 0.0
     assert result.prog_gain == 0.0
     assert result.total == 0.0
+
+
+def test_compute_meta_reward_applies_step_limit_penalty() -> None:
+    reward_suite = HybridRewardSuite(
+        meta_weights=HybridMetaRewardWeights(
+            objective_complete=0.0,
+            phase_progress=0.0,
+            step_cost=0.0,
+            premature_exit_penalty=0.0,
+            sector_advance=0.0,
+            final_sector_win=0.0,
+            currency_gain=0.0,
+            energy_gain=0.0,
+            score_gain=0.0,
+            prog_gain=0.0,
+            step_limit_penalty=6.5,
+            stagnation_penalty=0.0,
+        )
+    )
+
+    result = reward_suite.compute_meta_reward(
+        previous_state=_snapshot(),
+        current_state=_snapshot(),
+        objective_phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+        done=False,
+        info={"hit_step_limit": True},
+    )
+
+    assert result.step_limit_penalty == pytest.approx(-6.5)
+    assert result.total == pytest.approx(-6.5)
+
+
+def test_compute_meta_reward_applies_stagnation_penalty_after_grace_window() -> None:
+    reward_suite = HybridRewardSuite(
+        meta_weights=HybridMetaRewardWeights(
+            objective_complete=0.0,
+            phase_progress=0.0,
+            step_cost=0.0,
+            premature_exit_penalty=0.0,
+            sector_advance=0.0,
+            final_sector_win=0.0,
+            currency_gain=0.0,
+            energy_gain=0.0,
+            score_gain=0.0,
+            prog_gain=0.0,
+            step_limit_penalty=0.0,
+            stagnation_penalty=0.2,
+            stagnation_grace_steps=3,
+        )
+    )
+
+    result = reward_suite.compute_meta_reward(
+        previous_state=_snapshot(),
+        current_state=_snapshot(),
+        objective_phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+        done=False,
+        info={"objective_stagnation_steps": 3},
+    )
+
+    assert result.stagnation_penalty == pytest.approx(-0.2)
+    assert result.total == pytest.approx(-0.2)
+
+
+def test_compute_meta_reward_does_not_apply_stagnation_penalty_before_grace_window() -> None:
+    reward_suite = HybridRewardSuite(
+        meta_weights=HybridMetaRewardWeights(
+            objective_complete=0.0,
+            phase_progress=0.0,
+            step_cost=0.0,
+            premature_exit_penalty=0.0,
+            sector_advance=0.0,
+            final_sector_win=0.0,
+            currency_gain=0.0,
+            energy_gain=0.0,
+            score_gain=0.0,
+            prog_gain=0.0,
+            step_limit_penalty=0.0,
+            stagnation_penalty=0.2,
+            stagnation_grace_steps=3,
+        )
+    )
+
+    result = reward_suite.compute_meta_reward(
+        previous_state=_snapshot(),
+        current_state=_snapshot(),
+        objective_phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+        done=False,
+        info={"objective_stagnation_steps": 2},
+    )
+
+    assert result.stagnation_penalty == 0.0
+    assert result.total == 0.0

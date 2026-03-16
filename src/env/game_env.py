@@ -352,6 +352,9 @@ class GameEnvConfig:
     wait_for_action_processing: bool = False
     action_ack_timeout_seconds: float = 0.35
     action_ack_poll_interval_seconds: float = 0.05
+    post_action_delay_backoff_seconds: float = 0.02
+    action_ack_timeout_backoff_seconds: float = 0.10
+    action_ack_backoff_max_level: int = 3
     post_reset_grace_seconds: float = 0.10
     require_non_terminal_on_reset: bool = True
     prog_slot_backoff_steps: int = 3
@@ -604,6 +607,7 @@ class GameEnv:
         self._last_visible_state: GameStateSnapshot | None = None
         self._last_visible_state_step_index: int | None = None
         self._prog_action_backoff: dict[str, int] = {}
+        self._action_ack_backoff_level = 0
         self._cleanup_callbacks: list[Callable[[], None]] = []
         self._runtime_binding_callbacks: list[Callable[[int], None]] = []
         self._attached_pid: int | None = (int(attached_pid) if attached_pid is not None else None)
@@ -744,6 +748,7 @@ class GameEnv:
         self._last_visible_state_step_index = None
         self._remember_visible_state(state=state, step_index=0)
         self._prog_action_backoff.clear()
+        self._action_ack_backoff_level = 0
 
         if self._telemetry_logger is not None:
             self._telemetry_logger.start_episode(
@@ -773,8 +778,10 @@ class GameEnv:
         self._advance_prog_action_backoff()
 
         self._perform_action_with_retries(action=action, error_cls=StepTimeoutError)
-        if self._config.post_action_poll_delay_seconds > 0:
-            self._sleep_fn(self._config.post_action_poll_delay_seconds)
+        effective_post_action_delay = self._effective_post_action_delay_seconds()
+        effective_action_ack_timeout = self._effective_action_ack_timeout_seconds()
+        if effective_post_action_delay > 0:
+            self._sleep_fn(effective_post_action_delay)
 
         (
             current_state,
@@ -784,6 +791,11 @@ class GameEnv:
         ) = self._read_state_after_action(
             action=action,
             previous_state=previous_state,
+            timeout_seconds=effective_action_ack_timeout,
+        )
+        self._update_action_ack_backoff(
+            action_acknowledged=action_acknowledged,
+            action_ack_reason=action_ack_reason,
         )
         self._remember_visible_state(state=current_state, step_index=step_index)
         last_visible_state = self._recent_visible_state(step_index=step_index)
@@ -887,6 +899,9 @@ class GameEnv:
             "action_acknowledged": action_acknowledged,
             "action_ack_reason": action_ack_reason,
             "action_ack_checks": action_ack_checks,
+            "action_ack_backoff_level": int(self._action_ack_backoff_level),
+            "effective_post_action_delay_seconds": effective_post_action_delay,
+            "effective_action_ack_timeout_seconds": effective_action_ack_timeout,
             "premature_exit_attempt": premature_exit_attempt,
         }
         info.update(detector_info)
@@ -935,6 +950,7 @@ class GameEnv:
         *,
         action: str,
         previous_state: GameStateSnapshot,
+        timeout_seconds: float | None = None,
     ) -> tuple[GameStateSnapshot, bool, str, int]:
         current_state = self._read_state_once_for_step()
         self._remember_visible_state(state=current_state, step_index=self._step_index)
@@ -950,12 +966,16 @@ class GameEnv:
         if action == "wait" or not bool(self._config.wait_for_action_processing):
             return (current_state, True, "action_ack_disabled", polls)
 
-        timeout_seconds = max(float(self._config.action_ack_timeout_seconds), 0.0)
-        if timeout_seconds <= 0:
+        resolved_timeout_seconds = (
+            max(float(timeout_seconds), 0.0)
+            if timeout_seconds is not None
+            else self._effective_action_ack_timeout_seconds()
+        )
+        if resolved_timeout_seconds <= 0:
             return (current_state, False, "action_ack_timeout", polls)
 
         poll_interval = max(float(self._config.action_ack_poll_interval_seconds), 0.0)
-        deadline = self._monotonic_fn() + timeout_seconds
+        deadline = self._monotonic_fn() + resolved_timeout_seconds
         while self._monotonic_fn() <= deadline:
             if poll_interval > 0:
                 self._sleep_fn(poll_interval)
@@ -971,6 +991,29 @@ class GameEnv:
                 return (current_state, True, reason, polls)
 
         return (current_state, False, "action_ack_timeout", polls)
+
+    def _effective_post_action_delay_seconds(self) -> float:
+        base_delay = max(float(self._config.post_action_poll_delay_seconds), 0.0)
+        backoff_delay = max(float(self._config.post_action_delay_backoff_seconds), 0.0)
+        return base_delay + (int(self._action_ack_backoff_level) * backoff_delay)
+
+    def _effective_action_ack_timeout_seconds(self) -> float:
+        base_timeout = max(float(self._config.action_ack_timeout_seconds), 0.0)
+        backoff_timeout = max(float(self._config.action_ack_timeout_backoff_seconds), 0.0)
+        return base_timeout + (int(self._action_ack_backoff_level) * backoff_timeout)
+
+    def _update_action_ack_backoff(
+        self,
+        *,
+        action_acknowledged: bool,
+        action_ack_reason: str,
+    ) -> None:
+        max_level = max(int(self._config.action_ack_backoff_max_level), 0)
+        if not action_acknowledged and action_ack_reason == "action_ack_timeout":
+            self._action_ack_backoff_level = min(self._action_ack_backoff_level + 1, max_level)
+            return
+        if action_acknowledged and self._action_ack_backoff_level > 0:
+            self._action_ack_backoff_level -= 1
 
     def _is_action_acknowledged(
         self,

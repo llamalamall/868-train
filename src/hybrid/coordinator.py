@@ -631,6 +631,7 @@ class HybridCoordinator:
         )
         return HybridDecisionTrace(
             decision=decision,
+            requested_phase=requested_phase,
             meta_features=meta_features,
             threat_features=threat_features,
             objective_distance_before=objective_distance,

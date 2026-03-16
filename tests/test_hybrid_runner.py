@@ -80,7 +80,11 @@ class _StubUpdateResult:
 class _StubMetaObserver:
     epsilon = 0.0
 
-    def observe(self, **_: object) -> _StubUpdateResult:
+    def __init__(self) -> None:
+        self.observe_calls: list[dict[str, object]] = []
+
+    def observe(self, **kwargs: object) -> _StubUpdateResult:
+        self.observe_calls.append(dict(kwargs))
         return _StubUpdateResult()
 
 
@@ -127,6 +131,7 @@ class _StubRolloutCoordinator:
                 used_fallback=False,
                 reason="stub",
             ),
+            requested_phase=ObjectivePhase.COLLECT_SIPHONS,
             meta_features=(),
             threat_features=(),
             objective_distance_before=None,
@@ -182,6 +187,53 @@ class _StubRolloutCoordinator:
         return ()
 
 
+class _OverrideRolloutCoordinator(_StubRolloutCoordinator):
+    def decide(
+        self,
+        *,
+        state: GameStateSnapshot,
+        available_actions: tuple[str, ...],
+        use_meta_controller: bool,
+        use_threat_controller: bool,
+        explore_meta: bool,
+        explore_threat: bool,
+    ) -> HybridDecisionTrace:
+        return HybridDecisionTrace(
+            decision=HybridDecision(
+                objective=MetaObjectiveChoice(
+                    phase=ObjectivePhase.EXIT_SECTOR,
+                    target_position=None,
+                    reason="override",
+                ),
+                threat_override=ThreatOverride.ROUTE_DEFAULT,
+                action=available_actions[0],
+                used_fallback=False,
+                reason="override",
+            ),
+            requested_phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+            meta_features=(1.0, 2.0),
+            threat_features=(),
+            objective_distance_before=None,
+            threat_active=False,
+            available_actions=available_actions,
+        )
+
+    def allowed_meta_phases(self, state: GameStateSnapshot) -> tuple[ObjectivePhase, ...]:
+        return (
+            ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+            ObjectivePhase.EXIT_SECTOR,
+        )
+
+    def meta_feature_vector(
+        self,
+        *,
+        state: GameStateSnapshot,
+        scripted_phase: ObjectivePhase,
+        target: GridPosition | None,
+    ) -> tuple[float, ...]:
+        return (3.0, 4.0)
+
+
 class _SingleStepEnv:
     action_space = ("wait",)
 
@@ -233,6 +285,9 @@ def test_hybrid_parser_movement_defaults() -> None:
     assert args.meta_reward_energy_gain == pytest.approx(0.10)
     assert args.meta_reward_score_gain == pytest.approx(0.02)
     assert args.meta_reward_prog_gain == pytest.approx(1.50)
+    assert args.meta_reward_step_limit_penalty == pytest.approx(5.00)
+    assert args.meta_reward_stagnation_penalty == pytest.approx(0.05)
+    assert args.meta_reward_stagnation_grace_steps == 3
 
 
 def test_hybrid_parser_train_meta_defaults() -> None:
@@ -246,6 +301,9 @@ def test_hybrid_parser_train_meta_defaults() -> None:
     assert args.meta_epsilon_start == pytest.approx(0.60)
     assert args.game_tick_ms == 1
     assert args.post_action_delay == pytest.approx(0.01)
+    assert args.post_action_delay_backoff == pytest.approx(0.02)
+    assert args.action_ack_timeout_backoff == pytest.approx(0.10)
+    assert args.action_ack_backoff_max_level == 3
     assert args.disable_idle_frame_delay is True
     assert args.disable_background_motion is True
     assert args.disable_wall_animations is True
@@ -261,6 +319,10 @@ def test_hybrid_parser_train_meta_defaults() -> None:
     assert args.meta_reward_energy_gain == pytest.approx(0.10)
     assert args.meta_reward_score_gain == pytest.approx(0.02)
     assert args.meta_reward_prog_gain == pytest.approx(1.50)
+    assert args.meta_reward_step_limit_penalty == pytest.approx(5.00)
+    assert args.meta_reward_stagnation_penalty == pytest.approx(0.05)
+    assert args.meta_reward_stagnation_grace_steps == 3
+    assert args.meta_phase_override_credit_mode == "skip_overridden"
     assert args.phase_lock_min_steps == 6
     assert args.target_stall_release_steps == 4
     assert args.victory_monitor is True
@@ -282,6 +344,10 @@ def test_hybrid_parser_train_full_meta_reward_defaults() -> None:
     assert args.meta_reward_energy_gain == pytest.approx(0.10)
     assert args.meta_reward_score_gain == pytest.approx(0.02)
     assert args.meta_reward_prog_gain == pytest.approx(1.50)
+    assert args.meta_reward_step_limit_penalty == pytest.approx(5.00)
+    assert args.meta_reward_stagnation_penalty == pytest.approx(0.05)
+    assert args.meta_reward_stagnation_grace_steps == 3
+    assert args.meta_phase_override_credit_mode == "skip_overridden"
     assert args.victory_monitor is True
     assert args.restore_save_file is None
     assert args.restore_save_delay == pytest.approx(0.35)
@@ -301,6 +367,9 @@ def test_hybrid_parser_eval_meta_reward_defaults() -> None:
     assert args.meta_reward_energy_gain == pytest.approx(0.10)
     assert args.meta_reward_score_gain == pytest.approx(0.02)
     assert args.meta_reward_prog_gain == pytest.approx(1.50)
+    assert args.meta_reward_step_limit_penalty == pytest.approx(5.00)
+    assert args.meta_reward_stagnation_penalty == pytest.approx(0.05)
+    assert args.meta_reward_stagnation_grace_steps == 3
 
 
 def test_hybrid_parser_train_full_requires_warmstart_when_not_resuming() -> None:
@@ -375,6 +444,12 @@ def test_hybrid_parser_accepts_custom_meta_reward_values() -> None:
             "0.05",
             "--meta-reward-prog-gain",
             "3.5",
+            "--meta-reward-step-limit-penalty",
+            "7.0",
+            "--meta-reward-stagnation-penalty",
+            "0.15",
+            "--meta-reward-stagnation-grace-steps",
+            "5",
         ]
     )
 
@@ -388,6 +463,9 @@ def test_hybrid_parser_accepts_custom_meta_reward_values() -> None:
     assert args.meta_reward_energy_gain == pytest.approx(0.2)
     assert args.meta_reward_score_gain == pytest.approx(0.05)
     assert args.meta_reward_prog_gain == pytest.approx(3.5)
+    assert args.meta_reward_step_limit_penalty == pytest.approx(7.0)
+    assert args.meta_reward_stagnation_penalty == pytest.approx(0.15)
+    assert args.meta_reward_stagnation_grace_steps == 5
 
 
 def test_build_meta_reward_weights_uses_cli_overrides() -> None:
@@ -415,6 +493,12 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
             "0.08",
             "--meta-reward-prog-gain",
             "2.75",
+            "--meta-reward-step-limit-penalty",
+            "4.5",
+            "--meta-reward-stagnation-penalty",
+            "0.12",
+            "--meta-reward-stagnation-grace-steps",
+            "6",
         ]
     )
 
@@ -430,6 +514,9 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
         energy_gain=0.25,
         score_gain=0.08,
         prog_gain=2.75,
+        step_limit_penalty=4.5,
+        stagnation_penalty=0.12,
+        stagnation_grace_steps=6,
     )
 
 
@@ -464,13 +551,23 @@ def test_build_hybrid_config_payload_includes_run_tag_and_warmstart_metadata() -
     assert payload["victory_monitor_log_path"].endswith("victory-transition-monitor.log")
     assert payload["warmstart_checkpoint"] == "artifacts/hybrid/20260314-03-hybrid-beta"
     assert payload["resume_checkpoint"] is None
+    assert payload["post_action_delay"] == pytest.approx(0.01)
+    assert payload["action_ack_timeout"] == pytest.approx(0.35)
+    assert payload["action_ack_poll_interval"] == pytest.approx(0.05)
+    assert payload["post_action_delay_backoff"] == pytest.approx(0.02)
+    assert payload["action_ack_timeout_backoff"] == pytest.approx(0.10)
+    assert payload["action_ack_backoff_max_level"] == 3
     assert payload["phase_lock_min_steps"] == 6
     assert payload["target_stall_release_steps"] == 4
+    assert payload["meta_phase_override_credit_mode"] == "skip_overridden"
     assert payload["meta_reward_weights"]["final_sector_win"] == pytest.approx(25.0)
     assert payload["meta_reward_weights"]["currency_gain"] == pytest.approx(0.10)
     assert payload["meta_reward_weights"]["energy_gain"] == pytest.approx(0.10)
     assert payload["meta_reward_weights"]["score_gain"] == pytest.approx(0.02)
     assert payload["meta_reward_weights"]["prog_gain"] == pytest.approx(1.50)
+    assert payload["meta_reward_weights"]["step_limit_penalty"] == pytest.approx(5.0)
+    assert payload["meta_reward_weights"]["stagnation_penalty"] == pytest.approx(0.05)
+    assert payload["meta_reward_weights"]["stagnation_grace_steps"] == 3
 
 
 def test_build_hybrid_config_payload_records_resume_checkpoint_for_meta_training() -> None:
@@ -525,6 +622,16 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
             route_rejoin_events=0,
             phase_lock_overrides=2,
             stall_releases=1,
+            requested_phase_override_steps=2,
+            requested_phase_counts={"collect_siphons": 1, "exit_sector": 1},
+            executed_phase_counts={"collect_siphons": 2},
+            requested_executed_phase_pair_counts={
+                "collect_siphons->collect_siphons": 1,
+                "exit_sector->collect_siphons": 1,
+            },
+            meta_override_updates_skipped=1,
+            invalid_action_reason_counts={"action_not_acknowledged": 2},
+            action_ack_reason_counts={"no_observed_effect": 2, "state_changed": 3},
             start_screen_detected=False,
             victory_detected=False,
             victory_inferred_from_start_screen=False,
@@ -554,6 +661,13 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
             route_rejoin_events=1,
             phase_lock_overrides=0,
             stall_releases=0,
+            requested_phase_override_steps=0,
+            requested_phase_counts={"exit_sector": 2},
+            executed_phase_counts={"exit_sector": 2},
+            requested_executed_phase_pair_counts={"exit_sector->exit_sector": 2},
+            meta_override_updates_skipped=0,
+            invalid_action_reason_counts={"prog_no_effect": 1},
+            action_ack_reason_counts={"state_changed": 2},
             start_screen_detected=True,
             victory_detected=False,
             victory_inferred_from_start_screen=False,
@@ -588,6 +702,8 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
     assert payload["summary"]["avg_route_rejoin_events"] == pytest.approx(0.5)
     assert payload["summary"]["avg_phase_lock_overrides"] == pytest.approx(1.0)
     assert payload["summary"]["avg_stall_releases"] == pytest.approx(0.5)
+    assert payload["summary"]["avg_requested_phase_override_steps"] == pytest.approx(1.0)
+    assert payload["summary"]["avg_meta_override_updates_skipped"] == pytest.approx(0.5)
     assert payload["summary"]["terminal_reason_counts"] == {
         "none": 1,
         "state:start_screen_unknown": 1,
@@ -596,16 +712,49 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
         "step_limit": 1,
         "unexpected_start_screen": 1,
     }
+    assert payload["summary"]["requested_phase_counts"] == {
+        "collect_siphons": 1,
+        "exit_sector": 3,
+    }
+    assert payload["summary"]["executed_phase_counts"] == {
+        "collect_siphons": 2,
+        "exit_sector": 2,
+    }
+    assert payload["summary"]["requested_executed_phase_pair_counts"] == {
+        "collect_siphons->collect_siphons": 1,
+        "exit_sector->collect_siphons": 1,
+        "exit_sector->exit_sector": 2,
+    }
+    assert payload["summary"]["invalid_action_reason_counts"] == {
+        "action_not_acknowledged": 2,
+        "prog_no_effect": 1,
+    }
+    assert payload["summary"]["action_ack_reason_counts"] == {
+        "no_observed_effect": 2,
+        "state_changed": 5,
+    }
     assert payload["results"][0]["hit_step_limit"] is True
     assert payload["results"][0]["terminal_classification"] == "step_limit"
     assert payload["results"][0]["phase_switches"] == 4
     assert payload["results"][0]["threat_active_steps"] == 9
     assert payload["results"][0]["phase_lock_overrides"] == 2
+    assert payload["results"][0]["requested_phase_override_steps"] == 2
+    assert payload["results"][0]["meta_override_updates_skipped"] == 1
+    assert payload["results"][0]["requested_executed_phase_pair_counts"] == {
+        "collect_siphons->collect_siphons": 1,
+        "exit_sector->collect_siphons": 1,
+    }
+    assert payload["results"][0]["invalid_action_reason_counts"] == {
+        "action_not_acknowledged": 2,
+    }
     assert payload["results"][1]["terminal_classification"] == "unexpected_start_screen"
     assert payload["results"][1]["start_screen_unknown_detected"] is True
     assert payload["results"][1]["final_action"] == "move_right"
     assert payload["results"][1]["last_known_player_position"] == {"x": 4, "y": 5}
     assert payload["results"][1]["last_known_exit_position"] == {"x": 5, "y": 5}
+    assert payload["results"][1]["requested_phase_counts"] == {"exit_sector": 2}
+    assert payload["results"][1]["meta_override_updates_skipped"] == 0
+    assert payload["results"][1]["action_ack_reason_counts"] == {"state_changed": 2}
 
 
 def test_hook_event_is_victory_signal_matches_victory_flag_targets() -> None:
@@ -665,6 +814,34 @@ def test_run_rollouts_does_not_add_threat_reward_when_threat_controller_is_disab
     assert results[0].last_known_player_position is None
     assert results[0].last_known_exit_position is None
     assert coordinator.threat_controller.observe_calls == 0
+
+
+def test_run_rollouts_skips_meta_updates_for_overridden_requested_phase(
+    _null_tui: _NullTui,
+) -> None:
+    coordinator = _OverrideRolloutCoordinator()
+
+    results = _run_rollouts(
+        env=_SingleStepEnv(),
+        coordinator=coordinator,
+        reward_suite=HybridRewardSuite(),
+        episodes=1,
+        max_steps=5,
+        train_meta=True,
+        train_threat=False,
+        use_meta=True,
+        use_threat=False,
+        explore_meta=False,
+        explore_threat=False,
+        tui=_null_tui,
+        monitor_enabled=False,
+        print_reward_breakdown=False,
+        meta_phase_override_credit_mode="skip_overridden",
+    )
+
+    assert coordinator.meta_controller.observe_calls == []
+    assert results[0].requested_phase_override_steps == 1
+    assert results[0].meta_override_updates_skipped == 1
 
 
 def test_format_monitor_action_line_includes_phase_and_target_coordinates() -> None:

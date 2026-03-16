@@ -137,6 +137,9 @@ class HybridLiveEnvConfig:
     wait_for_action_processing: bool = True
     action_ack_timeout_seconds: float = 0.35
     action_ack_poll_interval_seconds: float = 0.05
+    post_action_delay_backoff_seconds: float = 0.02
+    action_ack_timeout_backoff_seconds: float = 0.10
+    action_ack_backoff_max_level: int = 3
     prog_slot_backoff_steps: int = 3
     require_non_terminal_on_reset: bool = True
     game_tick_ms: int = 1
@@ -152,6 +155,9 @@ class HybridLiveEnvConfig:
             wait_for_action_processing=bool(self.wait_for_action_processing),
             action_ack_timeout_seconds=max(float(self.action_ack_timeout_seconds), 0.0),
             action_ack_poll_interval_seconds=max(float(self.action_ack_poll_interval_seconds), 0.0),
+            post_action_delay_backoff_seconds=max(float(self.post_action_delay_backoff_seconds), 0.0),
+            action_ack_timeout_backoff_seconds=max(float(self.action_ack_timeout_backoff_seconds), 0.0),
+            action_ack_backoff_max_level=max(int(self.action_ack_backoff_max_level), 0),
             prog_slot_backoff_steps=max(int(self.prog_slot_backoff_steps), 0),
             require_non_terminal_on_reset=bool(self.require_non_terminal_on_reset),
         )

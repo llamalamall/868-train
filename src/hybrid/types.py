@@ -53,6 +53,7 @@ class HybridDecisionTrace:
     """Decision metadata required for training updates and reward shaping."""
 
     decision: HybridDecision
+    requested_phase: ObjectivePhase
     meta_features: tuple[float, ...]
     threat_features: tuple[float, ...]
     objective_distance_before: int | None
@@ -74,4 +75,3 @@ class HybridEpisodeEnv(Protocol):
 
     def available_actions(self, state: GameStateSnapshot | None = None) -> tuple[str, ...]:
         """Return valid actions for current snapshot."""
-

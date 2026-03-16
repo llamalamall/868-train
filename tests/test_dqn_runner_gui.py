@@ -450,3 +450,6 @@ def test_hybrid_gui_action_discovery_includes_meta_reward_weight_flags() -> None
     assert "meta_reward_energy_gain" in discovered
     assert "meta_reward_score_gain" in discovered
     assert "meta_reward_prog_gain" in discovered
+    assert "meta_reward_step_limit_penalty" in discovered
+    assert "meta_reward_stagnation_penalty" in discovered
+    assert "meta_reward_stagnation_grace_steps" in discovered

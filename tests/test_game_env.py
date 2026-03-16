@@ -929,6 +929,63 @@ def test_game_env_marks_step_unacknowledged_after_action_ack_timeout() -> None:
     assert info["invalid_action_reason"] == "action_not_acknowledged"
 
 
+def test_game_env_action_ack_backoff_extends_next_timeout_after_timeout() -> None:
+    stale = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+        ),
+    )
+    moved = _snapshot(
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(1, 0),
+            exit_position=GridPosition(1, 0),
+        ),
+    )
+    clock = FakeClock()
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([stale, stale, stale, moved]),
+        reset_strategy=NoopResetManager(),
+        action_space=("move_right",),
+        config=GameEnvConfig(
+            require_non_terminal_on_reset=False,
+            post_action_poll_delay_seconds=0.0,
+            wait_for_action_processing=True,
+            action_ack_timeout_seconds=0.0,
+            action_ack_poll_interval_seconds=0.05,
+            post_action_delay_backoff_seconds=0.01,
+            action_ack_timeout_backoff_seconds=0.10,
+            action_ack_backoff_max_level=1,
+        ),
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    env.reset()
+
+    _state1, _reward1, done1, info1 = env.step("move_right")
+    state2, _reward2, done2, info2 = env.step("move_right")
+
+    assert done1 is False
+    assert info1["action_acknowledged"] is False
+    assert info1["action_ack_reason"] == "action_ack_timeout"
+    assert info1["action_ack_backoff_level"] == 1
+    assert info1["effective_action_ack_timeout_seconds"] == pytest.approx(0.0)
+    assert done2 is False
+    assert state2.map.player_position == GridPosition(1, 0)
+    assert info2["action_acknowledged"] is True
+    assert info2["action_ack_reason"] == "state_changed"
+    assert info2["effective_post_action_delay_seconds"] == pytest.approx(0.01)
+    assert info2["effective_action_ack_timeout_seconds"] == pytest.approx(0.10)
+    assert info2["action_ack_backoff_level"] == 0
+
+
 def test_game_env_reset_retries_after_transient_reset_failure() -> None:
     strategy = FlakyResetStrategy(failures_remaining=1)
     recovery_reasons: list[str] = []
