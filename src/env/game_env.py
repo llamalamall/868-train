@@ -160,6 +160,94 @@ def _state_extra_numeric(snapshot: GameStateSnapshot, *, key: str) -> float | No
         return None
 
 
+def _player_position_changed(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> bool:
+    if previous_state.map.status != "ok" or current_state.map.status != "ok":
+        return False
+    previous_position = previous_state.map.player_position
+    current_position = current_state.map.player_position
+    return (
+        previous_position is not None
+        and current_position is not None
+        and current_position != previous_position
+    )
+
+
+def _numeric_field_changed(
+    getter: Callable[[GameStateSnapshot], float | None],
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> bool:
+    previous_value = getter(previous_state)
+    current_value = getter(current_state)
+    return previous_value is not None and current_value is not None and current_value != previous_value
+
+
+def _action_specific_ack_reason(
+    *,
+    action: str,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> str | None:
+    normalized_action = str(action).strip().lower()
+    if normalized_action in _MOVE_ACTION_DELTAS and _player_position_changed(
+        previous_state=previous_state,
+        current_state=current_state,
+    ):
+        return "player_moved"
+    if normalized_action == "space":
+        previous_siphons = _count_siphons(previous_state)
+        current_siphons = _count_siphons(current_state)
+        if (
+            previous_siphons is not None
+            and current_siphons is not None
+            and current_siphons != previous_siphons
+        ):
+            return "siphon_count_changed"
+        if _numeric_field_changed(
+            lambda snapshot: _state_numeric(snapshot.currency),
+            previous_state=previous_state,
+            current_state=current_state,
+        ):
+            return "currency_changed"
+        if _numeric_field_changed(
+            lambda snapshot: _state_numeric(snapshot.energy),
+            previous_state=previous_state,
+            current_state=current_state,
+        ):
+            return "energy_changed"
+        if _numeric_field_changed(
+            lambda snapshot: _state_extra_numeric(snapshot, key="score"),
+            previous_state=previous_state,
+            current_state=current_state,
+        ):
+            return "score_changed"
+        if previous_state.can_siphon_now is not None and current_state.can_siphon_now is not None:
+            if current_state.can_siphon_now != previous_state.can_siphon_now:
+                return "siphon_availability_changed"
+        if _inventory_effect_signature(previous_state) != _inventory_effect_signature(current_state):
+            return "inventory_changed"
+        return None
+    if normalized_action.startswith("prog_slot_"):
+        if _inventory_effect_signature(previous_state) != _inventory_effect_signature(current_state):
+            return "prog_inventory_changed"
+        if _numeric_field_changed(
+            lambda snapshot: _state_numeric(snapshot.energy),
+            previous_state=previous_state,
+            current_state=current_state,
+        ):
+            return "prog_energy_changed"
+        if previous_state.prog_slots_available_mask != current_state.prog_slots_available_mask:
+            return "prog_slot_mask_changed"
+        if _extra_fields_effect_signature(previous_state) != _extra_fields_effect_signature(current_state):
+            return "prog_state_changed"
+    return None
+
+
 def _field_effect_signature(field: Any) -> tuple[str, Any | None]:
     status = str(getattr(field, "status", "missing"))
     if status != "ok":
@@ -1026,6 +1114,13 @@ class GameEnv:
             return (True, "wait_action")
         if _state_is_terminal(current_state):
             return (True, "terminal_state")
+        specific_reason = _action_specific_ack_reason(
+            action=action,
+            previous_state=previous_state,
+            current_state=current_state,
+        )
+        if specific_reason is not None:
+            return (True, specific_reason)
         if self._transition_has_effect(previous_state=previous_state, current_state=current_state):
             return (True, "state_changed")
         return (False, "no_observed_effect")
@@ -1768,18 +1863,8 @@ class GameEnv:
         def before_action(action_name: str) -> None:
             if enemy_spawn_suppressor.enabled and no_enemy_map_root_address is not None:
                 _suppress_enemies_for_root(map_root_address=no_enemy_map_root_address)
-            if window_targeted_input or not focus_window_on_attach:
-                return
-            with runtime_lock:
-                current_window = runtime["attached_window"]
-            try:
-                focus_window(
-                    current_window,
-                    retries=window_focus_retries,
-                    retry_delay_seconds=window_focus_retry_delay,
-                )
-            except WindowAttachError as error:
-                _recover_live_bindings(f"focus_lost_before_action:{action_name}", error)
+            # Input focus is handled on attach/recovery, not before every action.
+            return
 
         base_action_config = action_config or ActionConfig()
         resolved_action_config = _clamp_action_press_duration_to_game_tick(
@@ -1820,7 +1905,7 @@ class GameEnv:
             recovery_hook=_recover_live_bindings,
             before_action_hook=(
                 before_action
-                if (focus_window_on_attach or enemy_spawn_suppressor.enabled)
+                if enemy_spawn_suppressor.enabled
                 else None
             ),
             attached_pid=int(attached_process.pid),

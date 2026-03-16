@@ -888,7 +888,7 @@ def test_game_env_waits_for_action_processing_before_returning_step_state() -> N
 
     assert state.map.player_position == GridPosition(1, 0)
     assert info["action_acknowledged"] is True
-    assert info["action_ack_reason"] == "state_changed"
+    assert info["action_ack_reason"] == "player_moved"
     assert int(info["action_ack_checks"]) >= 2
 
 
@@ -980,10 +980,96 @@ def test_game_env_action_ack_backoff_extends_next_timeout_after_timeout() -> Non
     assert done2 is False
     assert state2.map.player_position == GridPosition(1, 0)
     assert info2["action_acknowledged"] is True
-    assert info2["action_ack_reason"] == "state_changed"
+    assert info2["action_ack_reason"] == "player_moved"
     assert info2["effective_post_action_delay_seconds"] == pytest.approx(0.01)
     assert info2["effective_action_ack_timeout_seconds"] == pytest.approx(0.10)
     assert info2["action_ack_backoff_level"] == 0
+
+
+def test_game_env_acknowledges_space_action_on_siphon_state_change() -> None:
+    before = _snapshot(
+        credits=3,
+        can_siphon_now=True,
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(GridPosition(0, 0),),
+        ),
+    )
+    after = _snapshot(
+        credits=4,
+        can_siphon_now=False,
+        map_state=MapState(
+            status="ok",
+            width=2,
+            height=1,
+            player_position=GridPosition(0, 0),
+            exit_position=GridPosition(1, 0),
+            siphons=(),
+        ),
+    )
+    clock = FakeClock()
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("space",),
+        config=GameEnvConfig(
+            require_non_terminal_on_reset=False,
+            post_action_poll_delay_seconds=0.0,
+            wait_for_action_processing=True,
+            action_ack_timeout_seconds=0.2,
+            action_ack_poll_interval_seconds=0.05,
+        ),
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    env.reset()
+
+    _state, _reward, done, info = env.step("space")
+
+    assert done is False
+    assert info["action_acknowledged"] is True
+    assert info["action_ack_reason"] == "siphon_count_changed"
+
+
+def test_game_env_acknowledges_prog_action_on_energy_change() -> None:
+    before = _snapshot(
+        energy=5,
+        inventory_state=InventoryState(status="ok", raw_prog_ids=(2,)),
+        prog_slots_available_mask=0b1,
+    )
+    after = _snapshot(
+        energy=4,
+        inventory_state=InventoryState(status="ok", raw_prog_ids=(2,)),
+        prog_slots_available_mask=0,
+    )
+    clock = FakeClock()
+    env = GameEnv(
+        action_api=FakeActionAPI(),
+        state_provider=QueueStateProvider([before, before, after]),
+        reset_strategy=NoopResetManager(),
+        action_space=("prog_slot_1",),
+        config=GameEnvConfig(
+            require_non_terminal_on_reset=False,
+            post_action_poll_delay_seconds=0.0,
+            wait_for_action_processing=True,
+            action_ack_timeout_seconds=0.2,
+            action_ack_poll_interval_seconds=0.05,
+        ),
+        sleep_fn=clock.sleep,
+        monotonic_fn=clock.monotonic,
+    )
+    env.reset()
+
+    _state, _reward, done, info = env.step("prog_slot_1")
+
+    assert done is False
+    assert info["action_acknowledged"] is True
+    assert info["action_ack_reason"] == "prog_energy_changed"
 
 
 def test_game_env_reset_retries_after_transient_reset_failure() -> None:

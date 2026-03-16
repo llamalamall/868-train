@@ -3,11 +3,13 @@
 from __future__ import annotations
 
 import argparse
+import ctypes
 import json
 import math
 import os
 import queue
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -60,6 +62,13 @@ _TEXTUAL_MARKUP_PATTERN = re.compile(r"\[[^\]]+\]")
 _TEXTUAL_MARKUP_SEGMENT_PATTERN = re.compile(r"\[([a-zA-Z0-9_]+)\](.*?)\[/\]", re.DOTALL)
 _REWARD_HISTORY_LIMIT = 500
 _AUTO_LATEST_BETA_META_CHECKPOINT = "__AUTO_LATEST_BETA_META_CHECKPOINT__"
+_LIVE_MONITOR_RUNNER_MODULES = {
+    "src.env.dqn_policy_runner",
+    "src.env.heuristic_policy_runner",
+    "src.env.random_policy_runner",
+    "src.hybrid.runner",
+}
+_LIVE_MONITOR_TUI_MODULE = "src.memory.state_monitor_tui"
 _MONITOR_KEY_LABELS: tuple[str, ...] = (
     "1",
     "2",
@@ -436,6 +445,62 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
                 "phase_lock_min_steps": 6,
                 "target_stall_release_steps": 4,
                 "run_tag": "hybrid-meta-efficient-fixedlogic",
+            },
+            "meta ack sweep balanced": {
+                "episodes": 30,
+                "max_steps": 320,
+                "no_enemies": True,
+                "meta_learning_rate": 0.0005,
+                "meta_epsilon_decay_steps": 3000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
+                "post_action_delay": 0.03,
+                "action_ack_timeout": 0.50,
+                "action_ack_poll_interval": 0.02,
+                "action_ack_backoff_max_level": 0,
+                "run_tag": "hybrid-meta-ack-balanced",
+            },
+            "meta ack sweep conservative": {
+                "episodes": 30,
+                "max_steps": 320,
+                "no_enemies": True,
+                "meta_learning_rate": 0.0005,
+                "meta_epsilon_decay_steps": 3000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
+                "post_action_delay": 0.05,
+                "action_ack_timeout": 0.70,
+                "action_ack_poll_interval": 0.02,
+                "action_ack_backoff_max_level": 0,
+                "run_tag": "hybrid-meta-ack-conservative",
+            },
+            "meta ack sweep fast poll": {
+                "episodes": 30,
+                "max_steps": 320,
+                "no_enemies": True,
+                "meta_learning_rate": 0.0005,
+                "meta_epsilon_decay_steps": 3000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
+                "post_action_delay": 0.02,
+                "action_ack_timeout": 0.50,
+                "action_ack_poll_interval": 0.01,
+                "action_ack_backoff_max_level": 0,
+                "run_tag": "hybrid-meta-ack-fastpoll",
+            },
+            "beta efficient conservative ack": {
+                "episodes": 120,
+                "max_steps": 320,
+                "no_enemies": True,
+                "meta_learning_rate": 0.0005,
+                "meta_epsilon_decay_steps": 3000,
+                "phase_lock_min_steps": 6,
+                "target_stall_release_steps": 4,
+                "post_action_delay": 0.05,
+                "action_ack_timeout": 0.70,
+                "action_ack_poll_interval": 0.02,
+                "action_ack_backoff_max_level": 0,
+                "run_tag": "hybrid-meta-beta-efficient-conservative-ack",
             },
         }
     if command_name == "train-full-hierarchical":
@@ -825,6 +890,291 @@ def _format_epsilon_progress_text(
         return current_text
     clamped_end = max(0.0, min(1.0, epsilon_end))
     return f"{current_text} -> {clamped_end * 100.0:.1f}%"
+
+
+@dataclass(frozen=True)
+class _RunningPythonProcess:
+    pid: int
+    parent_pid: int | None
+    executable_name: str
+    command_line: str
+
+
+@dataclass(frozen=True)
+class _LiveMonitorSessionBinding:
+    runner_pid: int
+    runner_module: str
+    status_file: Path
+    control_file: Path | None
+    executable_name: str | None
+    source_pid: int
+    source_module: str
+
+
+def _split_windows_command_line(command_line: str) -> tuple[str, ...]:
+    text = str(command_line).strip()
+    if not text:
+        return ()
+
+    if os.name != "nt":
+        return tuple(token.strip('"') for token in shlex.split(text, posix=False))
+
+    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    shell32.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
+    shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
+    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
+    kernel32.LocalFree.restype = ctypes.c_void_p
+
+    argc = ctypes.c_int(0)
+    argv_pointer = shell32.CommandLineToArgvW(text, ctypes.byref(argc))
+    if not argv_pointer:
+        return ()
+
+    try:
+        return tuple(str(argv_pointer[index]) for index in range(argc.value))
+    finally:
+        kernel32.LocalFree(ctypes.cast(argv_pointer, ctypes.c_void_p))
+
+
+def _normalize_cli_option_value(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip().strip('"')
+    return normalized or None
+
+
+def _extract_cli_option_value(arguments: tuple[str, ...], option_name: str) -> str | None:
+    for index, token in enumerate(arguments):
+        if token == option_name:
+            if index + 1 >= len(arguments):
+                return None
+            return _normalize_cli_option_value(arguments[index + 1])
+        if token.startswith(f"{option_name}="):
+            return _normalize_cli_option_value(token.partition("=")[2])
+    return None
+
+
+def _parse_module_invocation(arguments: tuple[str, ...]) -> tuple[str | None, tuple[str, ...]]:
+    for index, token in enumerate(arguments):
+        if token == "-m" and index + 1 < len(arguments):
+            return str(arguments[index + 1]), tuple(arguments[index + 2 :])
+    return (None, ())
+
+
+def _first_non_option_token(arguments: tuple[str, ...]) -> str | None:
+    for token in arguments:
+        if not str(token).startswith("-"):
+            return str(token)
+    return None
+
+
+def _is_live_monitor_runner_module(module_name: str | None, module_args: tuple[str, ...]) -> bool:
+    if module_name in _LIVE_MONITOR_RUNNER_MODULES:
+        return True
+    if module_name == "src.training.evaluate":
+        return _first_non_option_token(module_args) == "compare"
+    return False
+
+
+def _normalize_executable_name(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).strip()
+    if not normalized:
+        return None
+    return Path(normalized).name.lower()
+
+
+def _build_live_monitor_binding_for_runner(
+    *,
+    process: _RunningPythonProcess,
+    runner_module: str,
+    runner_args: tuple[str, ...],
+    children: tuple[_RunningPythonProcess, ...],
+    parsed_arguments_by_pid: dict[int, tuple[str | None, tuple[str, ...]]],
+) -> _LiveMonitorSessionBinding | None:
+    executable_name = _extract_cli_option_value(runner_args, "--exe")
+    status_file_text = _extract_cli_option_value(runner_args, "--external-status-file")
+    control_file_text = _extract_cli_option_value(runner_args, "--external-control-file")
+    source_pid = process.pid
+    source_module = runner_module
+
+    if status_file_text is None:
+        child_candidates: list[tuple[int, str, str | None, str | None]] = []
+        for child in children:
+            child_module, child_args = parsed_arguments_by_pid.get(child.pid, (None, ()))
+            if child_module != _LIVE_MONITOR_TUI_MODULE:
+                continue
+            child_status_file = _extract_cli_option_value(child_args, "--external-status-file")
+            if child_status_file is None:
+                continue
+            child_candidates.append(
+                (
+                    child.pid,
+                    child_status_file,
+                    _extract_cli_option_value(child_args, "--external-control-file"),
+                    _extract_cli_option_value(child_args, "--exe"),
+                )
+            )
+        if child_candidates:
+            child_candidates.sort(reverse=True)
+            source_pid, status_file_text, child_control_file, child_executable_name = child_candidates[0]
+            source_module = _LIVE_MONITOR_TUI_MODULE
+            if control_file_text is None:
+                control_file_text = child_control_file
+            if executable_name is None:
+                executable_name = child_executable_name
+
+    if status_file_text is None:
+        return None
+
+    return _LiveMonitorSessionBinding(
+        runner_pid=process.pid,
+        runner_module=runner_module,
+        status_file=Path(status_file_text),
+        control_file=(Path(control_file_text) if control_file_text else None),
+        executable_name=executable_name,
+        source_pid=source_pid,
+        source_module=source_module,
+    )
+
+
+def _select_live_monitor_binding(
+    bindings: tuple[_LiveMonitorSessionBinding, ...],
+    *,
+    preferred_runner_pid: int | None = None,
+    preferred_executable_name: str | None = None,
+) -> _LiveMonitorSessionBinding | None:
+    if not bindings:
+        return None
+
+    preferred_executable_key = _normalize_executable_name(preferred_executable_name)
+
+    def _sort_key(binding: _LiveMonitorSessionBinding) -> tuple[int, int, int, int, int, int]:
+        executable_match = (
+            1
+            if preferred_executable_key is not None
+            and _normalize_executable_name(binding.executable_name) == preferred_executable_key
+            else 0
+        )
+        pid_match = 1 if preferred_runner_pid is not None and binding.runner_pid == preferred_runner_pid else 0
+        direct_binding = 1 if binding.source_module == binding.runner_module else 0
+        has_control_file = 1 if binding.control_file is not None else 0
+        return (
+            pid_match,
+            executable_match,
+            direct_binding,
+            has_control_file,
+            binding.runner_pid,
+            binding.source_pid,
+        )
+
+    return max(bindings, key=_sort_key)
+
+
+def _discover_live_monitor_session_binding(
+    processes: tuple[_RunningPythonProcess, ...],
+    *,
+    preferred_runner_pid: int | None = None,
+    preferred_executable_name: str | None = None,
+) -> _LiveMonitorSessionBinding | None:
+    if not processes:
+        return None
+
+    children_by_parent_pid: dict[int, list[_RunningPythonProcess]] = {}
+    parsed_arguments_by_pid: dict[int, tuple[str | None, tuple[str, ...]]] = {}
+    for process in processes:
+        parsed_arguments_by_pid[process.pid] = _parse_module_invocation(
+            _split_windows_command_line(process.command_line)
+        )
+        if process.parent_pid is not None:
+            children_by_parent_pid.setdefault(process.parent_pid, []).append(process)
+
+    bindings: list[_LiveMonitorSessionBinding] = []
+    for process in processes:
+        runner_module, runner_args = parsed_arguments_by_pid.get(process.pid, (None, ()))
+        if not _is_live_monitor_runner_module(runner_module, runner_args):
+            continue
+        if runner_module is None:
+            continue
+        binding = _build_live_monitor_binding_for_runner(
+            process=process,
+            runner_module=runner_module,
+            runner_args=runner_args,
+            children=tuple(children_by_parent_pid.get(process.pid, ())),
+            parsed_arguments_by_pid=parsed_arguments_by_pid,
+        )
+        if binding is not None:
+            bindings.append(binding)
+
+    return _select_live_monitor_binding(
+        tuple(bindings),
+        preferred_runner_pid=preferred_runner_pid,
+        preferred_executable_name=preferred_executable_name,
+    )
+
+
+def _list_running_python_processes() -> tuple[_RunningPythonProcess, ...]:
+    if os.name != "nt":
+        return ()
+
+    powershell_command = (
+        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+        "Get-CimInstance Win32_Process | "
+        "Where-Object { $_.CommandLine -and ($_.Name -match '^(python|pythonw|py)\\.exe$') } | "
+        "Select-Object ProcessId, ParentProcessId, Name, CommandLine | "
+        "ConvertTo-Json -Compress"
+    )
+    try:
+        completed = subprocess.run(
+            ["powershell.exe", "-NoProfile", "-Command", powershell_command],
+            capture_output=True,
+            check=False,
+            encoding="utf-8",
+            errors="replace",
+            text=True,
+            timeout=3.0,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ()
+
+    if completed.returncode != 0:
+        return ()
+    stdout_text = completed.stdout.strip()
+    if not stdout_text:
+        return ()
+
+    try:
+        payload = json.loads(stdout_text)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return ()
+
+    rows = payload if isinstance(payload, list) else [payload]
+    processes: list[_RunningPythonProcess] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        try:
+            pid = int(row.get("ProcessId"))
+        except (TypeError, ValueError):
+            continue
+        try:
+            parent_pid = int(row.get("ParentProcessId")) if row.get("ParentProcessId") is not None else None
+        except (TypeError, ValueError):
+            parent_pid = None
+        command_line = str(row.get("CommandLine") or "").strip()
+        if not command_line:
+            continue
+        processes.append(
+            _RunningPythonProcess(
+                pid=pid,
+                parent_pid=parent_pid,
+                executable_name=str(row.get("Name") or ""),
+                command_line=command_line,
+            )
+        )
+    return tuple(processes)
 
 
 @dataclass
@@ -1232,6 +1582,10 @@ class DqnRunnerGui(tk.Tk):
         self._last_form: _ArgForm | None = None
         self._external_status_file: Path | None = None
         self._external_control_file: Path | None = None
+        self._owns_external_status_file = False
+        self._owns_external_control_file = False
+        self._runner_monitor_pid: int | None = None
+        self._runner_monitor_status = tk.StringVar(value="runner_session=idle")
         self._status_snapshot: tuple[str, str, str, str] = ("", "", "", "")
         self._monitor_training_line = tk.StringVar(value="training=idle")
         self._monitor_action_line = tk.StringVar(value="action=idle")
@@ -1755,6 +2109,13 @@ class DqnRunnerGui(tk.Tk):
             column=4,
             sticky="e",
         )
+        ttk.Label(monitor_meta, textvariable=self._runner_monitor_status, style="FormHelp.TLabel").grid(
+            row=1,
+            column=2,
+            columnspan=3,
+            sticky="w",
+            pady=(4, 0),
+        )
 
         graph_shell = ttk.Frame(monitor, style="Surface.TFrame")
         graph_shell.grid(row=3, column=0, sticky="nsew", pady=(14, 0))
@@ -2011,32 +2372,16 @@ class DqnRunnerGui(tk.Tk):
 
         self._clear_monitor_files()
         status_file = self._create_status_file()
-        self._external_status_file = status_file
         control_file = self._create_control_file() if (is_dqn_runner or is_hybrid_runner) else None
-        self._external_control_file = control_file
-        self._status_snapshot = ("", "", "", "")
-        self._monitor_training_line.set("training=starting")
-        self._monitor_action_line.set("action=idle")
-        self._monitor_reward_line.set("reward=idle")
-        self._monitor_next_available_actions_line.set("next_available_actions=unavailable")
-        self._update_monitor_keycaps(action_line="", next_available_actions_line="")
-        self._hide_reward_tooltip(force=True)
-        self._hide_phase_tooltip(force=True)
-        if control_file is not None:
-            snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_AUTO)
-            self._monitor_control_state.set(
-                f"session={snapshot.mode} advance={snapshot.advance_counter}"
-            )
-            self._set_monitor_controls_enabled(True)
-        else:
-            self._monitor_control_state.set("session=unavailable")
-            self._set_monitor_controls_enabled(False)
-        self._reward_history.clear()
-        self._epsilon_progress_value.set(0.0)
-        self._epsilon_progress_text.set("0.0%")
-        self._draw_reward_graph()
-        for variable in self._monitor_metric_vars.values():
-            variable.set("-")
+        self._set_monitor_files(
+            status_file=status_file,
+            control_file=control_file,
+            owns_status_file=True,
+            owns_control_file=control_file is not None,
+        )
+        self._reset_live_monitor_display(training_line="training=starting")
+        self._runner_monitor_pid = None
+        self._runner_monitor_status.set("runner_session=prepared")
 
         filtered: list[str] = []
         skip_next = False
@@ -2071,17 +2416,114 @@ class DqnRunnerGui(tk.Tk):
         os.close(handle)
         return Path(file_path)
 
+    def _set_monitor_files(
+        self,
+        *,
+        status_file: Path | None,
+        control_file: Path | None,
+        owns_status_file: bool,
+        owns_control_file: bool,
+    ) -> None:
+        self._external_status_file = status_file
+        self._external_control_file = control_file
+        self._owns_external_status_file = status_file is not None and owns_status_file
+        self._owns_external_control_file = control_file is not None and owns_control_file
+
+        if control_file is not None:
+            self._monitor_control_state.set("session=connecting")
+            self._set_monitor_controls_enabled(True)
+            if owns_control_file:
+                try:
+                    snapshot = set_external_control_mode(control_file, mode=CONTROL_MODE_AUTO)
+                except Exception:
+                    pass
+                else:
+                    self._monitor_control_state.set(
+                        f"session={snapshot.mode} advance={snapshot.advance_counter}"
+                    )
+            else:
+                self._refresh_monitor_control_state()
+        else:
+            self._monitor_control_state.set("session=unavailable")
+            self._set_monitor_controls_enabled(False)
+
+    def _reset_live_monitor_display(self, *, training_line: str) -> None:
+        self._status_snapshot = ("", "", "", "")
+        self._monitor_training_line.set(training_line)
+        self._monitor_action_line.set("action=idle")
+        self._monitor_reward_line.set("reward=idle")
+        self._monitor_next_available_actions_line.set("next_available_actions=unavailable")
+        self._update_monitor_keycaps(action_line="", next_available_actions_line="")
+        self._hide_reward_tooltip(force=True)
+        self._hide_phase_tooltip(force=True)
+        self._reward_history.clear()
+        self._epsilon_progress_value.set(0.0)
+        self._epsilon_progress_text.set("0.0%")
+        self._draw_reward_graph()
+        for variable in self._monitor_metric_vars.values():
+            variable.set("-")
+
     def _clear_monitor_files(self) -> None:
-        if self._external_status_file is not None:
+        if self._external_status_file is not None and self._owns_external_status_file:
             self._external_status_file.unlink(missing_ok=True)
-            self._external_status_file = None
-        if self._external_control_file is not None:
+        if self._external_control_file is not None and self._owns_external_control_file:
             self._external_control_file.unlink(missing_ok=True)
-            self._external_control_file = None
+        self._external_status_file = None
+        self._external_control_file = None
+        self._owns_external_status_file = False
+        self._owns_external_control_file = False
+        self._runner_monitor_pid = None
+        self._runner_monitor_status.set("runner_session=idle")
         self._monitor_control_state.set("session=idle")
         self._set_monitor_controls_enabled(False)
         self._hide_reward_tooltip(force=True)
         self._hide_phase_tooltip(force=True)
+
+    def _ensure_runner_monitor_session_bound(self, *, executable_name: str) -> None:
+        current_process = self._process
+        if (
+            current_process is not None
+            and current_process.poll() is None
+            and self._external_status_file is not None
+            and self._owns_external_status_file
+        ):
+            self._runner_monitor_pid = int(current_process.pid)
+            self._runner_monitor_status.set(f"runner_session=attached pid={current_process.pid} via=gui")
+            return
+
+        binding = _discover_live_monitor_session_binding(
+            _list_running_python_processes(),
+            preferred_executable_name=executable_name,
+        )
+        if binding is None:
+            if self._external_status_file is None or not self._owns_external_status_file:
+                self._runner_monitor_pid = None
+                self._runner_monitor_status.set("runner_session=not_found")
+            return
+
+        self._runner_monitor_pid = binding.runner_pid
+        self._runner_monitor_status.set(
+            "runner_session=attached pid={pid} module={module} via={via}".format(
+                pid=binding.runner_pid,
+                module=binding.runner_module.removeprefix("src."),
+                via=("runner" if binding.source_module == binding.runner_module else "tui"),
+            )
+        )
+        if (
+            self._external_status_file == binding.status_file
+            and self._external_control_file == binding.control_file
+            and not self._owns_external_status_file
+            and not self._owns_external_control_file
+        ):
+            return
+
+        self._set_monitor_files(
+            status_file=binding.status_file,
+            control_file=binding.control_file,
+            owns_status_file=False,
+            owns_control_file=False,
+        )
+        self._reset_live_monitor_display(training_line="training=attaching")
 
     def _poll_external_status(self) -> None:
         status_file = self._external_status_file
@@ -2154,9 +2596,10 @@ class DqnRunnerGui(tk.Tk):
         return "868-HACK.exe"
 
     def _ensure_state_monitor_started(self) -> None:
+        executable_name = self._resolve_monitor_executable_name()
+        self._ensure_runner_monitor_session_bound(executable_name=executable_name)
         if self._state_monitor is not None:
             return
-        executable_name = self._resolve_monitor_executable_name()
         try:
             monitor = MemoryStateMonitor(
                 executable_name=executable_name,

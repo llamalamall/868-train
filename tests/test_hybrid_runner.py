@@ -267,6 +267,8 @@ def test_hybrid_parser_movement_defaults() -> None:
     assert args.max_steps == 250
     assert args.no_enemies is True
     assert args.tui is True
+    assert args.window_input is False
+    assert args.focus_window is True
     assert args.step_through is False
     assert args.game_tick_ms == 1
     assert args.post_action_delay == pytest.approx(0.01)
@@ -298,6 +300,8 @@ def test_hybrid_parser_train_meta_defaults() -> None:
     assert args.episodes == 120
     assert args.max_steps == 350
     assert args.no_enemies is True
+    assert args.window_input is False
+    assert args.focus_window is True
     assert args.meta_epsilon_start == pytest.approx(0.60)
     assert args.game_tick_ms == 1
     assert args.post_action_delay == pytest.approx(0.01)
@@ -334,6 +338,8 @@ def test_hybrid_parser_train_full_meta_reward_defaults() -> None:
     parser = _build_parser()
     args = parser.parse_args(["train-full-hierarchical"])
 
+    assert args.window_input is False
+    assert args.focus_window is True
     assert args.meta_reward_objective_complete == pytest.approx(1.50)
     assert args.meta_reward_phase_progress == pytest.approx(0.25)
     assert args.meta_reward_step_cost == pytest.approx(0.01)
@@ -357,6 +363,8 @@ def test_hybrid_parser_eval_meta_reward_defaults() -> None:
     parser = _build_parser()
     args = parser.parse_args(["eval-hybrid", "--checkpoint", "artifacts/hybrid/20260311-01-test"])
 
+    assert args.window_input is False
+    assert args.focus_window is True
     assert args.meta_reward_objective_complete == pytest.approx(1.50)
     assert args.meta_reward_phase_progress == pytest.approx(0.25)
     assert args.meta_reward_step_cost == pytest.approx(0.01)
@@ -632,6 +640,8 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
             meta_override_updates_skipped=1,
             invalid_action_reason_counts={"action_not_acknowledged": 2},
             action_ack_reason_counts={"no_observed_effect": 2, "state_changed": 3},
+            invalid_action_action_counts={"move_right": 2},
+            action_ack_timeout_action_counts={"move_right": 2},
             start_screen_detected=False,
             victory_detected=False,
             victory_inferred_from_start_screen=False,
@@ -668,6 +678,8 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
             meta_override_updates_skipped=0,
             invalid_action_reason_counts={"prog_no_effect": 1},
             action_ack_reason_counts={"state_changed": 2},
+            invalid_action_action_counts={"prog_slot_1": 1},
+            action_ack_timeout_action_counts={},
             start_screen_detected=True,
             victory_detected=False,
             victory_inferred_from_start_screen=False,
@@ -733,6 +745,13 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
         "no_observed_effect": 2,
         "state_changed": 5,
     }
+    assert payload["summary"]["invalid_action_action_counts"] == {
+        "move_right": 2,
+        "prog_slot_1": 1,
+    }
+    assert payload["summary"]["action_ack_timeout_action_counts"] == {
+        "move_right": 2,
+    }
     assert payload["results"][0]["hit_step_limit"] is True
     assert payload["results"][0]["terminal_classification"] == "step_limit"
     assert payload["results"][0]["phase_switches"] == 4
@@ -747,6 +766,12 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
     assert payload["results"][0]["invalid_action_reason_counts"] == {
         "action_not_acknowledged": 2,
     }
+    assert payload["results"][0]["invalid_action_action_counts"] == {
+        "move_right": 2,
+    }
+    assert payload["results"][0]["action_ack_timeout_action_counts"] == {
+        "move_right": 2,
+    }
     assert payload["results"][1]["terminal_classification"] == "unexpected_start_screen"
     assert payload["results"][1]["start_screen_unknown_detected"] is True
     assert payload["results"][1]["final_action"] == "move_right"
@@ -755,6 +780,7 @@ def test_build_training_state_payload_includes_summary_and_extended_episode_fiel
     assert payload["results"][1]["requested_phase_counts"] == {"exit_sector": 2}
     assert payload["results"][1]["meta_override_updates_skipped"] == 0
     assert payload["results"][1]["action_ack_reason_counts"] == {"state_changed": 2}
+    assert payload["results"][1]["invalid_action_action_counts"] == {"prog_slot_1": 1}
 
 
 def test_hook_event_is_victory_signal_matches_victory_flag_targets() -> None:

@@ -213,6 +213,8 @@ class HybridEpisodeSummary:
     meta_override_updates_skipped: int
     invalid_action_reason_counts: dict[str, int]
     action_ack_reason_counts: dict[str, int]
+    invalid_action_action_counts: dict[str, int]
+    action_ack_timeout_action_counts: dict[str, int]
     start_screen_detected: bool
     victory_detected: bool
     victory_inferred_from_start_screen: bool
@@ -438,7 +440,7 @@ def _add_common_runner_args(
     parser.add_argument(
         "--window-input",
         action=argparse.BooleanOptionalAction,
-        default=True,
+        default=False,
         help="Use window-targeted input instead of global SendInput.",
     )
     parser.add_argument(
@@ -1064,6 +1066,8 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
             "requested_executed_phase_pair_counts": {},
             "invalid_action_reason_counts": {},
             "action_ack_reason_counts": {},
+            "invalid_action_action_counts": {},
+            "action_ack_timeout_action_counts": {},
         }
 
     episode_count = len(results)
@@ -1074,12 +1078,16 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
     requested_executed_phase_pair_counts: Counter[str] = Counter()
     invalid_action_reason_counts: Counter[str] = Counter()
     action_ack_reason_counts: Counter[str] = Counter()
+    invalid_action_action_counts: Counter[str] = Counter()
+    action_ack_timeout_action_counts: Counter[str] = Counter()
     for item in results:
         requested_phase_counts.update(item.requested_phase_counts)
         executed_phase_counts.update(item.executed_phase_counts)
         requested_executed_phase_pair_counts.update(item.requested_executed_phase_pair_counts)
         invalid_action_reason_counts.update(item.invalid_action_reason_counts)
         action_ack_reason_counts.update(item.action_ack_reason_counts)
+        invalid_action_action_counts.update(item.invalid_action_action_counts)
+        action_ack_timeout_action_counts.update(item.action_ack_timeout_action_counts)
     done_count = sum(1 for item in results if item.done)
     non_death_terminal_count = terminal_classification_counts.get("non_death_terminal", 0)
     unexpected_start_screen_count = terminal_classification_counts.get("unexpected_start_screen", 0)
@@ -1118,6 +1126,8 @@ def _build_training_summary(results: tuple[HybridEpisodeSummary, ...]) -> dict[s
         "requested_executed_phase_pair_counts": _sorted_counter_dict(requested_executed_phase_pair_counts),
         "invalid_action_reason_counts": _sorted_counter_dict(invalid_action_reason_counts),
         "action_ack_reason_counts": _sorted_counter_dict(action_ack_reason_counts),
+        "invalid_action_action_counts": _sorted_counter_dict(invalid_action_action_counts),
+        "action_ack_timeout_action_counts": _sorted_counter_dict(action_ack_timeout_action_counts),
     }
 
 
@@ -1212,6 +1222,8 @@ def _serialize_results(results: tuple[HybridEpisodeSummary, ...]) -> list[dict[s
             "meta_override_updates_skipped": item.meta_override_updates_skipped,
             "invalid_action_reason_counts": item.invalid_action_reason_counts,
             "action_ack_reason_counts": item.action_ack_reason_counts,
+            "invalid_action_action_counts": item.invalid_action_action_counts,
+            "action_ack_timeout_action_counts": item.action_ack_timeout_action_counts,
             "start_screen_detected": item.start_screen_detected,
             "victory_detected": item.victory_detected,
             "victory_inferred_from_start_screen": item.victory_inferred_from_start_screen,
@@ -1355,6 +1367,8 @@ def _run_rollouts(
         requested_executed_phase_pair_counts: Counter[str] = Counter()
         invalid_action_reason_counts: Counter[str] = Counter()
         action_ack_reason_counts: Counter[str] = Counter()
+        invalid_action_action_counts: Counter[str] = Counter()
+        action_ack_timeout_action_counts: Counter[str] = Counter()
         last_threat_active = False
         last_threat_override = ThreatOverride.ROUTE_DEFAULT
         start_screen_detected = False
@@ -1480,9 +1494,12 @@ def _run_rollouts(
             invalid_action_reason = str(info.get("invalid_action_reason") or "").strip()
             if invalid_action_reason:
                 invalid_action_reason_counts[invalid_action_reason] += 1
+                invalid_action_action_counts[trace.decision.action] += 1
             action_ack_reason = str(info.get("action_ack_reason") or "").strip()
             if action_ack_reason:
                 action_ack_reason_counts[action_ack_reason] += 1
+                if action_ack_reason == "action_ack_timeout":
+                    action_ack_timeout_action_counts[trace.decision.action] += 1
             if bool(info.get("premature_exit_attempt", False)):
                 premature_exit_attempts += 1
             start_screen_detected = start_screen_detected or bool(info.get("start_screen_detected", False))
@@ -1701,6 +1718,8 @@ def _run_rollouts(
                 meta_override_updates_skipped=meta_override_updates_skipped,
                 invalid_action_reason_counts=dict(sorted(invalid_action_reason_counts.items())),
                 action_ack_reason_counts=dict(sorted(action_ack_reason_counts.items())),
+                invalid_action_action_counts=dict(sorted(invalid_action_action_counts.items())),
+                action_ack_timeout_action_counts=dict(sorted(action_ack_timeout_action_counts.items())),
                 start_screen_detected=start_screen_detected,
                 victory_detected=victory_detected,
                 victory_inferred_from_start_screen=victory_inferred_from_start_screen,
