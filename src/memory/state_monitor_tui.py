@@ -1111,6 +1111,12 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Re-resolve pointer chains every poll.",
     )
     parser.add_argument(
+        "--runner-pid",
+        type=int,
+        default=None,
+        help="Optional runner PID that owns this monitor session.",
+    )
+    parser.add_argument(
         "--external-status-file",
         type=Path,
         default=None,

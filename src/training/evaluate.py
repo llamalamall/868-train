@@ -1237,6 +1237,7 @@ def main() -> None:
         monitor_enabled = bool(args.tui) or bool(args.external_status_file)
         tui = RunnerTuiSession(
             executable_name=str(args.exe),
+            runner_module="src.training.evaluate",
             enabled=monitor_enabled,
             interval_seconds=float(args.tui_interval),
             launch_monitor=bool(args.tui),

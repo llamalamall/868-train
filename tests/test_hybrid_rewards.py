@@ -4,9 +4,17 @@ from __future__ import annotations
 
 import pytest
 
-from src.hybrid.rewards import HybridMetaRewardWeights, HybridRewardSuite
-from src.hybrid.types import ObjectivePhase
-from src.state.schema import FieldState, GameStateSnapshot, GridPosition, InventoryState, MapState
+from src.hybrid.rewards import HybridMetaRewardWeights, HybridRewardSuite, HybridThreatRewardWeights
+from src.hybrid.types import ObjectivePhase, ThreatOverride
+from src.state.schema import (
+    EnemyState,
+    FieldState,
+    GameStateSnapshot,
+    GridPosition,
+    InventoryState,
+    MapLayersState,
+    MapState,
+)
 
 
 def _field(value: object, *, status: str = "ok") -> FieldState:
@@ -38,6 +46,22 @@ def _exit_map() -> MapState:
         status="ok",
         player_position=GridPosition(5, 5),
         exit_position=GridPosition(5, 5),
+    )
+
+
+def _combat_map(
+    *,
+    player: GridPosition = GridPosition(1, 1),
+    enemies: tuple[EnemyState, ...],
+    layers: MapLayersState | None = None,
+) -> MapState:
+    return MapState(
+        status="ok",
+        width=6,
+        height=6,
+        player_position=player,
+        enemies=enemies,
+        layers=layers or MapLayersState(),
     )
 
 
@@ -344,3 +368,132 @@ def test_compute_meta_reward_does_not_apply_stagnation_penalty_before_grace_wind
 
     assert result.stagnation_penalty == 0.0
     assert result.total == 0.0
+
+
+def test_compute_threat_reward_adds_enemy_damage_and_clear_rewards() -> None:
+    reward_suite = HybridRewardSuite(
+        threat_weights=HybridThreatRewardWeights(
+            survival=0.0,
+            damage_taken_penalty=0.0,
+            fail_penalty=0.0,
+            route_rejoin_bonus=0.0,
+            invalid_override_penalty=0.0,
+            enemy_damaged=0.5,
+            enemy_cleared=2.0,
+            spawn_debt_penalty=0.0,
+        )
+    )
+    previous = _snapshot(
+        map_state=_combat_map(
+            enemies=(
+                EnemyState(slot=1, type_id=3, position=GridPosition(2, 1), hp=4, state=1, in_bounds=True),
+                EnemyState(slot=2, type_id=2, position=GridPosition(4, 1), hp=2, state=1, in_bounds=True),
+            )
+        )
+    )
+    current = _snapshot(
+        map_state=_combat_map(
+            enemies=(EnemyState(slot=1, type_id=3, position=GridPosition(2, 1), hp=1, state=1, in_bounds=True),)
+        )
+    )
+
+    result = reward_suite.compute_threat_reward(
+        previous_state=previous,
+        current_state=current,
+        done=False,
+        threat_override=ThreatOverride.ENGAGE,
+        info={},
+    )
+
+    assert result.enemy_damaged == pytest.approx(1.5)
+    assert result.enemy_cleared == pytest.approx(2.0)
+    assert result.total == pytest.approx(3.5)
+
+
+def test_compute_threat_reward_applies_spawn_debt_penalty_from_siphon_cost() -> None:
+    reward_suite = HybridRewardSuite(
+        threat_weights=HybridThreatRewardWeights(
+            survival=0.0,
+            damage_taken_penalty=0.0,
+            fail_penalty=0.0,
+            route_rejoin_bonus=0.0,
+            invalid_override_penalty=0.0,
+            enemy_damaged=0.0,
+            enemy_cleared=0.0,
+            spawn_debt_penalty=0.25,
+        )
+    )
+    layers = MapLayersState(
+        siphon_penalty_map=(
+            (0, 1, 0, 0, 0, 0),
+            (1, 2, 1, 0, 0, 0),
+            (0, 1, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0),
+            (0, 0, 0, 0, 0, 0),
+        )
+    )
+    previous = _snapshot(
+        map_state=_combat_map(
+            player=GridPosition(1, 1),
+            enemies=(),
+            layers=layers,
+        )
+    )
+    current = _snapshot(
+        map_state=_combat_map(
+            player=GridPosition(1, 1),
+            enemies=(),
+            layers=layers,
+        )
+    )
+
+    result = reward_suite.compute_threat_reward(
+        previous_state=previous,
+        current_state=current,
+        done=False,
+        threat_override=ThreatOverride.ROUTE_DEFAULT,
+        info={"action": "space", "action_effective": True},
+    )
+
+    assert result.spawn_debt_penalty == pytest.approx(-1.5)
+    assert result.total == pytest.approx(-1.5)
+
+
+def test_compute_threat_reward_applies_spawn_debt_penalty_from_enemy_growth() -> None:
+    reward_suite = HybridRewardSuite(
+        threat_weights=HybridThreatRewardWeights(
+            survival=0.0,
+            damage_taken_penalty=0.0,
+            fail_penalty=0.0,
+            route_rejoin_bonus=0.0,
+            invalid_override_penalty=0.0,
+            enemy_damaged=0.0,
+            enemy_cleared=0.0,
+            spawn_debt_penalty=0.5,
+        )
+    )
+    previous = _snapshot(
+        map_state=_combat_map(
+            enemies=(EnemyState(slot=1, type_id=3, position=GridPosition(2, 1), hp=2, state=1, in_bounds=True),)
+        )
+    )
+    current = _snapshot(
+        map_state=_combat_map(
+            enemies=(
+                EnemyState(slot=1, type_id=3, position=GridPosition(2, 1), hp=2, state=1, in_bounds=True),
+                EnemyState(slot=2, type_id=2, position=GridPosition(3, 1), hp=2, state=1, in_bounds=True),
+            )
+        )
+    )
+
+    result = reward_suite.compute_threat_reward(
+        previous_state=previous,
+        current_state=current,
+        done=False,
+        threat_override=ThreatOverride.ROUTE_DEFAULT,
+        info={},
+    )
+
+    assert result.spawn_debt_penalty == pytest.approx(-0.5)
+    assert result.total == pytest.approx(-0.5)

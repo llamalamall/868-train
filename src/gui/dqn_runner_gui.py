@@ -23,6 +23,7 @@ from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
 from src.env import dqn_policy_runner
+from src.env.runner_tui import ACTIVE_RUNNER_SESSION_FILE
 from src.hybrid import runner as hybrid_runner
 from src.memory.state_monitor_tui import (
     CONTROL_MODE_AUTO,
@@ -993,6 +994,7 @@ def _build_live_monitor_binding_for_runner(
     runner_args: tuple[str, ...],
     children: tuple[_RunningPythonProcess, ...],
     parsed_arguments_by_pid: dict[int, tuple[str | None, tuple[str, ...]]],
+    monitor_bindings_by_runner_pid: dict[int, tuple[_LiveMonitorSessionBinding, ...]],
 ) -> _LiveMonitorSessionBinding | None:
     executable_name = _extract_cli_option_value(runner_args, "--exe")
     status_file_text = _extract_cli_option_value(runner_args, "--external-status-file")
@@ -1001,6 +1003,24 @@ def _build_live_monitor_binding_for_runner(
     source_module = runner_module
 
     if status_file_text is None:
+        declared_monitor_bindings = monitor_bindings_by_runner_pid.get(process.pid, ())
+        if declared_monitor_bindings:
+            selected_binding = _select_live_monitor_binding(
+                declared_monitor_bindings,
+                preferred_runner_pid=process.pid,
+                preferred_executable_name=executable_name,
+            )
+            if selected_binding is not None:
+                return _LiveMonitorSessionBinding(
+                    runner_pid=process.pid,
+                    runner_module=runner_module,
+                    status_file=selected_binding.status_file,
+                    control_file=selected_binding.control_file,
+                    executable_name=(executable_name or selected_binding.executable_name),
+                    source_pid=selected_binding.source_pid,
+                    source_module=selected_binding.source_module,
+                )
+
         child_candidates: list[tuple[int, str, str | None, str | None]] = []
         for child in children:
             child_module, child_args = parsed_arguments_by_pid.get(child.pid, (None, ()))
@@ -1037,6 +1057,86 @@ def _build_live_monitor_binding_for_runner(
         executable_name=executable_name,
         source_pid=source_pid,
         source_module=source_module,
+    )
+
+
+def _load_live_monitor_binding_from_status_file(
+    *,
+    status_file: Path | None,
+    fallback_control_file: Path | None = None,
+) -> _LiveMonitorSessionBinding | None:
+    if status_file is None or not status_file.exists():
+        return None
+    try:
+        payload = json.loads(status_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+
+    try:
+        runner_pid = int(payload.get("runner_pid", 0))
+    except (TypeError, ValueError):
+        runner_pid = 0
+    if runner_pid <= 0:
+        return None
+
+    runner_module = str(payload.get("runner_module", "") or "").strip() or "unknown"
+    executable_name = _normalize_cli_option_value(
+        str(payload.get("runner_executable_name", "") or "")
+    )
+    control_file_text = _normalize_cli_option_value(
+        str(payload.get("runner_control_file", "") or "")
+    )
+    control_file = Path(control_file_text) if control_file_text else fallback_control_file
+    return _LiveMonitorSessionBinding(
+        runner_pid=runner_pid,
+        runner_module=runner_module,
+        status_file=status_file,
+        control_file=control_file,
+        executable_name=executable_name,
+        source_pid=runner_pid,
+        source_module=runner_module,
+    )
+
+
+def _load_active_runner_session_binding(
+    *,
+    registry_file: Path = ACTIVE_RUNNER_SESSION_FILE,
+) -> _LiveMonitorSessionBinding | None:
+    if not registry_file.exists():
+        return None
+    try:
+        payload = json.loads(registry_file.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    status_file_text = _normalize_cli_option_value(str(payload.get("status_file", "") or ""))
+    if status_file_text is None:
+        return None
+    status_file = Path(status_file_text)
+    if not status_file.exists():
+        return None
+    try:
+        runner_pid = int(payload.get("runner_pid", 0))
+    except (TypeError, ValueError):
+        runner_pid = 0
+    if runner_pid <= 0:
+        return None
+    control_file_text = _normalize_cli_option_value(str(payload.get("control_file", "") or ""))
+    runner_module = str(payload.get("runner_module", "") or "").strip() or "unknown"
+    executable_name = _normalize_cli_option_value(
+        str(payload.get("runner_executable_name", "") or "")
+    )
+    return _LiveMonitorSessionBinding(
+        runner_pid=runner_pid,
+        runner_module=runner_module,
+        status_file=status_file,
+        control_file=(Path(control_file_text) if control_file_text else None),
+        executable_name=executable_name,
+        source_pid=runner_pid,
+        source_module="active_registry",
     )
 
 
@@ -1084,10 +1184,37 @@ def _discover_live_monitor_session_binding(
 
     children_by_parent_pid: dict[int, list[_RunningPythonProcess]] = {}
     parsed_arguments_by_pid: dict[int, tuple[str | None, tuple[str, ...]]] = {}
+    monitor_bindings_by_runner_pid: dict[int, list[_LiveMonitorSessionBinding]] = {}
     for process in processes:
-        parsed_arguments_by_pid[process.pid] = _parse_module_invocation(
-            _split_windows_command_line(process.command_line)
-        )
+        parsed_arguments = _parse_module_invocation(_split_windows_command_line(process.command_line))
+        parsed_arguments_by_pid[process.pid] = parsed_arguments
+        module_name, module_args = parsed_arguments
+        if module_name == _LIVE_MONITOR_TUI_MODULE:
+            runner_pid_text = _extract_cli_option_value(module_args, "--runner-pid")
+            status_file_text = _extract_cli_option_value(module_args, "--external-status-file")
+            if runner_pid_text is not None and status_file_text is not None:
+                try:
+                    declared_runner_pid = int(runner_pid_text)
+                except (TypeError, ValueError):
+                    declared_runner_pid = 0
+                if declared_runner_pid > 0:
+                    monitor_bindings_by_runner_pid.setdefault(declared_runner_pid, []).append(
+                        _LiveMonitorSessionBinding(
+                            runner_pid=declared_runner_pid,
+                            runner_module="unknown",
+                            status_file=Path(status_file_text),
+                            control_file=(
+                                Path(control_file_text)
+                                if (control_file_text := _extract_cli_option_value(
+                                    module_args, "--external-control-file"
+                                ))
+                                else None
+                            ),
+                            executable_name=_extract_cli_option_value(module_args, "--exe"),
+                            source_pid=process.pid,
+                            source_module=_LIVE_MONITOR_TUI_MODULE,
+                        )
+                    )
         if process.parent_pid is not None:
             children_by_parent_pid.setdefault(process.parent_pid, []).append(process)
 
@@ -1104,6 +1231,10 @@ def _discover_live_monitor_session_binding(
             runner_args=runner_args,
             children=tuple(children_by_parent_pid.get(process.pid, ())),
             parsed_arguments_by_pid=parsed_arguments_by_pid,
+            monitor_bindings_by_runner_pid={
+                pid: tuple(candidate_bindings)
+                for pid, candidate_bindings in monitor_bindings_by_runner_pid.items()
+            },
         )
         if binding is not None:
             bindings.append(binding)
@@ -1585,6 +1716,7 @@ class DqnRunnerGui(tk.Tk):
         self._owns_external_status_file = False
         self._owns_external_control_file = False
         self._runner_monitor_pid: int | None = None
+        self._last_runner_monitor_bind_attempt_monotonic = 0.0
         self._runner_monitor_status = tk.StringVar(value="runner_session=idle")
         self._status_snapshot: tuple[str, str, str, str] = ("", "", "", "")
         self._monitor_training_line = tk.StringVar(value="training=idle")
@@ -2428,6 +2560,7 @@ class DqnRunnerGui(tk.Tk):
         self._external_control_file = control_file
         self._owns_external_status_file = status_file is not None and owns_status_file
         self._owns_external_control_file = control_file is not None and owns_control_file
+        self._last_runner_monitor_bind_attempt_monotonic = 0.0
 
         if control_file is not None:
             self._monitor_control_state.set("session=connecting")
@@ -2473,6 +2606,7 @@ class DqnRunnerGui(tk.Tk):
         self._owns_external_status_file = False
         self._owns_external_control_file = False
         self._runner_monitor_pid = None
+        self._last_runner_monitor_bind_attempt_monotonic = 0.0
         self._runner_monitor_status.set("runner_session=idle")
         self._monitor_control_state.set("session=idle")
         self._set_monitor_controls_enabled(False)
@@ -2480,6 +2614,56 @@ class DqnRunnerGui(tk.Tk):
         self._hide_phase_tooltip(force=True)
 
     def _ensure_runner_monitor_session_bound(self, *, executable_name: str) -> None:
+        if not self._owns_external_status_file:
+            active_registry_binding = _load_active_runner_session_binding()
+            if active_registry_binding is not None:
+                self._runner_monitor_pid = active_registry_binding.runner_pid
+                self._runner_monitor_status.set(
+                    "runner_session=attached pid={pid} module={module} via=registry".format(
+                        pid=active_registry_binding.runner_pid,
+                        module=active_registry_binding.runner_module.removeprefix("src."),
+                    )
+                )
+                if (
+                    self._external_status_file == active_registry_binding.status_file
+                    and self._external_control_file == active_registry_binding.control_file
+                ):
+                    return
+                self._set_monitor_files(
+                    status_file=active_registry_binding.status_file,
+                    control_file=active_registry_binding.control_file,
+                    owns_status_file=False,
+                    owns_control_file=False,
+                )
+                self._reset_live_monitor_display(training_line="training=attaching")
+                return
+
+        status_file_binding = _load_live_monitor_binding_from_status_file(
+            status_file=self._external_status_file,
+            fallback_control_file=self._external_control_file,
+        )
+        if status_file_binding is not None:
+            self._runner_monitor_pid = status_file_binding.runner_pid
+            self._runner_monitor_status.set(
+                "runner_session=attached pid={pid} module={module} via=status".format(
+                    pid=status_file_binding.runner_pid,
+                    module=status_file_binding.runner_module.removeprefix("src."),
+                )
+            )
+            if (
+                self._external_status_file == status_file_binding.status_file
+                and self._external_control_file == status_file_binding.control_file
+            ):
+                return
+            self._set_monitor_files(
+                status_file=status_file_binding.status_file,
+                control_file=status_file_binding.control_file,
+                owns_status_file=False,
+                owns_control_file=False,
+            )
+            self._reset_live_monitor_display(training_line="training=attaching")
+            return
+
         current_process = self._process
         if (
             current_process is not None
@@ -2526,6 +2710,16 @@ class DqnRunnerGui(tk.Tk):
         self._reset_live_monitor_display(training_line="training=attaching")
 
     def _poll_external_status(self) -> None:
+        now = time.monotonic()
+        if (
+            self._runner_monitor_pid is None
+            and now - self._last_runner_monitor_bind_attempt_monotonic >= 1.0
+        ):
+            self._last_runner_monitor_bind_attempt_monotonic = now
+            self._ensure_runner_monitor_session_bound(
+                executable_name=self._resolve_monitor_executable_name()
+            )
+
         status_file = self._external_status_file
         if status_file is not None and status_file.exists():
             try:
@@ -2533,6 +2727,28 @@ class DqnRunnerGui(tk.Tk):
             except (OSError, ValueError, json.JSONDecodeError):
                 payload = None
             if isinstance(payload, dict):
+                if not self._owns_external_status_file:
+                    active_registry_binding = _load_active_runner_session_binding()
+                    if active_registry_binding is not None:
+                        self._runner_monitor_pid = active_registry_binding.runner_pid
+                        self._runner_monitor_status.set(
+                            "runner_session=attached pid={pid} module={module} via=registry".format(
+                                pid=active_registry_binding.runner_pid,
+                                module=active_registry_binding.runner_module.removeprefix("src."),
+                            )
+                        )
+                binding = _load_live_monitor_binding_from_status_file(
+                    status_file=status_file,
+                    fallback_control_file=self._external_control_file,
+                )
+                if binding is not None:
+                    self._runner_monitor_pid = binding.runner_pid
+                    self._runner_monitor_status.set(
+                        "runner_session=attached pid={pid} module={module} via=status".format(
+                            pid=binding.runner_pid,
+                            module=binding.runner_module.removeprefix("src."),
+                        )
+                    )
                 training_line = str(payload.get("training_line", ""))
                 action_line = str(payload.get("action_line", ""))
                 reward_line = str(payload.get("reward_line", ""))
@@ -3289,6 +3505,7 @@ class DqnRunnerGui(tk.Tk):
                 stderr=subprocess.STDOUT,
                 text=True,
             )
+            self._event_queue.put(("process_started", int(self._process.pid)))
             assert self._process.stdout is not None
             for line in self._process.stdout:
                 self._event_queue.put(("line", line.rstrip("\n")))
@@ -3336,6 +3553,10 @@ class DqnRunnerGui(tk.Tk):
                 line = str(payload)
                 tag = "error" if "error" in line.lower() or "failed" in line.lower() else None
                 self._append_output(line, tag=tag)
+            elif kind == "process_started":
+                pid = int(payload)
+                self._runner_monitor_pid = pid
+                self._runner_monitor_status.set(f"runner_session=attached pid={pid} via=gui")
             elif kind == "done":
                 code = int(payload)
                 self._append_output(f"[process exited with code {code}]", tag="system")

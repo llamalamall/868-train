@@ -4,9 +4,16 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Sequence
+ 
 
 from src.hybrid.astar_controller import AStarMovementController
 from src.hybrid.meta_controller import MetaControllerDQN
+from src.hybrid.tactical_model import (
+    TacticalRiskSnapshot,
+    estimate_position_risk,
+    move_target_position,
+    siphon_spawn_cost_at_position,
+)
 from src.hybrid.threat_controller import ThreatControllerDRQN
 from src.hybrid.types import (
     HybridDecision,
@@ -29,6 +36,7 @@ _CARDINAL_DELTAS: tuple[tuple[int, int], ...] = ((0, 1), (1, 0), (0, -1), (-1, 0
 
 @dataclass(frozen=True)
 class HybridCoordinatorConfig:
+
     """Behavior knobs for the hybrid coordinator."""
 
     threat_trigger_distance: int = 2
@@ -36,6 +44,10 @@ class HybridCoordinatorConfig:
     exit_after_siphons_when_scripted: bool = False
     phase_lock_min_steps: int = 6
     target_stall_release_steps: int = 4
+    enemy_prediction_horizon_turns: int = 1
+    avoid_guaranteed_damage: bool = True
+    dangerous_siphon_spawn_threshold: int = 2
+    siphon_penalty_weight: float = 8.0
 
 
 def _manhattan(a: GridPosition, b: GridPosition) -> int:
@@ -379,7 +391,7 @@ class HybridCoordinator:
             candidates = self._available_resource_targets(state=state)
             return (
                 resolved_phase,
-                self._nearest_target(
+                self._best_resource_target(
                     state=state,
                     candidates=candidates,
                 ),
@@ -467,6 +479,17 @@ class HybridCoordinator:
         nearest_enemy = self.nearest_enemy_distance(state)
         threatened = self.is_threat_active(state)
         action_one_hot = tuple(1.0 if route_action == action else 0.0 for action in _MOVE_ACTIONS)
+        route_risk = self._risk_for_action(state=state, action=route_action)
+        current_risk = estimate_position_risk(
+            state=state,
+            position=state.map.player_position if state.map.status == "ok" else None,
+            horizon_turns=self.config.enemy_prediction_horizon_turns,
+        )
+        siphon_spawn_cost = siphon_spawn_cost_at_position(
+            state=state,
+            position=state.map.player_position if state.map.status == "ok" else None,
+        )
+        combat_readiness = self._combat_readiness_score(state)
         features = (
             health / 10.0,
             energy / 10.0,
@@ -479,12 +502,12 @@ class HybridCoordinator:
             1.0 if state.map.status == "ok" else 0.0,
             float(len(state.inventory.raw_prog_ids[:10])) / 10.0,
             1.0 if state.can_siphon_now is True else 0.0,
-            1.0 if state.map.status == "ok" and state.map.player_position is not None else 0.0,
-            1.0 if state.map.status == "ok" and state.map.exit_position is not None else 0.0,
-            float(len(state.map.siphons)) / 6.0 if state.map.status == "ok" else 0.0,
-            0.0,
-            0.0,
-            0.0,
+            1.0 if route_risk.immediate_damage else 0.0,
+            self._normalized_distance(route_risk.nearest_enemy_distance_after_one_turn),
+            min(float(route_risk.horizon_damage_steps) / 3.0, 1.0),
+            min(float(siphon_spawn_cost) / 6.0, 1.0),
+            1.0 if current_risk.immediate_damage else 0.0,
+            combat_readiness,
         )
         return self._fit_size(features, target_size=self.threat_controller.feature_count)
 
@@ -613,9 +636,17 @@ class HybridCoordinator:
             route_action=route_action,
             override=override,
         )
+        action, guardrail_reason = self._apply_tactical_guardrails(
+            state=state,
+            actions=actions,
+            selected_action=action,
+            route_action=route_action,
+        )
         combined_reason = f"{meta_reason}|{threat_reason}"
         if invalid_override:
             combined_reason = f"{combined_reason}|invalid_override_fallback"
+        if guardrail_reason:
+            combined_reason = f"{combined_reason}|{guardrail_reason}"
         objective_choice = MetaObjectiveChoice(
             phase=selected_phase,
             target_position=objective_target,
@@ -834,6 +865,40 @@ class HybridCoordinator:
                 best_target = candidate
         return best_target
 
+    def _best_resource_target(
+        self,
+        *,
+        state: GameStateSnapshot,
+        candidates: tuple[GridPosition, ...],
+    ) -> GridPosition | None:
+        if not candidates or state.map.status != "ok" or state.map.player_position is None:
+            return None
+        player = state.map.player_position
+        walls = _wall_positions(state)
+        best_target: GridPosition | None = None
+        best_score: float | None = None
+        for candidate in candidates:
+            plan = self.movement_controller.plan_route(
+                start=player,
+                target=candidate,
+                width=state.map.width,
+                height=state.map.height,
+                walls=walls,
+            )
+            if plan is None:
+                continue
+            base_value = self._resource_value_score(state=state, position=candidate)
+            siphon_cost = siphon_spawn_cost_at_position(state=state, position=candidate)
+            score = (
+                float(base_value)
+                - float(plan.distance)
+                - float(siphon_cost) * float(self.config.siphon_penalty_weight)
+            )
+            if best_score is None or score > best_score:
+                best_score = score
+                best_target = candidate
+        return best_target if best_target is not None else self._nearest_target(state=state, candidates=candidates)
+
     def _available_resource_targets(self, *, state: GameStateSnapshot) -> tuple[GridPosition, ...]:
         candidates = _resource_targets(state)
         if not self._completed_resource_targets:
@@ -841,6 +906,140 @@ class HybridCoordinator:
         return tuple(
             candidate for candidate in candidates if candidate not in self._completed_resource_targets
         )
+
+    def _resource_value_score(
+        self,
+        *,
+        state: GameStateSnapshot,
+        position: GridPosition,
+    ) -> int:
+        if state.map.status != "ok":
+            return 0
+        cells = _cell_index(state)
+        resource_values = _resource_value_index(state)
+        layers = state.map.layers
+        total = _credit_energy_cluster_total(
+            position=position,
+            cell_index=cells,
+            resource_values=resource_values,
+            width=state.map.width,
+            height=state.map.height,
+            credits_map=layers.credits_map,
+            energy_map=layers.energy_map,
+        )
+        for candidate in _siphon_reach_positions(position):
+            cell = cells.get(candidate)
+            if cell is not None and not _cell_target_already_siphoned(cell):
+                total += max(int(getattr(cell, "points", 0)), 0)
+                prog_id = getattr(cell, "prog_id", None)
+                if prog_id is not None and int(prog_id) > 0:
+                    total += 25
+            for wall in state.map.walls:
+                if wall.position != candidate or _cell_target_already_siphoned(wall):
+                    continue
+                total += max(int(getattr(wall, "points", 0)), 0)
+                prog_id = getattr(wall, "prog_id", None)
+                if prog_id is not None and int(prog_id) > 0:
+                    total += 25
+        return total
+
+    def _combat_readiness_score(self, state: GameStateSnapshot) -> float:
+        health = self._state_numeric(state.health.value) if state.health.status == "ok" else 0.0
+        energy = self._state_numeric(state.energy.value) if state.energy.status == "ok" else 0.0
+        inventory_load = float(len(state.inventory.raw_prog_ids[:4])) / 4.0
+        readiness = ((health / 10.0) * 0.45) + ((energy / 10.0) * 0.35) + (inventory_load * 0.20)
+        return min(max(readiness, 0.0), 1.0)
+
+    def _should_delay_siphon(self, *, state: GameStateSnapshot) -> bool:
+        if state.map.status != "ok" or state.map.player_position is None:
+            return False
+        spawn_cost = siphon_spawn_cost_at_position(state=state, position=state.map.player_position)
+        if spawn_cost < int(self.config.dangerous_siphon_spawn_threshold):
+            return False
+        if self.is_threat_active(state):
+            return True
+        return self._combat_readiness_score(state) < 0.55
+
+    def _risk_for_action(
+        self,
+        *,
+        state: GameStateSnapshot,
+        action: str | None,
+    ) -> TacticalRiskSnapshot:
+        if state.map.status != "ok":
+            return TacticalRiskSnapshot(
+                immediate_damage=False,
+                horizon_damage_steps=0,
+                nearest_enemy_distance_after_one_turn=None,
+            )
+        if action in {"space", "z", None, "wait", "cancel"}:
+            position = state.map.player_position
+        else:
+            position = move_target_position(state=state, action=action)
+        return estimate_position_risk(
+            state=state,
+            position=position,
+            horizon_turns=max(int(self.config.enemy_prediction_horizon_turns), 1),
+        )
+
+    def _select_safest_non_siphon_action(
+        self,
+        *,
+        state: GameStateSnapshot,
+        actions: tuple[str, ...],
+        preferred: str | None,
+    ) -> str | None:
+        candidates = tuple(action for action in actions if action not in {"space", "z", "cancel"})
+        if not candidates:
+            return None
+        best_action: str | None = None
+        best_key: tuple[float, float, float] | None = None
+        for action in candidates:
+            risk = self._risk_for_action(state=state, action=action)
+            preferred_bonus = 0.0 if action == preferred else 1.0
+            nearest_enemy = risk.nearest_enemy_distance_after_one_turn
+            safety_distance = -float(nearest_enemy if nearest_enemy is not None else 99)
+            key = (
+                1.0 if risk.immediate_damage else 0.0,
+                float(risk.horizon_damage_steps),
+                preferred_bonus + safety_distance,
+            )
+            if best_key is None or key < best_key:
+                best_key = key
+                best_action = action
+        return best_action
+
+    def _apply_tactical_guardrails(
+        self,
+        *,
+        state: GameStateSnapshot,
+        actions: tuple[str, ...],
+        selected_action: str,
+        route_action: str | None,
+    ) -> tuple[str, str | None]:
+        if state.map.status != "ok" or state.map.player_position is None:
+            return (selected_action, None)
+        if selected_action in {"space", "z"} and self._should_delay_siphon(state=state):
+            safe_action = self._select_safest_non_siphon_action(
+                state=state,
+                actions=actions,
+                preferred=route_action,
+            )
+            if safe_action is not None and safe_action != selected_action:
+                return (safe_action, "guarded_dangerous_siphon")
+        if self.config.avoid_guaranteed_damage and selected_action in _MOVE_ACTIONS:
+            risk = self._risk_for_action(state=state, action=selected_action)
+            if risk.immediate_damage:
+                safe_action = self._select_safest_non_siphon_action(
+                    state=state,
+                    actions=actions,
+                    preferred=route_action,
+                )
+                if safe_action is not None and safe_action != selected_action:
+                    safe_risk = self._risk_for_action(state=state, action=safe_action)
+                    if not safe_risk.immediate_damage or safe_risk.horizon_damage_steps < risk.horizon_damage_steps:
+                        return (safe_action, "guarded_guaranteed_damage")
+        return (selected_action, None)
 
     def _nearest_distance_to_targets(
         self,
@@ -871,6 +1070,12 @@ class HybridCoordinator:
         if target is not None and target == player and phase != ObjectivePhase.EXIT_SECTOR:
             siphon_action = self._select_siphon_action(available_actions=available_actions)
             if siphon_action is not None and state.can_siphon_now is not False:
+                if self._should_delay_siphon(state=state):
+                    return self._select_safest_non_siphon_action(
+                        state=state,
+                        actions=available_actions,
+                        preferred=None,
+                    )
                 return siphon_action
 
         if target is None:

@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
+from src.hybrid.tactical_model import siphon_spawn_cost_at_position
 from src.hybrid.types import ObjectivePhase, ThreatOverride
 from src.state.schema import GameStateSnapshot, GridPosition
 
@@ -37,6 +38,9 @@ class HybridThreatRewardWeights:
     fail_penalty: float = 2.50
     route_rejoin_bonus: float = 0.15
     invalid_override_penalty: float = 0.10
+    enemy_damaged: float = 0.20
+    enemy_cleared: float = 0.75
+    spawn_debt_penalty: float = 0.15
 
 
 @dataclass(frozen=True)
@@ -67,6 +71,9 @@ class HybridThreatRewardBreakdown:
     fail_penalty: float
     route_rejoin_bonus: float
     invalid_override_penalty: float
+    enemy_damaged: float
+    enemy_cleared: float
+    spawn_debt_penalty: float
     total: float
 
 
@@ -159,6 +166,81 @@ def _player_on_exit(state: GameStateSnapshot) -> bool:
     if state.map.player_position is None or state.map.exit_position is None:
         return False
     return state.map.player_position == state.map.exit_position
+
+
+def _enemy_hp_by_slot(state: GameStateSnapshot) -> dict[int, int] | None:
+    if state.map.status != "ok":
+        return None
+    hp_by_slot: dict[int, int] = {}
+    for enemy in state.map.enemies:
+        if not enemy.in_bounds:
+            continue
+        hp_by_slot[int(enemy.slot)] = max(int(enemy.hp), 0)
+    return hp_by_slot
+
+
+def _enemy_damage_delta(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> float:
+    previous_hp = _enemy_hp_by_slot(previous_state)
+    current_hp = _enemy_hp_by_slot(current_state)
+    if previous_hp is None or current_hp is None:
+        return 0.0
+    total_damage = 0
+    for enemy_id, before_hp in previous_hp.items():
+        after_hp = current_hp.get(enemy_id)
+        if after_hp is None:
+            continue
+        if before_hp > after_hp:
+            total_damage += before_hp - after_hp
+    return float(total_damage)
+
+
+def _enemy_presence_by_slot(state: GameStateSnapshot) -> dict[int, int] | None:
+    if state.map.status != "ok":
+        return None
+    presence: dict[int, int] = {}
+    for enemy in state.map.enemies:
+        if not enemy.in_bounds:
+            continue
+        presence[int(enemy.slot)] = presence.get(int(enemy.slot), 0) + 1
+    return presence
+
+
+def _enemy_cleared_delta(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> float:
+    previous_presence = _enemy_presence_by_slot(previous_state)
+    current_presence = _enemy_presence_by_slot(current_state)
+    if previous_presence is None or current_presence is None:
+        return 0.0
+    cleared = 0
+    for enemy_id, previous_count in previous_presence.items():
+        current_count = current_presence.get(enemy_id, 0)
+        if previous_count > current_count:
+            cleared += previous_count - current_count
+    return float(cleared)
+
+
+def _enemy_growth_delta(
+    *,
+    previous_state: GameStateSnapshot,
+    current_state: GameStateSnapshot,
+) -> float:
+    previous_presence = _enemy_presence_by_slot(previous_state)
+    current_presence = _enemy_presence_by_slot(current_state)
+    if previous_presence is None or current_presence is None:
+        return 0.0
+    growth = 0
+    for enemy_id, current_count in current_presence.items():
+        previous_count = previous_presence.get(enemy_id, 0)
+        if current_count > previous_count:
+            growth += current_count - previous_count
+    return float(growth)
 
 
 def _distance_to_target(
@@ -424,6 +506,22 @@ class HybridRewardSuite:
             info.get("route_rejoin_event", info.get("rejoined_route", False))
         )
         invalid_override = bool(info.get("invalid_override", False))
+        enemy_damage = _enemy_damage_delta(previous_state=previous_state, current_state=current_state)
+        enemy_cleared = _enemy_cleared_delta(previous_state=previous_state, current_state=current_state)
+        enemy_growth = _enemy_growth_delta(previous_state=previous_state, current_state=current_state)
+        chosen_action = str(info.get("action") or "").strip().lower()
+        action_effective = bool(info.get("action_effective", False))
+        siphon_spawn_cost = (
+            float(
+                siphon_spawn_cost_at_position(
+                    state=previous_state,
+                    position=previous_state.map.player_position if previous_state.map.status == "ok" else None,
+                )
+            )
+            if action_effective and chosen_action in {"space", "z"}
+            else 0.0
+        )
+        spawn_debt_units = max(enemy_growth, siphon_spawn_cost)
 
         survival_component = abs(self.threat_weights.survival) if not done else 0.0
         damage_component = -damage_taken * abs(self.threat_weights.damage_taken_penalty)
@@ -438,12 +536,18 @@ class HybridRewardSuite:
             if invalid_override
             else 0.0
         )
+        enemy_damage_component = enemy_damage * abs(self.threat_weights.enemy_damaged)
+        enemy_cleared_component = enemy_cleared * abs(self.threat_weights.enemy_cleared)
+        spawn_debt_component = -spawn_debt_units * abs(self.threat_weights.spawn_debt_penalty)
         total = (
             survival_component
             + damage_component
             + fail_component
             + rejoin_component
             + invalid_component
+            + enemy_damage_component
+            + enemy_cleared_component
+            + spawn_debt_component
         )
         return HybridThreatRewardBreakdown(
             survival=survival_component,
@@ -451,5 +555,8 @@ class HybridRewardSuite:
             fail_penalty=fail_component,
             route_rejoin_bonus=rejoin_component,
             invalid_override_penalty=invalid_component,
+            enemy_damaged=enemy_damage_component,
+            enemy_cleared=enemy_cleared_component,
+            spawn_debt_penalty=spawn_debt_component,
             total=total,
         )

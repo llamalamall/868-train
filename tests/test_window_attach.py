@@ -11,6 +11,7 @@ from src.controller.window_attach import (
     WindowAttachError,
     attach_window,
     focus_window,
+    wait_for_window_foreground,
 )
 
 
@@ -23,8 +24,11 @@ class FakeWindowBackend:
     valid_windows: set[int] = field(default_factory=set)
     foreground: int | None = None
     set_foreground_success: bool = True
+    force_focus_success: bool = False
+    foreground_sequence: list[int | None] = field(default_factory=list)
     show_calls: list[int] = field(default_factory=list)
     set_foreground_calls: list[int] = field(default_factory=list)
+    force_focus_calls: list[int] = field(default_factory=list)
 
     def find_main_window_for_pid(self, pid: int) -> int | None:
         if self.find_results:
@@ -44,7 +48,16 @@ class FakeWindowBackend:
             return True
         return False
 
+    def force_focus_window(self, hwnd: int) -> bool:
+        self.force_focus_calls.append(hwnd)
+        if self.force_focus_success:
+            self.foreground = hwnd
+            return True
+        return False
+
     def get_foreground_window(self) -> int | None:
+        if self.foreground_sequence:
+            self.foreground = self.foreground_sequence.pop(0)
         return self.foreground
 
     def is_window(self, hwnd: int) -> bool:
@@ -72,6 +85,7 @@ def test_focus_window_success() -> None:
     focus_window(window, backend=backend, retries=1)
     assert backend.show_calls == [1234]
     assert backend.set_foreground_calls == [1234]
+    assert backend.force_focus_calls == []
     assert backend.foreground == 1234
 
 
@@ -87,3 +101,49 @@ def test_focus_window_retries_then_fails() -> None:
     window = AttachedWindow(hwnd=777, pid=99, title="868-HACK")
     with pytest.raises(WindowAttachError, match="Unable to focus window"):
         focus_window(window, backend=backend, retries=2, retry_delay_seconds=0.0)
+
+
+def test_focus_window_uses_force_focus_fallback() -> None:
+    backend = FakeWindowBackend(
+        valid_windows={444},
+        foreground=111,
+        set_foreground_success=False,
+        force_focus_success=True,
+    )
+    window = AttachedWindow(hwnd=444, pid=99, title="868-HACK")
+
+    focus_window(window, backend=backend, retries=1)
+
+    assert backend.show_calls == [444]
+    assert backend.set_foreground_calls == [444]
+    assert backend.force_focus_calls == [444]
+    assert backend.foreground == 444
+
+
+def test_wait_for_window_foreground_waits_until_target_is_active() -> None:
+    backend = FakeWindowBackend(
+        valid_windows={333},
+        foreground_sequence=[111, 222, 333],
+    )
+    window = AttachedWindow(hwnd=333, pid=99, title="868-HACK")
+    sleeps: list[float] = []
+
+    wait_for_window_foreground(
+        window,
+        backend=backend,
+        poll_interval_seconds=0.05,
+        sleep_fn=sleeps.append,
+    )
+
+    assert sleeps == [0.05, 0.05]
+
+
+def test_wait_for_window_foreground_fails_when_window_becomes_invalid() -> None:
+    backend = FakeWindowBackend(
+        valid_windows=set(),
+        foreground=111,
+    )
+    window = AttachedWindow(hwnd=333, pid=99, title="868-HACK")
+
+    with pytest.raises(WindowAttachError, match="no longer valid"):
+        wait_for_window_foreground(window, backend=backend, poll_interval_seconds=0.0)

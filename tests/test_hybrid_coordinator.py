@@ -37,6 +37,9 @@ def _build_state(
     map_layers: MapLayersState | None = None,
     can_siphon_now: bool | None = True,
     player_siphons: int | None = None,
+    health: int = 10,
+    energy: int = 8,
+    prog_ids: tuple[int, ...] = (),
 ) -> GameStateSnapshot:
     map_cells = cells or tuple(
         MapCellState(
@@ -52,11 +55,11 @@ def _build_state(
     )
     return GameStateSnapshot(
         timestamp_utc="2026-03-11T00:00:00Z",
-        health=_ok_field(10),
-        energy=_ok_field(8),
+        health=_ok_field(health),
+        energy=_ok_field(energy),
         currency=_ok_field(0),
         fail_state=_ok_field(False),
-        inventory=InventoryState(status="ok", raw_prog_ids=()),
+        inventory=InventoryState(status="ok", raw_prog_ids=prog_ids),
         map=MapState(
             status="ok",
             width=6,
@@ -761,3 +764,171 @@ def test_resource_target_arrival_can_siphon_when_player_has_siphons_even_if_map_
         explore_threat=False,
     )
     assert trace.decision.action == "space"
+
+
+def test_resource_target_selection_downranks_high_spawn_cost_target() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    zero_row = (0, 0, 0, 0, 0, 0)
+    credits_grid = (
+        (0, 12, 0, 0, 0, 0),
+        zero_row,
+        (8, 0, 0, 0, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    siphon_penalty_grid = (
+        (0, 2, 0, 0, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    state = _build_state(
+        player=GridPosition(5, 5),
+        resource_cells=(
+            ResourceCellState(position=GridPosition(1, 0), credits=12),
+            ResourceCellState(position=GridPosition(0, 2), credits=8),
+        ),
+        map_layers=MapLayersState(
+            credits_map=credits_grid,
+            siphon_penalty_map=siphon_penalty_grid,
+        ),
+    )
+
+    target = coordinator.resolve_target_for_phase(
+        state=state,
+        phase=ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS,
+    )
+
+    assert target in {
+        GridPosition(0, 2),
+        GridPosition(1, 2),
+        GridPosition(0, 1),
+        GridPosition(0, 3),
+    }
+
+
+def test_route_action_delays_dangerous_siphon_when_threatened() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    zero_row = (0, 0, 0, 0, 0, 0)
+    penalty_grid = (
+        zero_row,
+        (0, 3, 0, 0, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    state = _build_state(
+        player=GridPosition(1, 1),
+        resource_cells=(ResourceCellState(position=GridPosition(1, 1), credits=4),),
+        enemies=(
+            EnemyState(
+                slot=1,
+                type_id=3,
+                position=GridPosition(1, 2),
+                hp=2,
+                state=1,
+                in_bounds=True,
+            ),
+        ),
+        map_layers=MapLayersState(siphon_penalty_map=penalty_grid),
+        player_siphons=1,
+    )
+
+    trace = coordinator.decide(
+        state=state,
+        available_actions=("space", "move_right", "move_left"),
+        use_meta_controller=False,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert trace.decision.action != "space"
+    assert trace.decision.action == "move_right"
+
+
+def test_guardrail_avoids_guaranteed_damage_move() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        exit_position=GridPosition(5, 0),
+        enemies=(
+            EnemyState(
+                slot=1,
+                type_id=3,
+                position=GridPosition(2, 0),
+                hp=2,
+                state=1,
+                in_bounds=True,
+            ),
+        ),
+    )
+
+    trace = coordinator.decide(
+        state=state,
+        available_actions=("move_right", "move_up"),
+        use_meta_controller=False,
+        use_threat_controller=False,
+        explore_meta=False,
+        explore_threat=False,
+    )
+
+    assert trace.decision.action == "move_up"
+    assert "guarded_guaranteed_damage" in trace.decision.reason
+
+
+def test_threat_features_include_predicted_risk_and_spawn_cost() -> None:
+    coordinator = HybridCoordinator(
+        meta_controller=_StubMetaController(),
+        threat_controller=_StubThreatController(),
+    )
+    zero_row = (0, 0, 0, 0, 0, 0)
+    penalty_grid = (
+        (3, 0, 0, 0, 0, 0),
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+        zero_row,
+    )
+    state = _build_state(
+        player=GridPosition(0, 0),
+        exit_position=GridPosition(5, 0),
+        enemies=(
+            EnemyState(
+                slot=1,
+                type_id=3,
+                position=GridPosition(2, 0),
+                hp=2,
+                state=1,
+                in_bounds=True,
+            ),
+        ),
+        map_layers=MapLayersState(siphon_penalty_map=penalty_grid),
+        prog_ids=(1, 2),
+    )
+
+    features = coordinator.threat_feature_vector(
+        state=state,
+        route_action="move_right",
+        objective_distance=5,
+    )
+
+    assert len(features) == 20
+    assert features[14] == 1.0
+    assert features[16] > 0.0
+    assert features[17] > 0.0
+    assert features[19] > 0.0

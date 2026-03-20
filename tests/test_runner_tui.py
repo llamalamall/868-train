@@ -6,6 +6,7 @@ import json
 import threading
 import time
 
+import src.env.runner_tui as runner_tui_module
 from src.env.runner_tui import RunnerTuiSession
 
 
@@ -53,10 +54,41 @@ def test_runner_tui_update_writes_reward_line(tmp_path) -> None:
         assert payload["action_line"] == "action=move_up"
         assert payload["reward_line"] == "reward total=+0.100"
         assert payload["next_available_actions_line"] == ""
+        assert payload["runner_pid"] > 0
+        assert payload["runner_executable_name"] == "868-HACK.exe"
+        assert payload["runner_status_file"] == str(status_file)
+        assert payload["runner_control_file"] == str(control_file)
         assert "before_action_line" not in payload
         assert "after_action_line" not in payload
     finally:
         session.close()
+
+
+def test_runner_tui_writes_and_clears_active_session_registry(tmp_path, monkeypatch) -> None:
+    status_file = tmp_path / "status.json"
+    control_file = tmp_path / "control.json"
+    registry_file = tmp_path / "active-session.json"
+    monkeypatch.setattr(runner_tui_module, "ACTIVE_RUNNER_SESSION_FILE", registry_file)
+    session = RunnerTuiSession(
+        executable_name="868-HACK.exe",
+        runner_module="src.hybrid.runner",
+        enabled=True,
+        launch_monitor=False,
+        external_status_file=str(status_file),
+        external_control_file=str(control_file),
+    )
+
+    session.start()
+    try:
+        payload = json.loads(registry_file.read_text(encoding="utf-8"))
+        assert payload["runner_pid"] > 0
+        assert payload["runner_module"] == "src.hybrid.runner"
+        assert payload["status_file"] == str(status_file)
+        assert payload["control_file"] == str(control_file)
+    finally:
+        session.close()
+
+    assert not registry_file.exists()
 
 
 def test_runner_tui_update_preserves_previous_reward_line_when_omitted(tmp_path) -> None:

@@ -387,6 +387,7 @@ def main() -> None:
     env: GameEnv | None = None
     tui = RunnerTuiSession(
         executable_name=str(args.exe),
+        runner_module="src.env.heuristic_policy_runner",
         enabled=bool(args.tui),
         interval_seconds=float(args.tui_interval),
         step_through=bool(args.step_through),

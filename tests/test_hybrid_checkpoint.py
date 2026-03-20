@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from src.hybrid.checkpoint import HybridCheckpointManager
 
 
@@ -62,3 +64,33 @@ def test_save_bundle_persists_extended_hybrid_payloads(tmp_path: Path) -> None:
     assert training_state["results"][0]["terminal_classification"] == "non_death_terminal"
     assert training_state["results"][0]["phase_switches"] == 2
     assert training_state["results"][0]["threat_active_steps"] == 0
+
+
+def test_load_warmstart_meta_accepts_meta_only_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_directory = tmp_path / "warmstart"
+    run_directory.mkdir()
+    (run_directory / "meta_controller.pt").write_text("meta", encoding="utf-8")
+    (run_directory / "hybrid_config.json").write_text(
+        json.dumps({"version": 1, "command": "train-meta-no-enemies"}),
+        encoding="utf-8",
+    )
+    (run_directory / "training_state.json").write_text(
+        json.dumps({"version": 1, "episodes_requested": 1, "episodes_completed": 1}),
+        encoding="utf-8",
+    )
+    loaded_controller = object()
+    monkeypatch.setattr(
+        "src.hybrid.checkpoint.MetaControllerDQN.load",
+        lambda path: loaded_controller,
+    )
+
+    meta_controller, hybrid_config, training_state = HybridCheckpointManager.load_warmstart_meta(
+        run_directory=run_directory
+    )
+
+    assert meta_controller is loaded_controller
+    assert hybrid_config["command"] == "train-meta-no-enemies"
+    assert training_state["episodes_completed"] == 1

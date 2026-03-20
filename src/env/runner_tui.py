@@ -10,6 +10,11 @@ import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from uuid import uuid4
+
+
+ACTIVE_RUNNER_SESSION_FILE = Path(tempfile.gettempdir()) / "868-active-runner-session.json"
 
 
 @dataclass(frozen=True)
@@ -25,6 +30,7 @@ class RunnerTuiSession:
     """Manage one external monitor-TUI process and a shared status payload file."""
 
     executable_name: str
+    runner_module: str | None = None
     enabled: bool = True
     interval_seconds: float = 0.5
     fields_filter: str = "player_health,player_energy,player_credits,collected_progs"
@@ -41,6 +47,8 @@ class RunnerTuiSession:
     _last_step_was_manual: bool = field(default=False, init=False, repr=False)
     _last_reward_line: str = field(default="", init=False, repr=False)
     _last_next_available_actions_line: str = field(default="", init=False, repr=False)
+    _runner_pid: int = field(default=0, init=False, repr=False)
+    _session_id: str = field(default="", init=False, repr=False)
 
     def start(self) -> None:
         if not self.enabled or self._process is not None:
@@ -79,6 +87,8 @@ class RunnerTuiSession:
         self._last_step_was_manual = False
         self._last_reward_line = ""
         self._last_next_available_actions_line = ""
+        self._runner_pid = os.getpid()
+        self._session_id = uuid4().hex
         self.update(
             training_line="training=initializing",
             action_line="action=idle reason=initializing",
@@ -91,6 +101,8 @@ class RunnerTuiSession:
                 "src.memory.state_monitor_tui",
                 "--exe",
                 self.executable_name,
+                "--runner-pid",
+                str(self._runner_pid),
                 "--interval",
                 str(self.interval_seconds),
                 "--fields",
@@ -131,8 +143,16 @@ class RunnerTuiSession:
                 "action_line": str(action_line),
                 "reward_line": reward_text,
                 "next_available_actions_line": next_actions_text,
+                "runner_pid": self._runner_pid,
+                "runner_module": str(self.runner_module or ""),
+                "runner_executable_name": str(self.executable_name),
+                "runner_status_file": str(self._status_file_path),
+                "runner_control_file": (
+                    str(self._control_file_path) if self._control_file_path is not None else ""
+                ),
             },
         )
+        self._write_active_session_registry()
 
     def wait_for_step_gate(
         self,
@@ -245,6 +265,7 @@ class RunnerTuiSession:
             staging_path.unlink(missing_ok=True)
 
     def close(self) -> None:
+        self._clear_active_session_registry()
         if self._process is not None and self._process.poll() is None:
             self._process.terminate()
             try:
@@ -268,3 +289,35 @@ class RunnerTuiSession:
                 self._control_file_path = None
         else:
             self._control_file_path = None
+
+    def _write_active_session_registry(self) -> None:
+        if self._status_file_path is None:
+            return
+        timestamp = datetime.now(timezone.utc).isoformat()
+        self._write_json_payload(
+            path=ACTIVE_RUNNER_SESSION_FILE,
+            payload={
+                "session_id": self._session_id,
+                "updated_at_utc": timestamp,
+                "runner_pid": self._runner_pid,
+                "runner_module": str(self.runner_module or ""),
+                "runner_executable_name": str(self.executable_name),
+                "status_file": str(self._status_file_path),
+                "control_file": (
+                    str(self._control_file_path) if self._control_file_path is not None else ""
+                ),
+            },
+        )
+
+    def _clear_active_session_registry(self) -> None:
+        if not ACTIVE_RUNNER_SESSION_FILE.exists():
+            return
+        try:
+            payload = json.loads(ACTIVE_RUNNER_SESSION_FILE.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError):
+            return
+        if not isinstance(payload, dict):
+            return
+        if str(payload.get("session_id", "")).strip() != self._session_id:
+            return
+        ACTIVE_RUNNER_SESSION_FILE.unlink(missing_ok=True)

@@ -29,8 +29,10 @@ from src.hybrid.meta_controller import MetaControllerDQN, MetaDQNConfig
 from src.hybrid.rewards import (
     HybridMetaRewardWeights,
     HybridRewardSuite,
+    HybridThreatRewardWeights,
     HybridThreatRewardBreakdown,
 )
+from src.hybrid.tactical_model import siphon_spawn_cost_at_position
 from src.hybrid.threat_controller import ThreatControllerDRQN, ThreatDRQNConfig
 from src.hybrid.types import ObjectivePhase, ThreatOverride
 
@@ -101,6 +103,9 @@ def _zero_threat_reward_breakdown() -> HybridThreatRewardBreakdown:
         fail_penalty=0.0,
         route_rejoin_bonus=0.0,
         invalid_override_penalty=0.0,
+        enemy_damaged=0.0,
+        enemy_cleared=0.0,
+        spawn_debt_penalty=0.0,
         total=0.0,
     )
 
@@ -122,6 +127,92 @@ def _health_damage_taken(
     except (TypeError, ValueError):
         return 0.0
     return max(previous_numeric - current_numeric, 0.0)
+
+
+def _enemy_hp_by_slot(state: object) -> dict[int, int] | None:
+    map_state = getattr(state, "map", None)
+    if getattr(map_state, "status", None) != "ok":
+        return None
+    hp_by_slot: dict[int, int] = {}
+    for enemy in getattr(map_state, "enemies", ()):
+        if not bool(getattr(enemy, "in_bounds", False)):
+            continue
+        try:
+            slot = int(getattr(enemy, "slot"))
+            hp = max(int(getattr(enemy, "hp")), 0)
+        except (TypeError, ValueError):
+            continue
+        hp_by_slot[slot] = hp
+    return hp_by_slot
+
+
+def _enemy_damage_delta(
+    *,
+    previous_state: object,
+    current_state: object,
+) -> float:
+    previous_hp = _enemy_hp_by_slot(previous_state)
+    current_hp = _enemy_hp_by_slot(current_state)
+    if previous_hp is None or current_hp is None:
+        return 0.0
+    total_damage = 0
+    for enemy_id, before_hp in previous_hp.items():
+        after_hp = current_hp.get(enemy_id)
+        if after_hp is None:
+            continue
+        if before_hp > after_hp:
+            total_damage += before_hp - after_hp
+    return float(total_damage)
+
+
+def _enemy_presence_by_slot(state: object) -> dict[int, int] | None:
+    map_state = getattr(state, "map", None)
+    if getattr(map_state, "status", None) != "ok":
+        return None
+    presence: dict[int, int] = {}
+    for enemy in getattr(map_state, "enemies", ()):
+        if not bool(getattr(enemy, "in_bounds", False)):
+            continue
+        try:
+            slot = int(getattr(enemy, "slot"))
+        except (TypeError, ValueError):
+            continue
+        presence[slot] = presence.get(slot, 0) + 1
+    return presence
+
+
+def _enemy_cleared_delta(
+    *,
+    previous_state: object,
+    current_state: object,
+) -> float:
+    previous_presence = _enemy_presence_by_slot(previous_state)
+    current_presence = _enemy_presence_by_slot(current_state)
+    if previous_presence is None or current_presence is None:
+        return 0.0
+    cleared = 0
+    for enemy_id, previous_count in previous_presence.items():
+        current_count = current_presence.get(enemy_id, 0)
+        if previous_count > current_count:
+            cleared += previous_count - current_count
+    return float(cleared)
+
+
+def _enemy_growth_delta(
+    *,
+    previous_state: object,
+    current_state: object,
+) -> float:
+    previous_presence = _enemy_presence_by_slot(previous_state)
+    current_presence = _enemy_presence_by_slot(current_state)
+    if previous_presence is None or current_presence is None:
+        return 0.0
+    growth = 0
+    for enemy_id, current_count in current_presence.items():
+        previous_count = previous_presence.get(enemy_id, 0)
+        if current_count > previous_count:
+            growth += current_count - previous_count
+    return float(growth)
 
 
 def _format_monitor_target(target: object) -> str:
@@ -699,6 +790,54 @@ def _add_common_runner_args(
         default=3,
         help="Meta reward: consecutive non-progress steps allowed before stagnation penalty starts.",
     )
+    parser.add_argument(
+        "--threat-reward-survival",
+        type=float,
+        default=0.05,
+        help="Threat reward: survival bonus applied on non-terminal threat-relevant steps.",
+    )
+    parser.add_argument(
+        "--threat-reward-damage-taken-penalty",
+        type=float,
+        default=0.35,
+        help="Threat reward: penalty coefficient applied to damage taken.",
+    )
+    parser.add_argument(
+        "--threat-reward-fail-penalty",
+        type=float,
+        default=2.50,
+        help="Threat reward: penalty applied on fail/death terminals.",
+    )
+    parser.add_argument(
+        "--threat-reward-route-rejoin-bonus",
+        type=float,
+        default=0.15,
+        help="Threat reward: bonus for route rejoin events after a threat override.",
+    )
+    parser.add_argument(
+        "--threat-reward-invalid-override-penalty",
+        type=float,
+        default=0.10,
+        help="Threat reward: penalty for invalid threat overrides.",
+    )
+    parser.add_argument(
+        "--threat-reward-enemy-damaged",
+        type=float,
+        default=0.20,
+        help="Threat reward: positive coefficient applied to enemy HP damage dealt.",
+    )
+    parser.add_argument(
+        "--threat-reward-enemy-cleared",
+        type=float,
+        default=0.75,
+        help="Threat reward: positive coefficient applied when an enemy is removed.",
+    )
+    parser.add_argument(
+        "--threat-reward-spawn-debt-penalty",
+        type=float,
+        default=0.15,
+        help="Threat reward: penalty coefficient applied to risky siphon spawn debt or enemy-count growth.",
+    )
 
 
 def _add_meta_model_args(parser: argparse.ArgumentParser) -> None:
@@ -869,6 +1008,36 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
             "--warmstart-checkpoint is required for train-full-hierarchical "
             "unless --resume-checkpoint is used."
         )
+    checkpoint_args: list[tuple[str, str, tuple[str, ...] | None]] = []
+    if args.command == "eval-hybrid" and getattr(args, "checkpoint", None):
+        checkpoint_args.append(
+            ("--checkpoint", str(args.checkpoint), HybridCheckpointManager.BUNDLE_REQUIRED_FILES)
+        )
+    if getattr(args, "resume_checkpoint", None):
+        checkpoint_args.append(
+            (
+                "--resume-checkpoint",
+                str(args.resume_checkpoint),
+                HybridCheckpointManager.BUNDLE_REQUIRED_FILES,
+            )
+        )
+    if args.command == "train-full-hierarchical" and getattr(args, "warmstart_checkpoint", None):
+        checkpoint_args.append(
+            (
+                "--warmstart-checkpoint",
+                str(args.warmstart_checkpoint),
+                HybridCheckpointManager.WARMSTART_REQUIRED_FILES,
+            )
+        )
+    for option_name, path_value, required_files in checkpoint_args:
+        try:
+            HybridCheckpointManager.validate_bundle_directory(
+                run_directory=path_value,
+                required_files=required_files,
+                label=option_name,
+            )
+        except (FileNotFoundError, NotADirectoryError, ValueError) as error:
+            parser.error(str(error))
 
 
 def _build_meta_config(args: argparse.Namespace) -> MetaDQNConfig:
@@ -918,6 +1087,21 @@ def _build_meta_reward_weights(args: argparse.Namespace) -> HybridMetaRewardWeig
         step_limit_penalty=float(getattr(args, "meta_reward_step_limit_penalty", 5.00)),
         stagnation_penalty=float(getattr(args, "meta_reward_stagnation_penalty", 0.05)),
         stagnation_grace_steps=int(getattr(args, "meta_reward_stagnation_grace_steps", 3)),
+    )
+
+
+def _build_threat_reward_weights(args: argparse.Namespace) -> HybridThreatRewardWeights:
+    return HybridThreatRewardWeights(
+        survival=float(getattr(args, "threat_reward_survival", 0.05)),
+        damage_taken_penalty=float(getattr(args, "threat_reward_damage_taken_penalty", 0.35)),
+        fail_penalty=float(getattr(args, "threat_reward_fail_penalty", 2.50)),
+        route_rejoin_bonus=float(getattr(args, "threat_reward_route_rejoin_bonus", 0.15)),
+        invalid_override_penalty=float(
+            getattr(args, "threat_reward_invalid_override_penalty", 0.10)
+        ),
+        enemy_damaged=float(getattr(args, "threat_reward_enemy_damaged", 0.20)),
+        enemy_cleared=float(getattr(args, "threat_reward_enemy_cleared", 0.75)),
+        spawn_debt_penalty=float(getattr(args, "threat_reward_spawn_debt_penalty", 0.15)),
     )
 
 
@@ -1260,6 +1444,7 @@ def _build_hybrid_config_payload(
     command: str,
     restore_save_source: Path | None,
     meta_reward_weights: HybridMetaRewardWeights,
+    threat_reward_weights: HybridThreatRewardWeights,
     victory_monitor_enabled: bool,
     victory_monitor_output_path: Path | None,
     victory_monitor_log_path: Path | None,
@@ -1309,6 +1494,7 @@ def _build_hybrid_config_payload(
         ),
         "meta_phase_override_credit_mode": str(getattr(args, "meta_phase_override_credit_mode", "skip_overridden")),
         "meta_reward_weights": asdict(meta_reward_weights),
+        "threat_reward_weights": asdict(threat_reward_weights),
         "meta_config": vars(_build_meta_config(args)),
         "threat_config": vars(_build_threat_config(args)),
     }
@@ -1554,12 +1740,30 @@ def _run_rollouts(
                 and trace.decision.threat_override == ThreatOverride.ROUTE_DEFAULT
                 and (last_threat_active or last_threat_override != ThreatOverride.ROUTE_DEFAULT)
             )
+            enemy_damage_dealt = _enemy_damage_delta(previous_state=state, current_state=next_state)
+            enemy_cleared = _enemy_cleared_delta(previous_state=state, current_state=next_state)
+            enemy_growth = _enemy_growth_delta(previous_state=state, current_state=next_state)
+            siphon_spawn_cost = (
+                float(
+                    siphon_spawn_cost_at_position(
+                        state=state,
+                        position=state.map.player_position if getattr(state.map, "status", None) == "ok" else None,
+                    )
+                )
+                if bool(info.get("action_effective", False))
+                and trace.decision.action in {"space", "z"}
+                else 0.0
+            )
             threat_signal_relevant = bool(
                 use_threat
                 and (
                     trace.threat_active
                     or route_rejoin_event
                     or invalid_override
+                    or enemy_damage_dealt > 0.0
+                    or enemy_cleared > 0.0
+                    or enemy_growth > 0.0
+                    or siphon_spawn_cost > 0.0
                     or _health_damage_taken(previous_state=state, current_state=next_state) > 0.0
                     or (done and _terminal_is_fail(terminal_reason))
                 )
@@ -1572,6 +1776,11 @@ def _run_rollouts(
                     threat_override=trace.decision.threat_override,
                     info={
                         **info,
+                        "action": trace.decision.action,
+                        "enemy_damage_dealt": enemy_damage_dealt,
+                        "enemy_cleared": enemy_cleared,
+                        "enemy_growth": enemy_growth,
+                        "siphon_spawn_cost": siphon_spawn_cost,
                         "invalid_override": invalid_override,
                         "route_rejoin_event": route_rejoin_event,
                     },
@@ -1795,6 +2004,7 @@ def main() -> None:
     victory_monitor_session: _VictoryMonitorProcess | None = None
     tui = RunnerTuiSession(
         executable_name=str(args.exe),
+        runner_module="src.hybrid.runner",
         enabled=monitor_enabled,
         interval_seconds=float(args.tui_interval),
         step_through=bool(args.step_through),
@@ -1803,6 +2013,7 @@ def main() -> None:
         external_control_file=(str(args.external_control_file) if args.external_control_file else None),
     )
     try:
+        tui.start()
         env = _build_hybrid_env(
             args,
             effective_window_input=effective_window_input,
@@ -1815,17 +2026,36 @@ def main() -> None:
         if victory_monitor_enabled:
             assert run_directory is not None
             victory_monitor_session = _VictoryMonitorProcess(run_directory=run_directory)
-            env.add_runtime_binding_callback(victory_monitor_session.update_pid)
-            print(
-                "victory_transition_monitor_enabled\toutput={output}\tlog={log}".format(
-                    output=victory_monitor_session.output_path,
-                    log=victory_monitor_session.log_path,
+            def _safe_update_victory_monitor_pid(pid: int) -> None:
+                nonlocal victory_monitor_session
+                if victory_monitor_session is None:
+                    return
+                try:
+                    victory_monitor_session.update_pid(pid)
+                except RuntimeError as error:
+                    print(
+                        "victory_transition_monitor_warning\tstartup_failed\tmessage={message}".format(
+                            message=str(error).replace("\n", " | "),
+                        )
+                    )
+                    victory_monitor_session.close()
+                    victory_monitor_session = None
+
+            env.add_runtime_binding_callback(_safe_update_victory_monitor_pid)
+            if victory_monitor_session is not None:
+                print(
+                    "victory_transition_monitor_enabled\toutput={output}\tlog={log}".format(
+                        output=victory_monitor_session.output_path,
+                        log=victory_monitor_session.log_path,
+                    )
                 )
-            )
-        tui.start()
 
         meta_reward_weights = _build_meta_reward_weights(args)
-        reward_suite = HybridRewardSuite(meta_weights=meta_reward_weights)
+        threat_reward_weights = _build_threat_reward_weights(args)
+        reward_suite = HybridRewardSuite(
+            meta_weights=meta_reward_weights,
+            threat_weights=threat_reward_weights,
+        )
         coordinator_config = HybridCoordinatorConfig(
             threat_trigger_distance=max(int(args.threat_trigger_distance), 1),
             exit_after_siphons_when_scripted=False,
@@ -1860,7 +2090,7 @@ def main() -> None:
                 config=coordinator_config,
             )
         elif command == "train-full-hierarchical" and getattr(args, "warmstart_checkpoint", None):
-            loaded_meta, _loaded_threat, _bundle_config, _training_state = HybridCheckpointManager.load_bundle(
+            loaded_meta, _bundle_config, _training_state = HybridCheckpointManager.load_warmstart_meta(
                 run_directory=str(args.warmstart_checkpoint)
             )
             coordinator = HybridCoordinator(
@@ -1988,6 +2218,7 @@ def main() -> None:
                     command=command,
                     restore_save_source=restore_save_source,
                     meta_reward_weights=meta_reward_weights,
+                    threat_reward_weights=threat_reward_weights,
                     victory_monitor_enabled=victory_monitor_enabled,
                     victory_monitor_output_path=(
                         victory_monitor_session.output_path

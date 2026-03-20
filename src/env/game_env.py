@@ -16,7 +16,12 @@ from typing import Any, Callable, Protocol
 from src.config.offsets import load_offset_registry
 from src.controller.action_api import ActionAPI, ActionConfig
 from src.controller.input_driver import InputDriver
-from src.controller.window_attach import WindowAttachError, attach_window, focus_window
+from src.controller.window_attach import (
+    WindowAttachError,
+    attach_window,
+    focus_window,
+    wait_for_window_foreground,
+)
 from src.env.enemy_spawn_suppression import EnemySpawnSuppressor
 from src.env.game_tick_speedup import (
     BackgroundMotionDisablePatcher,
@@ -458,6 +463,7 @@ class GameEnvConfig:
     window_attach_retry_delay_seconds: float = 0.3
     window_focus_retry_attempts: int = 3
     window_focus_retry_delay_seconds: float = 0.2
+    foreground_guard_poll_interval_seconds: float = 0.10
 
 
 @dataclass(frozen=True)
@@ -1860,10 +1866,28 @@ class GameEnv:
                 runtime["attached_window"] = refreshed_window
             return refreshed_window.hwnd
 
+        def _wait_for_foreground_if_needed(*, reason: str) -> None:
+            if window_targeted_input:
+                return
+            with runtime_lock:
+                current_window = runtime.get("attached_window")
+            if current_window is None:
+                return
+            wait_for_window_foreground(
+                current_window,
+                poll_interval_seconds=float(config.foreground_guard_poll_interval_seconds),
+                logger=LOGGER,
+            )
+
+        def wrapped_pre_reset_hook() -> None:
+            _wait_for_foreground_if_needed(reason="before_reset")
+            if pre_reset_hook is not None:
+                pre_reset_hook()
+
         def before_action(action_name: str) -> None:
+            _wait_for_foreground_if_needed(reason=f"before_action:{action_name}")
             if enemy_spawn_suppressor.enabled and no_enemy_map_root_address is not None:
                 _suppress_enemies_for_root(map_root_address=no_enemy_map_root_address)
-            # Input focus is handled on attach/recovery, not before every action.
             return
 
         base_action_config = action_config or ActionConfig()
@@ -1890,7 +1914,7 @@ class GameEnv:
             reset_strategy: ResetStrategy = SequenceResetManager(
                 action_api=action_api,
                 sequence=reset_sequence,
-                before_sequence_hook=pre_reset_hook,
+                before_sequence_hook=wrapped_pre_reset_hook,
             )
         else:
             reset_strategy = NoopResetManager()
@@ -1905,7 +1929,7 @@ class GameEnv:
             recovery_hook=_recover_live_bindings,
             before_action_hook=(
                 before_action
-                if enemy_spawn_suppressor.enabled
+                if enemy_spawn_suppressor.enabled or not window_targeted_input
                 else None
             ),
             attached_pid=int(attached_process.pid),

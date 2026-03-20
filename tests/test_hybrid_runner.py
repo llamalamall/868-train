@@ -6,11 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from src.hybrid.rewards import HybridMetaRewardWeights, HybridRewardSuite
+from src.hybrid.rewards import HybridMetaRewardWeights, HybridRewardSuite, HybridThreatRewardWeights
 from src.hybrid.runner import (
     HybridEpisodeSummary,
     _build_hybrid_config_payload,
     _build_meta_reward_weights,
+    _build_threat_reward_weights,
     _build_parser,
     _build_training_state_payload,
     _classify_terminal_reason,
@@ -404,21 +405,51 @@ def test_hybrid_validate_args_rejects_negative_restore_save_delay() -> None:
         _validate_args(parser, args)
 
 
-def test_hybrid_parser_train_full_accepts_warmstart_path() -> None:
+def test_hybrid_parser_train_full_accepts_warmstart_path(tmp_path: Path) -> None:
+    checkpoint_dir = tmp_path / "warmstart"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "meta_controller.pt").write_text("meta", encoding="utf-8")
+    (checkpoint_dir / "hybrid_config.json").write_text("{}", encoding="utf-8")
+    (checkpoint_dir / "training_state.json").write_text("{}", encoding="utf-8")
     parser = _build_parser()
     args = parser.parse_args(
         [
             "train-full-hierarchical",
             "--warmstart-checkpoint",
-            "artifacts/hybrid/20260311-01-gateb",
+            str(checkpoint_dir),
             "--episodes",
             "30",
         ]
     )
 
     _validate_args(parser, args)
-    assert args.warmstart_checkpoint == "artifacts/hybrid/20260311-01-gateb"
+    assert args.warmstart_checkpoint == str(checkpoint_dir)
     assert args.episodes == 30
+
+
+def test_hybrid_validate_args_rejects_incomplete_warmstart_checkpoint(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    checkpoint_dir = tmp_path / "incomplete-run"
+    checkpoint_dir.mkdir()
+    (checkpoint_dir / "victory-transition-events.jsonl").write_text("", encoding="utf-8")
+    (checkpoint_dir / "victory-transition-monitor.log").write_text("", encoding="utf-8")
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "train-full-hierarchical",
+            "--warmstart-checkpoint",
+            str(checkpoint_dir),
+        ]
+    )
+
+    with pytest.raises(SystemExit):
+        _validate_args(parser, args)
+
+    captured = capsys.readouterr()
+    assert "--warmstart-checkpoint is incomplete" in captured.err
+    assert "Missing files: meta_controller.pt, hybrid_config.json, training_state.json." in captured.err
 
 
 def test_hybrid_parser_eval_requires_checkpoint() -> None:
@@ -528,6 +559,45 @@ def test_build_meta_reward_weights_uses_cli_overrides() -> None:
     )
 
 
+def test_build_threat_reward_weights_uses_cli_overrides() -> None:
+    parser = _build_parser()
+    args = parser.parse_args(
+        [
+            "train-full-hierarchical",
+            "--warmstart-checkpoint",
+            "artifacts/hybrid/meta",
+            "--threat-reward-survival",
+            "0.08",
+            "--threat-reward-damage-taken-penalty",
+            "0.60",
+            "--threat-reward-fail-penalty",
+            "4.5",
+            "--threat-reward-route-rejoin-bonus",
+            "0.0",
+            "--threat-reward-invalid-override-penalty",
+            "0.25",
+            "--threat-reward-enemy-damaged",
+            "0.4",
+            "--threat-reward-enemy-cleared",
+            "1.5",
+            "--threat-reward-spawn-debt-penalty",
+            "0.3",
+        ]
+    )
+
+    weights = _build_threat_reward_weights(args)
+    assert weights == HybridThreatRewardWeights(
+        survival=0.08,
+        damage_taken_penalty=0.60,
+        fail_penalty=4.5,
+        route_rejoin_bonus=0.0,
+        invalid_override_penalty=0.25,
+        enemy_damaged=0.4,
+        enemy_cleared=1.5,
+        spawn_debt_penalty=0.3,
+    )
+
+
 def test_build_hybrid_config_payload_includes_run_tag_and_warmstart_metadata() -> None:
     parser = _build_parser()
     args = parser.parse_args(
@@ -548,6 +618,7 @@ def test_build_hybrid_config_payload_includes_run_tag_and_warmstart_metadata() -
         command="train-full-hierarchical",
         restore_save_source=None,
         meta_reward_weights=_build_meta_reward_weights(args),
+        threat_reward_weights=_build_threat_reward_weights(args),
         victory_monitor_enabled=True,
         victory_monitor_output_path=Path("artifacts/hybrid/20260315-09-test/victory-transition-events.jsonl"),
         victory_monitor_log_path=Path("artifacts/hybrid/20260315-09-test/victory-transition-monitor.log"),
@@ -576,6 +647,12 @@ def test_build_hybrid_config_payload_includes_run_tag_and_warmstart_metadata() -
     assert payload["meta_reward_weights"]["step_limit_penalty"] == pytest.approx(5.0)
     assert payload["meta_reward_weights"]["stagnation_penalty"] == pytest.approx(0.05)
     assert payload["meta_reward_weights"]["stagnation_grace_steps"] == 3
+    assert payload["threat_reward_weights"]["survival"] == pytest.approx(0.05)
+    assert payload["threat_reward_weights"]["damage_taken_penalty"] == pytest.approx(0.35)
+    assert payload["threat_reward_weights"]["fail_penalty"] == pytest.approx(2.5)
+    assert payload["threat_reward_weights"]["enemy_damaged"] == pytest.approx(0.20)
+    assert payload["threat_reward_weights"]["enemy_cleared"] == pytest.approx(0.75)
+    assert payload["threat_reward_weights"]["spawn_debt_penalty"] == pytest.approx(0.15)
 
 
 def test_build_hybrid_config_payload_records_resume_checkpoint_for_meta_training() -> None:
@@ -595,6 +672,7 @@ def test_build_hybrid_config_payload_records_resume_checkpoint_for_meta_training
         command="train-meta-no-enemies",
         restore_save_source=None,
         meta_reward_weights=_build_meta_reward_weights(args),
+        threat_reward_weights=_build_threat_reward_weights(args),
         victory_monitor_enabled=False,
         victory_monitor_output_path=None,
         victory_monitor_log_path=None,

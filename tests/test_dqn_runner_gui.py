@@ -32,6 +32,8 @@ from src.gui.dqn_runner_gui import (
     _monitor_key_label_for_action,
     _parse_next_available_actions,
     _parse_episode_progress,
+    _load_live_monitor_binding_from_status_file,
+    _load_active_runner_session_binding,
     _resolve_reward_metric_value,
     _resolve_preset_overrides,
     _run_dqn_preset_overrides,
@@ -577,6 +579,102 @@ def test_discover_live_monitor_session_binding_falls_back_to_child_tui_process()
         executable_name="868-HACK.exe",
         source_pid=4305,
         source_module="src.memory.state_monitor_tui",
+    )
+
+
+def test_discover_live_monitor_session_binding_uses_declared_runner_pid_from_tui_process() -> None:
+    processes = (
+        _RunningPythonProcess(
+            pid=4400,
+            parent_pid=None,
+            executable_name="python.exe",
+            command_line='python -m src.hybrid.runner train-meta-no-enemies --exe 868-HACK.exe',
+        ),
+        _RunningPythonProcess(
+            pid=4410,
+            parent_pid=9999,
+            executable_name="python.exe",
+            command_line=(
+                'python -m src.memory.state_monitor_tui --exe 868-HACK.exe '
+                '--runner-pid 4400 '
+                '--external-status-file "C:\\tmp\\declared-status.json" '
+                '--external-control-file "C:\\tmp\\declared-control.json"'
+            ),
+        ),
+    )
+
+    binding = _discover_live_monitor_session_binding(
+        processes,
+        preferred_runner_pid=4400,
+        preferred_executable_name="868-HACK.exe",
+    )
+
+    assert binding == _LiveMonitorSessionBinding(
+        runner_pid=4400,
+        runner_module="src.hybrid.runner",
+        status_file=Path("C:/tmp/declared-status.json"),
+        control_file=Path("C:/tmp/declared-control.json"),
+        executable_name="868-HACK.exe",
+        source_pid=4410,
+        source_module="src.memory.state_monitor_tui",
+    )
+
+
+def test_load_live_monitor_binding_from_status_file_uses_runner_metadata(tmp_path: Path) -> None:
+    status_file = tmp_path / "status.json"
+    status_file.write_text(
+        json.dumps(
+            {
+                "training_line": "training=ok",
+                "runner_pid": 5100,
+                "runner_module": "src.hybrid.runner",
+                "runner_executable_name": "868-HACK.exe",
+                "runner_control_file": "C:\\tmp\\control.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    binding = _load_live_monitor_binding_from_status_file(status_file=status_file)
+
+    assert binding == _LiveMonitorSessionBinding(
+        runner_pid=5100,
+        runner_module="src.hybrid.runner",
+        status_file=status_file,
+        control_file=Path("C:/tmp/control.json"),
+        executable_name="868-HACK.exe",
+        source_pid=5100,
+        source_module="src.hybrid.runner",
+    )
+
+
+def test_load_active_runner_session_binding_reads_registry(tmp_path: Path) -> None:
+    status_file = tmp_path / "status.json"
+    status_file.write_text("{}", encoding="utf-8")
+    registry_file = tmp_path / "active-session.json"
+    registry_file.write_text(
+        json.dumps(
+            {
+                "runner_pid": 6200,
+                "runner_module": "src.hybrid.runner",
+                "runner_executable_name": "868-HACK.exe",
+                "status_file": str(status_file),
+                "control_file": "C:\\tmp\\control.json",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    binding = _load_active_runner_session_binding(registry_file=registry_file)
+
+    assert binding == _LiveMonitorSessionBinding(
+        runner_pid=6200,
+        runner_module="src.hybrid.runner",
+        status_file=status_file,
+        control_file=Path("C:/tmp/control.json"),
+        executable_name="868-HACK.exe",
+        source_pid=6200,
+        source_module="active_registry",
     )
 
 

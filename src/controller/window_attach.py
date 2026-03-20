@@ -42,6 +42,9 @@ class WindowBackend(Protocol):
     def set_foreground_window(self, hwnd: int) -> bool:
         """Bring a window to foreground."""
 
+    def force_focus_window(self, hwnd: int) -> bool:
+        """Try a more aggressive foreground handoff for hwnd."""
+
     def get_foreground_window(self) -> int | None:
         """Get active foreground window."""
 
@@ -57,6 +60,26 @@ class WindowsWindowBackend:
             raise WindowAttachError("WindowsWindowBackend is only supported on Windows.")
 
         self._user32 = ctypes.windll.user32
+        self._kernel32 = ctypes.windll.kernel32
+        self._user32.BringWindowToTop.argtypes = (ctypes.wintypes.HWND,)
+        self._user32.BringWindowToTop.restype = ctypes.wintypes.BOOL
+        self._user32.SetFocus.argtypes = (ctypes.wintypes.HWND,)
+        self._user32.SetFocus.restype = ctypes.wintypes.HWND
+        self._user32.SetActiveWindow.argtypes = (ctypes.wintypes.HWND,)
+        self._user32.SetActiveWindow.restype = ctypes.wintypes.HWND
+        self._user32.GetWindowThreadProcessId.argtypes = (
+            ctypes.wintypes.HWND,
+            ctypes.POINTER(ctypes.wintypes.DWORD),
+        )
+        self._user32.GetWindowThreadProcessId.restype = ctypes.wintypes.DWORD
+        self._user32.AttachThreadInput.argtypes = (
+            ctypes.wintypes.DWORD,
+            ctypes.wintypes.DWORD,
+            ctypes.wintypes.BOOL,
+        )
+        self._user32.AttachThreadInput.restype = ctypes.wintypes.BOOL
+        self._kernel32.GetCurrentThreadId.argtypes = ()
+        self._kernel32.GetCurrentThreadId.restype = ctypes.wintypes.DWORD
 
     def find_main_window_for_pid(self, pid: int) -> int | None:
         found_hwnd: int | None = None
@@ -92,6 +115,37 @@ class WindowsWindowBackend:
 
     def set_foreground_window(self, hwnd: int) -> bool:
         return bool(self._user32.SetForegroundWindow(hwnd))
+
+    def force_focus_window(self, hwnd: int) -> bool:
+        foreground = self.get_foreground_window()
+        target_thread = int(self._user32.GetWindowThreadProcessId(hwnd, None))
+        foreground_thread = (
+            int(self._user32.GetWindowThreadProcessId(foreground, None))
+            if foreground is not None
+            else 0
+        )
+        current_thread = int(self._kernel32.GetCurrentThreadId())
+        attached_pairs: list[tuple[int, int]] = []
+
+        def _attach(a: int, b: int) -> None:
+            if a <= 0 or b <= 0 or a == b:
+                return
+            if bool(self._user32.AttachThreadInput(a, b, True)):
+                attached_pairs.append((a, b))
+
+        try:
+            _attach(current_thread, target_thread)
+            _attach(current_thread, foreground_thread)
+            _attach(target_thread, foreground_thread)
+            self.show_window(hwnd)
+            self._user32.BringWindowToTop(hwnd)
+            self._user32.SetActiveWindow(hwnd)
+            self._user32.SetFocus(hwnd)
+            self._user32.SetForegroundWindow(hwnd)
+            return self.get_foreground_window() == hwnd
+        finally:
+            for a, b in reversed(attached_pairs):
+                self._user32.AttachThreadInput(a, b, False)
 
     def get_foreground_window(self) -> int | None:
         hwnd = int(self._user32.GetForegroundWindow())
@@ -166,6 +220,9 @@ def focus_window(
         active_backend.show_window(window.hwnd)
         focused = active_backend.set_foreground_window(window.hwnd)
         foreground = active_backend.get_foreground_window()
+        if foreground != window.hwnd:
+            focused = bool(active_backend.force_focus_window(window.hwnd)) or focused
+            foreground = active_backend.get_foreground_window()
         if focused and foreground == window.hwnd:
             active_logger.info("Focused window hwnd=%s pid=%s", window.hwnd, window.pid)
             return
@@ -181,3 +238,38 @@ def focus_window(
     if last_error is None:
         raise WindowAttachError("Unknown window focus failure.")
     raise last_error
+
+
+def wait_for_window_foreground(
+    window: AttachedWindow,
+    *,
+    poll_interval_seconds: float = 0.10,
+    backend: WindowBackend | None = None,
+    logger: logging.Logger | None = None,
+    sleep_fn: callable = time.sleep,
+) -> None:
+    """Block until the target window regains foreground focus."""
+    active_backend = backend or _default_backend()
+    active_logger = logger or LOGGER
+    warned = False
+    poll_interval = max(float(poll_interval_seconds), 0.0)
+
+    while True:
+        if not active_backend.is_window(window.hwnd):
+            raise WindowAttachError(f"Window handle is no longer valid: hwnd={window.hwnd}")
+        foreground = active_backend.get_foreground_window()
+        if foreground == window.hwnd:
+            if warned:
+                active_logger.info("Window foreground restored hwnd=%s pid=%s", window.hwnd, window.pid)
+            return
+        if not warned:
+            active_logger.warning(
+                "Window foreground lost; pausing input until game regains focus "
+                "hwnd=%s pid=%s foreground=%s",
+                window.hwnd,
+                window.pid,
+                foreground,
+            )
+            warned = True
+        if poll_interval > 0:
+            sleep_fn(poll_interval)
