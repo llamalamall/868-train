@@ -9,15 +9,13 @@ from typing import Callable
 
 from src.app import main as app_main
 from src.config.fingerprint import main as fingerprint_main
-from src.env.dqn_policy_runner import main as dqn_runner_main
 from src.env.heuristic_policy_runner import main as heuristic_runner_main
 from src.env.random_policy_runner import main as random_runner_main
-from src.gui.dqn_runner_gui import main as dqn_gui_main
+from src.gui.hybrid_runner_gui import main as hybrid_gui_main
 from src.hybrid.runner import main as hybrid_runner_main
 from src.memory.offset_smoke_test import main as offset_smoke_main
 from src.memory.state_monitor_tui import main as state_monitor_main
 from src.memory.victory_transition_monitor import main as victory_transition_monitor_main
-from src.training.evaluate import main as evaluate_main
 
 CommandHandler = Callable[[], None]
 
@@ -102,12 +100,6 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_passthrough_parser(
         subparsers,
-        name="run-dqn",
-        summary="Run DQN train/eval episodes.",
-        details="Runs src.env.dqn_policy_runner against the live game environment.",
-    )
-    _add_passthrough_parser(
-        subparsers,
         name="run-hybrid",
         summary="Run hybrid hierarchical workflows.",
         details=(
@@ -117,20 +109,11 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     _add_passthrough_parser(
         subparsers,
-        name="dqn-gui",
-        summary="Launch GUI for DQN run/eval/compare workflows.",
+        name="hybrid-gui",
+        summary="Launch GUI for Hybrid workflows.",
         details=(
-            "Runs src.gui.dqn_runner_gui and exposes DQN runner/evaluation flags in an "
+            "Runs src.gui.hybrid_runner_gui and exposes Hybrid runner flags in an "
             "interactive window."
-        ),
-    )
-    _add_passthrough_parser(
-        subparsers,
-        name="evaluate",
-        summary="DQN checkpoint KPI evaluation.",
-        details=(
-            "Runs src.training.evaluate for fixed-seed KPI reports and "
-            "checkpoint-vs-checkpoint comparisons."
         ),
     )
     return parser
@@ -151,10 +134,8 @@ def main(argv: Sequence[str] | None = None) -> None:
         "victory-monitor": victory_transition_monitor_main,
         "run-random": random_runner_main,
         "run-heuristic": heuristic_runner_main,
-        "run-dqn": dqn_runner_main,
         "run-hybrid": hybrid_runner_main,
-        "dqn-gui": dqn_gui_main,
-        "evaluate": evaluate_main,
+        "hybrid-gui": hybrid_gui_main,
     }
 
     selected = handlers.get(args.command)

@@ -4,9 +4,21 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from typing import Sequence
- 
 
+ 
+from src.hybrid.objective_planning import (
+    cell_index as _cell_index,
+    cell_target_already_siphoned as _cell_target_already_siphoned,
+    count_enemies as _count_enemies,
+    credit_energy_cluster_total as _credit_energy_cluster_total,
+    manhattan as _manhattan,
+    resource_value_index as _resource_value_index,
+    resource_targets as _resource_targets,
+    siphon_reach_positions as _siphon_reach_positions,
+    wall_positions as _wall_positions,
+)
 from src.hybrid.astar_controller import AStarMovementController
+from src.hybrid.feature_encoding import build_meta_feature_vector, build_threat_feature_vector
 from src.hybrid.meta_controller import MetaControllerDQN
 from src.hybrid.tactical_model import (
     TacticalRiskSnapshot,
@@ -31,7 +43,6 @@ _MOVE_DELTAS: dict[str, tuple[int, int]] = {
     "move_right": (1, 0),
 }
 _MOVE_ACTIONS: tuple[str, ...] = tuple(_MOVE_DELTAS.keys())
-_CARDINAL_DELTAS: tuple[tuple[int, int], ...] = ((0, 1), (1, 0), (0, -1), (-1, 0))
 
 
 @dataclass(frozen=True)
@@ -48,252 +59,6 @@ class HybridCoordinatorConfig:
     avoid_guaranteed_damage: bool = True
     dangerous_siphon_spawn_threshold: int = 2
     siphon_penalty_weight: float = 8.0
-
-
-def _manhattan(a: GridPosition, b: GridPosition) -> int:
-    return abs(a.x - b.x) + abs(a.y - b.y)
-
-
-def _wall_positions(state: GameStateSnapshot) -> set[GridPosition]:
-    if state.map.status != "ok":
-        return set()
-    walls = {cell.position for cell in state.map.cells if cell.is_wall}
-    if walls:
-        return walls
-    return {wall.position for wall in state.map.walls}
-
-
-def _is_in_bounds(position: GridPosition, *, width: int, height: int) -> bool:
-    return 0 <= position.x < width and 0 <= position.y < height
-
-
-def _adjacent_positions(position: GridPosition) -> tuple[GridPosition, ...]:
-    return tuple(
-        GridPosition(x=position.x + dx, y=position.y + dy)
-        for dx, dy in _CARDINAL_DELTAS
-    )
-
-
-def _siphon_reach_positions(position: GridPosition) -> tuple[GridPosition, ...]:
-    return (position, *_adjacent_positions(position))
-
-
-def _cell_index(state: GameStateSnapshot) -> dict[GridPosition, object]:
-    if state.map.status != "ok":
-        return {}
-    return {cell.position: cell for cell in state.map.cells}
-
-
-def _resource_value_index(state: GameStateSnapshot) -> dict[GridPosition, tuple[int, int, int]]:
-    if state.map.status != "ok":
-        return {}
-    cells = _cell_index(state)
-    values: dict[GridPosition, tuple[int, int, int]] = {}
-    for resource in state.map.resource_cells:
-        raw_cell = cells.get(resource.position)
-        if raw_cell is not None and _cell_target_already_siphoned(raw_cell):
-            continue
-        values[resource.position] = (
-            max(int(resource.credits), 0),
-            max(int(resource.energy), 0),
-            max(int(resource.points), 0),
-        )
-    return values
-
-
-def _read_layer_cell(
-    layer: tuple[tuple[int, ...], ...],
-    *,
-    x: int,
-    y: int,
-    width: int,
-    height: int,
-) -> int | None:
-    if x < 0 or y < 0 or x >= width or y >= height:
-        return None
-    if len(layer) != height:
-        return None
-    row = layer[y]
-    if len(row) != width:
-        return None
-    try:
-        return int(row[x])
-    except (TypeError, ValueError):
-        return None
-
-
-def _credit_energy_cluster_total(
-    *,
-    position: GridPosition,
-    cell_index: dict[GridPosition, object],
-    resource_values: dict[GridPosition, tuple[int, int, int]],
-    width: int,
-    height: int,
-    credits_map: tuple[tuple[int, ...], ...],
-    energy_map: tuple[tuple[int, ...], ...],
-) -> int:
-    # Prefer precomputed outcome layers: they already include adjacent siphon reach.
-    x = int(position.x)
-    y = int(position.y)
-    layer_credits = _read_layer_cell(
-        credits_map,
-        x=x,
-        y=y,
-        width=width,
-        height=height,
-    )
-    layer_energy = _read_layer_cell(
-        energy_map,
-        x=x,
-        y=y,
-        width=width,
-        height=height,
-    )
-    if layer_credits is not None and layer_energy is not None:
-        return max(layer_credits, 0) + max(layer_energy, 0)
-
-    # Fallback for synthetic states that do not populate map layers.
-    total = 0
-    for candidate in (position, *_adjacent_positions(position)):
-        cell = cell_index.get(candidate)
-        if cell is not None and _cell_target_already_siphoned(cell):
-            cell_credits = 0
-            cell_energy = 0
-        else:
-            cell_credits = max(int(getattr(cell, "credits", 0)), 0) if cell is not None else 0
-            cell_energy = max(int(getattr(cell, "energy", 0)), 0) if cell is not None else 0
-        resource = resource_values.get(candidate)
-        resource_credits = resource[0] if resource is not None else 0
-        resource_energy = resource[1] if resource is not None else 0
-        total += max(cell_credits, resource_credits)
-        total += max(cell_energy, resource_energy)
-    return total
-
-
-def _count_enemies(state: GameStateSnapshot) -> int:
-    if state.map.status != "ok":
-        return 0
-    return sum(1 for enemy in state.map.enemies if enemy.in_bounds)
-
-
-def _cell_target_already_siphoned(cell: object) -> bool:
-    # Decompiled map state uses cell +0x18 as wall durability for walls and as a
-    # depleted marker once a non-wall resource tile has already been siphoned.
-    wall_state = int(getattr(cell, "wall_state", 0))
-    is_wall = bool(getattr(cell, "is_wall", False) or hasattr(cell, "wall_type"))
-    if is_wall:
-        has_payload = bool(
-            (getattr(cell, "prog_id", None) is not None and int(getattr(cell, "prog_id", 0)) > 0)
-            or max(int(getattr(cell, "points", 0)), 0) > 0
-        )
-        return has_payload and wall_state <= 0
-    return wall_state > 0
-
-
-def _resource_targets(state: GameStateSnapshot) -> tuple[GridPosition, ...]:
-    if state.map.status != "ok":
-        return ()
-    width = int(state.map.width)
-    height = int(state.map.height)
-    layers = state.map.layers
-    walls = _wall_positions(state)
-    cells = _cell_index(state)
-    resource_values = _resource_value_index(state)
-    weighted_targets: dict[GridPosition, int] = {}
-
-    def add_target(position: GridPosition, *, weight: int) -> None:
-        if not _is_in_bounds(position, width=width, height=height):
-            return
-        if position in walls:
-            return
-        cell = cells.get(position)
-        if cell is not None and _cell_target_already_siphoned(cell):
-            return
-        bounded = max(int(weight), 0)
-        current = weighted_targets.get(position)
-        if current is None or bounded > current:
-            weighted_targets[position] = bounded
-
-    for cell in state.map.resource_cells:
-        raw_cell = cells.get(cell.position)
-        if raw_cell is not None and _cell_target_already_siphoned(raw_cell):
-            continue
-        cluster_total = _credit_energy_cluster_total(
-            position=cell.position,
-            cell_index=cells,
-            resource_values=resource_values,
-            width=width,
-            height=height,
-            credits_map=layers.credits_map,
-            energy_map=layers.energy_map,
-        )
-        points_total = max(int(cell.points), 0)
-        if cluster_total <= 0 and points_total <= 0:
-            continue
-        add_target(cell.position, weight=cluster_total + points_total)
-
-    for cell in state.map.cells:
-        if _cell_target_already_siphoned(cell):
-            continue
-        cluster_total = _credit_energy_cluster_total(
-            position=cell.position,
-            cell_index=cells,
-            resource_values=resource_values,
-            width=width,
-            height=height,
-            credits_map=layers.credits_map,
-            energy_map=layers.energy_map,
-        )
-        has_prog = bool(cell.prog_id is not None and cell.prog_id > 0)
-        points_total = max(int(cell.points), 0)
-        if not cell.is_wall:
-            if cluster_total <= 0 and not has_prog and points_total <= 0:
-                continue
-            add_target(
-                cell.position,
-                weight=cluster_total + points_total + (25 if has_prog else 0),
-            )
-            continue
-        if not has_prog and points_total <= 0:
-            continue
-        wall_weight = points_total + (25 if has_prog else 0)
-        for adjacent in _adjacent_positions(cell.position):
-            adjacent_cluster = _credit_energy_cluster_total(
-                position=adjacent,
-                cell_index=cells,
-                resource_values=resource_values,
-                width=width,
-                height=height,
-                credits_map=layers.credits_map,
-                energy_map=layers.energy_map,
-            )
-            add_target(adjacent, weight=adjacent_cluster + wall_weight)
-
-    for wall in state.map.walls:
-        if _cell_target_already_siphoned(wall):
-            continue
-        has_prog = bool(wall.prog_id is not None and wall.prog_id > 0)
-        points_total = max(int(wall.points), 0)
-        if not has_prog and points_total <= 0:
-            continue
-        wall_weight = points_total + (25 if has_prog else 0)
-        for adjacent in _adjacent_positions(wall.position):
-            adjacent_cluster = _credit_energy_cluster_total(
-                position=adjacent,
-                cell_index=cells,
-                resource_values=resource_values,
-                width=width,
-                height=height,
-                credits_map=layers.credits_map,
-                energy_map=layers.energy_map,
-            )
-            add_target(adjacent, weight=adjacent_cluster + wall_weight)
-
-    ordered = sorted(
-        weighted_targets.items(),
-        key=lambda item: (-item[1], item[0].y, item[0].x),
-    )
-    return tuple(position for position, _ in ordered)
 
 
 class HybridCoordinator:
@@ -441,28 +206,23 @@ class HybridCoordinator:
             state=state,
             targets=tuple(state.map.siphons) if state.map.status == "ok" else (),
         )
-        phase_one_hot = (
-            1.0 if scripted_phase == ObjectivePhase.COLLECT_SIPHONS else 0.0,
-            1.0 if scripted_phase == ObjectivePhase.COLLECT_RESOURCES_PROGS_POINTS else 0.0,
-            1.0 if scripted_phase == ObjectivePhase.EXIT_SECTOR else 0.0,
-        )
-        features = (
-            health / 10.0,
-            energy / 10.0,
-            currency / 25.0,
-            score / 500.0,
-            sector / 8.0,
-            siphons / 6.0,
-            enemies / 8.0,
-            resource_count / 12.0,
-            exit_known,
-            self._normalized_distance(objective_distance),
-            self._normalized_distance(nearest_enemy),
-            self._normalized_distance(nearest_siphon),
-            float(len(state.inventory.raw_prog_ids[:10])) / 10.0,
-            *phase_one_hot,
-            1.0 if (state.can_siphon_now is True) else 0.0,
-            1.0 if state.map.status == "ok" else 0.0,
+        features = build_meta_feature_vector(
+            health=health,
+            energy=energy,
+            currency=currency,
+            score=score,
+            sector=sector,
+            siphons=siphons,
+            enemies=enemies,
+            resource_count=resource_count,
+            exit_known=bool(exit_known),
+            objective_distance=objective_distance,
+            nearest_enemy=nearest_enemy,
+            nearest_siphon=nearest_siphon,
+            prog_count=len(state.inventory.raw_prog_ids[:10]),
+            scripted_phase=scripted_phase,
+            can_siphon_now=state.can_siphon_now is True,
+            map_ok=state.map.status == "ok",
         )
         return self._fit_size(features, target_size=self.meta_controller.feature_count)
 
@@ -478,7 +238,6 @@ class HybridCoordinator:
         enemies = float(_count_enemies(state))
         nearest_enemy = self.nearest_enemy_distance(state)
         threatened = self.is_threat_active(state)
-        action_one_hot = tuple(1.0 if route_action == action else 0.0 for action in _MOVE_ACTIONS)
         route_risk = self._risk_for_action(state=state, action=route_action)
         current_risk = estimate_position_risk(
             state=state,
@@ -490,24 +249,23 @@ class HybridCoordinator:
             position=state.map.player_position if state.map.status == "ok" else None,
         )
         combat_readiness = self._combat_readiness_score(state)
-        features = (
-            health / 10.0,
-            energy / 10.0,
-            enemies / 8.0,
-            self._normalized_distance(nearest_enemy),
-            self._normalized_distance(objective_distance),
-            1.0 if threatened else 0.0,
-            *action_one_hot,
-            1.0 if "wait" in (state.extra_fields.keys()) else 0.0,
-            1.0 if state.map.status == "ok" else 0.0,
-            float(len(state.inventory.raw_prog_ids[:10])) / 10.0,
-            1.0 if state.can_siphon_now is True else 0.0,
-            1.0 if route_risk.immediate_damage else 0.0,
-            self._normalized_distance(route_risk.nearest_enemy_distance_after_one_turn),
-            min(float(route_risk.horizon_damage_steps) / 3.0, 1.0),
-            min(float(siphon_spawn_cost) / 6.0, 1.0),
-            1.0 if current_risk.immediate_damage else 0.0,
-            combat_readiness,
+        features = build_threat_feature_vector(
+            health=health,
+            energy=energy,
+            enemies=enemies,
+            nearest_enemy=nearest_enemy,
+            objective_distance=objective_distance,
+            threatened=threatened,
+            route_action=route_action,
+            route_risk=route_risk,
+            wait_action_visible="wait" in state.extra_fields,
+            map_ok=state.map.status == "ok",
+            prog_count=len(state.inventory.raw_prog_ids[:10]),
+            can_siphon_now=state.can_siphon_now is True,
+            siphon_spawn_cost=int(siphon_spawn_cost),
+            current_risk=current_risk,
+            combat_readiness=combat_readiness,
+            move_actions=_MOVE_ACTIONS,
         )
         return self._fit_size(features, target_size=self.threat_controller.feature_count)
 
@@ -920,7 +678,7 @@ class HybridCoordinator:
         layers = state.map.layers
         total = _credit_energy_cluster_total(
             position=position,
-            cell_index=cells,
+            cell_index_map=cells,
             resource_values=resource_values,
             width=state.map.width,
             height=state.map.height,

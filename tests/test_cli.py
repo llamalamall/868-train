@@ -43,20 +43,6 @@ def test_master_cli_dispatches_bootstrap(monkeypatch) -> None:
     assert captured == [("app_main", [])]
 
 
-def test_master_cli_dispatches_run_dqn_with_passthrough(monkeypatch) -> None:
-    captured: list[tuple[str, list[str]]] = []
-    _install_stub(monkeypatch, "src.cli.dqn_runner_main", captured)
-
-    cli.main(["run-dqn", "--mode", "eval", "--checkpoint", "artifacts\\checkpoints\\dqn.json"])
-
-    assert captured == [
-        (
-            "dqn_runner_main",
-            ["--mode", "eval", "--checkpoint", "artifacts\\checkpoints\\dqn.json"],
-        )
-    ]
-
-
 def test_master_cli_dispatches_run_hybrid_with_passthrough(monkeypatch) -> None:
     captured: list[tuple[str, list[str]]] = []
     _install_stub(monkeypatch, "src.cli.hybrid_runner_main", captured)
@@ -66,46 +52,13 @@ def test_master_cli_dispatches_run_hybrid_with_passthrough(monkeypatch) -> None:
     assert captured == [("hybrid_runner_main", ["movement-test", "--episodes", "2", "--max-steps", "80"])]
 
 
-def test_master_cli_dispatches_evaluate_with_passthrough(monkeypatch) -> None:
+def test_master_cli_dispatches_hybrid_gui(monkeypatch) -> None:
     captured: list[tuple[str, list[str]]] = []
-    _install_stub(monkeypatch, "src.cli.evaluate_main", captured)
+    _install_stub(monkeypatch, "src.cli.hybrid_gui_main", captured)
 
-    cli.main(
-        [
-            "evaluate",
-            "compare",
-            "--checkpoint-a",
-            "artifacts\\checkpoints\\a.json",
-            "--checkpoint-b",
-            "artifacts\\checkpoints\\b.json",
-            "--episodes",
-            "4",
-        ]
-    )
+    cli.main(["hybrid-gui"])
 
-    assert captured == [
-        (
-            "evaluate_main",
-            [
-                "compare",
-                "--checkpoint-a",
-                "artifacts\\checkpoints\\a.json",
-                "--checkpoint-b",
-                "artifacts\\checkpoints\\b.json",
-                "--episodes",
-                "4",
-            ],
-        )
-    ]
-
-
-def test_master_cli_dispatches_dqn_gui(monkeypatch) -> None:
-    captured: list[tuple[str, list[str]]] = []
-    _install_stub(monkeypatch, "src.cli.dqn_gui_main", captured)
-
-    cli.main(["dqn-gui"])
-
-    assert captured == [("dqn_gui_main", [])]
+    assert captured == [("hybrid_gui_main", [])]
 
 
 def test_master_cli_dispatches_victory_monitor_with_passthrough(monkeypatch) -> None:

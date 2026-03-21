@@ -5,36 +5,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from src.controller.action_api import ActionConfig
 from src.env.game_env import GameEnv, GameEnvConfig
+from src.env.runner_common import build_action_config
 from src.state.schema import GameStateSnapshot, GridPosition
 
-_WASD_KEY_CODES = {
-    "W": 0x57,
-    "A": 0x41,
-    "S": 0x53,
-    "D": 0x44,
-}
-
-_NUMPAD_KEY_CODES = {
-    "NUMPAD2": 0x62,
-    "NUMPAD4": 0x64,
-    "NUMPAD6": 0x66,
-    "NUMPAD8": 0x68,
-}
-
-_PROG_SLOT_ACTION_BINDINGS = {
-    "prog_slot_1": "1",
-    "prog_slot_2": "2",
-    "prog_slot_3": "3",
-    "prog_slot_4": "4",
-    "prog_slot_5": "5",
-    "prog_slot_6": "6",
-    "prog_slot_7": "7",
-    "prog_slot_8": "8",
-    "prog_slot_9": "9",
-    "prog_slot_10": "0",
-}
 _SIPHON_REACH_DELTAS: tuple[tuple[int, int], ...] = (
     (0, 0),
     (0, 1),
@@ -71,60 +45,6 @@ def _hybrid_resource_siphon_available(snapshot: GameStateSnapshot | None) -> boo
         return False
     nearby = _siphon_candidates_near_player(snapshot.map.player_position)
     return any(siphon in nearby for siphon in snapshot.map.siphons)
-
-
-def _build_action_config(
-    movement_keys: str,
-    *,
-    include_prog_actions: bool,
-    siphon_key: str,
-) -> ActionConfig:
-    default_config = ActionConfig()
-    bindings = dict(default_config.action_key_bindings)
-    key_codes = dict(default_config.key_codes)
-
-    normalized_siphon_key = str(siphon_key).strip().lower()
-    if normalized_siphon_key not in {"space", "z"}:
-        raise ValueError("siphon_key must be one of: space, z.")
-    bindings["space"] = "SPACE" if normalized_siphon_key == "space" else "Z"
-
-    if movement_keys == "wasd":
-        bindings.update(
-            {
-                "move_up": "W",
-                "move_down": "S",
-                "move_left": "A",
-                "move_right": "D",
-            }
-        )
-        key_codes.update(_WASD_KEY_CODES)
-    elif movement_keys == "numpad":
-        bindings.update(
-            {
-                "move_up": "NUMPAD8",
-                "move_down": "NUMPAD2",
-                "move_left": "NUMPAD4",
-                "move_right": "NUMPAD6",
-            }
-        )
-        key_codes.update(_NUMPAD_KEY_CODES)
-    elif movement_keys != "arrows":
-        raise ValueError("movement_keys must be one of: arrows, wasd, numpad.")
-
-    if include_prog_actions:
-        bindings.update(_PROG_SLOT_ACTION_BINDINGS)
-    else:
-        bindings = {
-            action_name: key_name
-            for action_name, key_name in bindings.items()
-            if not action_name.startswith("prog_slot_")
-        }
-
-    return ActionConfig(
-        action_key_bindings=bindings,
-        key_codes=key_codes,
-        timings=default_config.timings,
-    )
 
 
 @dataclass(frozen=True)
@@ -226,7 +146,7 @@ class HybridLiveEnv:
         no_enemies_mode: bool,
         pre_reset_hook: Callable[[], None] | None = None,
     ) -> HybridLiveEnv:
-        action_config = _build_action_config(
+        action_config = build_action_config(
             movement_keys,
             include_prog_actions=include_prog_actions,
             siphon_key=siphon_key,

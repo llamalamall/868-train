@@ -116,7 +116,9 @@ def test_hybrid_env_exposes_attached_pid_and_runtime_callback_proxy() -> None:
         attached_pid=4242,
     )
     env = HybridLiveEnv(game_env=game_env, no_enemies_mode=True)
-    callback = lambda pid: pid
+
+    def callback(pid: int) -> int:
+        return pid
 
     env.add_runtime_binding_callback(callback)
 

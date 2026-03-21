@@ -1,64 +1,59 @@
 # Codex Development Rules for 868-Train
 
 ## 1) Primary Objective
-- Build the bot in the order defined by [TASKS.md](/c:/Users/John White/868-train/TASKS.md).
-- Prioritize reliability and observability over feature breadth.
+
+- Build and maintain the project as a Hybrid-first training stack.
+- Prioritize reliability, observability, and maintainability over feature breadth.
 - Treat one pinned binary version as the only supported runtime target.
 
-## 2) Task-Order Discipline
-- Do not skip ahead across milestone gates.
-- Complete tasks in sequence unless a dependency issue forces a small prerequisite change.
-- For each task: implement, run local checks, verify acceptance criteria, then move on.
-- Use task-scoped commits: `feat(task-XX): <short description>`.
+## 2) Architecture Boundaries
 
-## 3) Architecture Boundaries (Keep Layers CAlean)
 - `src/controller`: input and window control only.
-- `src/memory`: process attach/read/pointer resolution only.
+- `src/memory`: process attach, read, pointer resolution, and debugger-style monitoring only.
 - `src/state`: decode and normalize memory into typed snapshots.
-- `src/env`: orchestrate control + state into `reset()`/`step()`.
-- `src/training` and `src/agent`: policies, rewarding, loops, eval.
-- `src/telemetry`: structured episode/step logging and KPIs.
-- Never mix OS calls, policy logic, and state decoding in one module.
+- `src/env`: runtime environment wrappers and shared runner helpers.
+- `src/hybrid`: Hybrid decision-making, rollout flow, checkpointing, and reward logic.
+- `src/training`: baseline rollout helpers and reward shaping only.
+- `src/telemetry`: structured episode and step diagnostics.
 
-## 4) Existing Code Contracts to Preserve
-- Use typed dataclasses for state/config/result payloads.
-- Keep explicit machine-readable errors (`code`, message, metadata).
-- Prefer result objects (`ReadResult`, `PointerChainResult`) over uncaught exceptions in core loops.
-- Validate inputs early (`retries`, intervals, offsets, address ranges).
-- Keep Windows-specific implementation behind protocol-style backends.
+## 3) Hybrid-First Surface Rules
 
-## 5) State/Offsets Rules
-- `offsets.json` entries must be schema-valid and include confidence + notes.
-- Normalize confidence to `low|medium|high` and keep notes actionable.
-- Preserve extractor field naming expectations (`player_health`, `player_energy`, `player_credits`, `fail_state`, `run_active`, `collected_progs`) unless extractor is updated in the same change.
-- For unknown inventory/prog IDs: preserve them in output; never drop silently.
+- Do not add standalone DQN entrypoints, checkpoint formats, or docs back into the repo.
+- Legacy algorithm names are only allowed when they describe the Hybrid internals themselves, such as `MetaControllerDQN` and `ThreatControllerDRQN`.
+- Public runnable surfaces must stay aligned with the current Hybrid-first CLI:
+  - `run-hybrid`
+  - `hybrid-gui`
+  - `run-random`
+  - `run-heuristic`
+  - monitoring/bootstrap tools
 
-## 6) Testing Requirements
-- Every new non-trivial function needs tests.
-- Follow existing test style: fake backends, deterministic inputs, no live game dependency.
-- Cover both success and failure paths (attach failures, read failures, invalid config, null pointers, retries exhausted).
-- Maintain deterministic behavior by injecting `sleep`, `time`, and timestamp hooks where needed.
+## 4) Shared Helper Rules
 
-## 7) Logging and Diagnostics
-- Log key transitions with structured context (action, pid/hwnd, address, attempt, reason).
-- Fail with actionable errors (what failed, where, and likely recovery action).
-- Runtime helper tools (smoke test/TUI) may degrade gracefully, but core contracts should remain strict.
+- Duplicated runner helpers must live in one shared module.
+- Do not copy save-restore helpers, action-map builders, game-tick argument validators, or monitor-formatting helpers across runners.
+- Prefer pure helper modules for reusable Hybrid calculations such as objective planning, feature encoding, and state deltas.
 
-## 8) Platform and Safety Rules
-- Windows-first is acceptable, but keep OS-specific code isolated behind interfaces.
-- Avoid hard crashes for expected runtime instability (window lost, short reads, null pointers); return structured failure and allow caller recovery.
-- Any recovery/retry loop must have bounded retries and explicit timeout semantics.
+## 5) Change Coupling Rules
 
-## 9) Anti-Regression Rules
-- Do not break startup guards in [src/app.py](/c:/Users/John White/868-train/src/app.py): fingerprint and offsets validation remain mandatory.
-- Avoid duplicating low-level memory decode logic; reuse shared primitives when extending tools.
-- When introducing new task-era modules (`env`, `training`, `telemetry`, `agent`), define clear interfaces first, then integrate incrementally with tests.
+- Any CLI surface change must update `src/cli.py`, `README.md`, GUI exposure, and tests in the same change.
+- Any Hybrid workflow flag change must update parser tests and GUI argument exposure in the same change.
+- Any checkpoint schema change must update load/save tests in the same change.
 
-## 10) Definition of Done for Future Tasks
-- Acceptance criteria from `TASKS.md` are met and demonstrated.
-- Unit tests added/updated and passing locally.
-- Public interfaces are typed and documented via concise docstrings.
-- Failure modes are explicit and observable in logs or structured results.
-- If a change adds/removes/renames runnable tools, update both `src/cli.py` (master CLI commands/help) and `README.md` in the same change.
-- Each agent module in `src/agent` must have a corresponding agent README describing behavior/config/failure modes; create it when adding a new agent and update it whenever that agent changes.
-- If DQN runner/evaluation CLI arguments change (`src/env/dqn_policy_runner.py` or `src/training/evaluate.py`), verify [src/gui/dqn_runner_gui.py](/c:/Users/John White/868-train/src/gui/dqn_runner_gui.py) still exposes those arguments correctly (including type-appropriate widgets) and update GUI-related tests/docs in the same change.
+## 6) Size and Refactor Thresholds
+
+- Do not add new behavior to runner or GUI files already above roughly 600 lines without extracting helpers first.
+- Do not add new behavior to classes already above roughly 300 lines without extracting helpers first.
+- If the same pure helper block appears in more than one module, extract it before extending it.
+
+## 7) Testing Requirements
+
+- Every non-trivial new function needs tests.
+- Use deterministic fake environments and fake backends where possible.
+- Cover success and failure paths.
+- Keep tests independent of the live game process unless the command is explicitly a manual runtime tool.
+
+## 8) Documentation Hygiene
+
+- Runtime docs must describe only supported surfaces.
+- Temporary rollout notes must be updated or retired when architecture direction changes.
+- Do not leave stale file names, commands, or examples in repo docs after a cleanup.

@@ -10,18 +10,20 @@ from typing import Any
 
 from src.agent.baseline_heuristic import HeuristicBaselineAgent, HeuristicBaselineConfig
 from src.env.game_env import GameEnv, GameEnvConfig
+from src.env.runner_common import (
+    build_action_config,
+    default_game_save_target_path,
+    resolve_restore_save_source_path,
+    restore_selected_save_file,
+)
 from src.env.random_policy_runner import (
-    _default_game_save_target_path,
-    _build_action_config,
     _build_reward_config,
     _build_reward_fn,
-    _resolve_restore_save_source_path,
-    _restore_selected_save_file,
     format_reward_breakdown_line,
 )
 from src.env.runner_tui import RunnerTuiSession
+from src.training.rollouts import run_agent_policy
 from src.training.rewards import RewardWeights
-from src.training.train import run_agent_policy
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -319,7 +321,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if float(args.restore_save_delay) < 0:
         parser.error("--restore-save-delay must be >= 0.")
-    restore_source = _resolve_restore_save_source_path(args)
+    restore_source = resolve_restore_save_source_path(args)
     if restore_source is not None:
         if not restore_source.exists():
             parser.error(f"--restore-save-file not found: {restore_source}.")
@@ -351,10 +353,10 @@ def main() -> None:
         reward_config=reward_config,
         print_breakdown=bool(args.print_reward_breakdown),
     )
-    restore_save_source = _resolve_restore_save_source_path(args)
+    restore_save_source = resolve_restore_save_source_path(args)
     restore_save_delay_seconds = max(float(args.restore_save_delay), 0.0)
     restore_save_target = (
-        _default_game_save_target_path()
+        default_game_save_target_path()
         if restore_save_source is not None
         else None
     )
@@ -370,7 +372,7 @@ def main() -> None:
     def _restore_save_before_reset() -> None:
         if restore_save_source is None or restore_save_target is None:
             return
-        _restore_selected_save_file(
+        restore_selected_save_file(
             source_path=restore_save_source,
             target_path=restore_save_target,
         )
@@ -409,7 +411,7 @@ def main() -> None:
             launch_process_if_missing=bool(args.launch_exe),
             focus_window_on_attach=bool(args.focus_window),
             window_targeted_input=effective_window_input,
-            action_config=_build_action_config(
+            action_config=build_action_config(
                 args.movement_keys,
                 include_prog_actions=bool(args.prog_actions),
             ),
