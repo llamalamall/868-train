@@ -3,146 +3,21 @@
 from __future__ import annotations
 
 import argparse
-import os
-import shutil
 import time
-from pathlib import Path
-from typing import Any
 from statistics import mean
+from typing import Any
 
-from src.controller.action_api import ActionConfig
 from src.env.game_env import GameEnv, GameEnvConfig, RewardFunction, run_random_policy
+from src.env.runner_common import (
+    build_action_config,
+    default_game_save_target_path,
+    game_tick_ms_arg,
+    resolve_restore_save_source_path,
+    restore_selected_save_file,
+)
 from src.env.runner_tui import RunnerTuiSession
 from src.state.schema import GameStateSnapshot
 from src.training.rewards import RewardConfig, RewardWeights, compute_reward
-
-_WASD_KEY_CODES = {
-    "W": 0x57,
-    "A": 0x41,
-    "S": 0x53,
-    "D": 0x44,
-}
-
-_NUMPAD_KEY_CODES = {
-    "NUMPAD2": 0x62,
-    "NUMPAD4": 0x64,
-    "NUMPAD6": 0x66,
-    "NUMPAD8": 0x68,
-}
-_PROG_SLOT_ACTION_BINDINGS = {
-    "prog_slot_1": "1",
-    "prog_slot_2": "2",
-    "prog_slot_3": "3",
-    "prog_slot_4": "4",
-    "prog_slot_5": "5",
-    "prog_slot_6": "6",
-    "prog_slot_7": "7",
-    "prog_slot_8": "8",
-    "prog_slot_9": "9",
-    "prog_slot_10": "0",
-}
-
-_APP_SAVE_FOLDER_NAME = "868-HACK"
-_APP_SAVE_FILE_NAME = "savegame_868"
-
-
-def _default_game_save_target_path() -> Path:
-    appdata = os.environ.get("APPDATA")
-    if appdata:
-        return Path(appdata) / _APP_SAVE_FOLDER_NAME / _APP_SAVE_FILE_NAME
-    return Path.home() / "AppData" / "Roaming" / _APP_SAVE_FOLDER_NAME / _APP_SAVE_FILE_NAME
-
-
-def _resolve_restore_save_source_path(args: argparse.Namespace) -> Path | None:
-    if not args.restore_save_file:
-        return None
-    return Path(str(args.restore_save_file)).expanduser().resolve()
-
-
-def _restore_selected_save_file(*, source_path: Path, target_path: Path) -> None:
-    source = source_path.expanduser().resolve()
-    if not source.exists():
-        raise FileNotFoundError(f"Selected restore save file does not exist: {source}")
-    if not source.is_file():
-        raise IsADirectoryError(f"Selected restore save file must be a file: {source}")
-
-    target = target_path.expanduser()
-    target.parent.mkdir(parents=True, exist_ok=True)
-
-    if target.exists():
-        try:
-            if source.samefile(target):
-                return
-        except OSError:
-            pass
-
-    shutil.copy2(source, target)
-
-
-def _game_tick_ms_arg(value: str) -> int:
-    try:
-        parsed = int(value)
-    except ValueError as error:  # pragma: no cover - argparse emits user-facing error.
-        raise argparse.ArgumentTypeError("game tick must be an integer.") from error
-    if parsed < 1 or parsed > 16:
-        raise argparse.ArgumentTypeError("game tick ms must be between 1 and 16.")
-    return parsed
-
-
-def _build_action_config(
-    movement_keys: str,
-    *,
-    include_prog_actions: bool = True,
-    siphon_key: str = "space",
-) -> ActionConfig:
-    default_config = ActionConfig()
-    bindings = dict(default_config.action_key_bindings)
-    key_codes = dict(default_config.key_codes)
-    normalized_siphon_key = str(siphon_key).strip().lower()
-    if normalized_siphon_key not in {"space", "z"}:
-        raise ValueError("siphon_key must be one of: space, z.")
-    bindings["space"] = "SPACE" if normalized_siphon_key == "space" else "Z"
-
-    if movement_keys == "wasd":
-        bindings.update(
-            {
-                "move_up": "W",
-                "move_down": "S",
-                "move_left": "A",
-                "move_right": "D",
-            }
-        )
-        key_codes.update(_WASD_KEY_CODES)
-    elif movement_keys == "numpad":
-        bindings.update(
-            {
-                "move_up": "NUMPAD8",
-                "move_down": "NUMPAD2",
-                "move_left": "NUMPAD4",
-                "move_right": "NUMPAD6",
-            }
-        )
-        key_codes.update(_NUMPAD_KEY_CODES)
-    elif movement_keys != "arrows":
-        raise ValueError(
-            "movement_keys must be one of: arrows, wasd, numpad."
-        )
-
-    if include_prog_actions:
-        bindings.update(_PROG_SLOT_ACTION_BINDINGS)
-    else:
-        bindings = {
-            action_name: key_name
-            for action_name, key_name in bindings.items()
-            if not action_name.startswith("prog_slot_")
-        }
-
-    return ActionConfig(
-        action_key_bindings=bindings,
-        key_codes=key_codes,
-        timings=default_config.timings,
-    )
-
 
 def _build_reward_config(args: argparse.Namespace) -> RewardConfig:
     return RewardConfig(
@@ -400,7 +275,7 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--game-tick-ms",
-        type=_game_tick_ms_arg,
+        type=game_tick_ms_arg,
         default=16,
         help="Target game loop tick size in milliseconds (1..16). Lower values speed up gameplay.",
     )
@@ -596,7 +471,7 @@ def _build_parser() -> argparse.ArgumentParser:
 def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if float(args.restore_save_delay) < 0:
         parser.error("--restore-save-delay must be >= 0.")
-    restore_source = _resolve_restore_save_source_path(args)
+    restore_source = resolve_restore_save_source_path(args)
     if restore_source is not None:
         if not restore_source.exists():
             parser.error(f"--restore-save-file not found: {restore_source}.")
@@ -634,7 +509,7 @@ def main() -> None:
         prog_slot_backoff_steps=max(int(args.prog_backoff_steps), 0),
         require_non_terminal_on_reset=bool(args.require_non_terminal_reset),
     )
-    action_config = _build_action_config(
+    action_config = build_action_config(
         args.movement_keys,
         include_prog_actions=bool(args.prog_actions),
     )
@@ -643,10 +518,10 @@ def main() -> None:
         reward_config=reward_config,
         print_breakdown=bool(args.print_reward_breakdown),
     )
-    restore_save_source = _resolve_restore_save_source_path(args)
+    restore_save_source = resolve_restore_save_source_path(args)
     restore_save_delay_seconds = max(float(args.restore_save_delay), 0.0)
     restore_save_target = (
-        _default_game_save_target_path()
+        default_game_save_target_path()
         if restore_save_source is not None
         else None
     )
@@ -662,7 +537,7 @@ def main() -> None:
     def _restore_save_before_reset() -> None:
         if restore_save_source is None or restore_save_target is None:
             return
-        _restore_selected_save_file(
+        restore_selected_save_file(
             source_path=restore_save_source,
             target_path=restore_save_target,
         )

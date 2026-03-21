@@ -272,7 +272,7 @@ def test_wait_for_step_gate_does_not_override_action_line_while_waiting(tmp_path
         def _wait() -> None:
             session.wait_for_step_gate(
                 training_line="episode=1 step=1",
-                action_line="action=move_up reason=dqn_select_action",
+                action_line="action=move_up reason=hybrid_select_action",
             )
             done.set()
 
@@ -282,7 +282,7 @@ def test_wait_for_step_gate_does_not_override_action_line_while_waiting(tmp_path
         assert not done.is_set()
 
         payload = json.loads(status_file.read_text(encoding="utf-8"))
-        assert payload["action_line"] == "action=move_up reason=dqn_select_action"
+        assert payload["action_line"] == "action=move_up reason=hybrid_select_action"
         assert "waiting_for_step" not in payload["action_line"]
 
         control_file.write_text(

@@ -7,8 +7,8 @@ from dataclasses import dataclass
 from src.agent.baseline_heuristic import HeuristicBaselineAgent
 from src.agent.baseline_random import RandomBaselineAgent
 from src.state.schema import FieldState, GameStateSnapshot, GridPosition, MapState
-from src.training.evaluate import compare_baselines
-from src.training.train import run_agent_policy
+from src.training.baselines import compare_baselines
+from src.training.rollouts import run_agent_policy
 
 
 def _field(value: object) -> FieldState:

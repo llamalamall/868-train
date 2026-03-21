@@ -1,15 +1,13 @@
-"""Simple Tkinter launcher for DQN and hybrid run/evaluation workflows."""
+"""Simple Tkinter launcher for Hybrid run and evaluation workflows."""
 
 from __future__ import annotations
 
 import argparse
-import ctypes
 import json
 import math
 import os
 import queue
 import re
-import shlex
 import subprocess
 import sys
 import tempfile
@@ -17,13 +15,40 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import dataclass
-from datetime import datetime, timezone
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Callable
 
-from src.env import dqn_policy_runner
-from src.env.runner_tui import ACTIVE_RUNNER_SESSION_FILE
+from src.gui.hybrid_presets import (
+    AUTO_LATEST_BETA_META_CHECKPOINT as _PRESET_AUTO_LATEST_BETA_META_CHECKPOINT,
+    HYBRID_CHECKPOINT_DIR as _PRESET_HYBRID_CHECKPOINT_DIR,
+    APPDATA_GAME_SAVE_DIR as _PRESET_APPDATA_GAME_SAVE_DIR,
+    REPO_ROOT as _PRESET_REPO_ROOT,
+    initial_browse_dir as _initial_browse_dir_impl,
+    latest_completed_meta_checkpoint as _latest_completed_meta_checkpoint_impl,
+    resolve_preset_overrides as _resolve_preset_overrides_impl,
+    run_hybrid_preset_overrides as _run_hybrid_preset_overrides_impl,
+)
+from src.gui.monitor_binding import (
+    discover_live_monitor_session_binding as _discover_live_monitor_session_binding,
+    estimate_epsilon_eta_seconds as _estimate_epsilon_eta_seconds,
+    format_duration_seconds as _format_duration_seconds,
+    format_epsilon_progress_text as _format_epsilon_progress_text,
+    format_phase_breakdown_tooltip as _format_phase_breakdown_tooltip,
+    format_reward_breakdown_tooltip as _format_reward_breakdown_tooltip,
+    is_live_monitor_runner_module as _is_live_monitor_runner_module_impl,
+    list_running_python_processes as _list_running_python_processes,
+    load_active_runner_session_binding as _load_active_runner_session_binding,
+    load_live_monitor_binding_from_status_file as _load_live_monitor_binding_from_status_file,
+    monitor_action_card_values as _monitor_action_card_values,
+    monitor_key_label_for_action as _monitor_key_label_for_action,
+    parse_bool_value as _parse_bool_value,
+    parse_episode_progress as _parse_episode_progress,
+    parse_next_available_actions as _parse_next_available_actions,
+    parse_status_values as _parse_status_values,
+    parse_step_value as _parse_step_value,
+    resolve_reward_metric_value as _resolve_reward_metric_value,
+)
 from src.hybrid import runner as hybrid_runner
 from src.memory.state_monitor_tui import (
     CONTROL_MODE_AUTO,
@@ -34,42 +59,23 @@ from src.memory.state_monitor_tui import (
     set_external_control_mode,
     step_external_control,
 )
-from src.training import evaluate
-from src.training.rewards import RewardWeights
 
-_REPO_ROOT = Path(__file__).resolve().parents[2]
+_REPO_ROOT = _PRESET_REPO_ROOT
 _PATH_LIKE_DESTS = {
     "exe",
     "checkpoint",
-    "checkpoint_a",
-    "checkpoint_b",
     "checkpoint_root",
     "resume_checkpoint",
     "warmstart_checkpoint",
-    "json_out",
     "restore_save_file",
 }
 _HIDDEN_GUI_DESTS = {"external_status_file", "external_control_file"}
 _MAX_FORM_COLUMNS = 5
-_CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "checkpoints"
-_HYBRID_CHECKPOINT_DIR = _REPO_ROOT / "artifacts" / "hybrid"
-_APPDATA_GAME_SAVE_DIR = (
-    Path(os.environ["APPDATA"]) / "868-hack"
-    if os.environ.get("APPDATA")
-    else None
-)
-_STATUS_KV_PATTERN = re.compile(r"([a-zA-Z0-9_]+)=([^\s]+)")
-_TEXTUAL_MARKUP_PATTERN = re.compile(r"\[[^\]]+\]")
+_HYBRID_CHECKPOINT_DIR = _PRESET_HYBRID_CHECKPOINT_DIR
+_APPDATA_GAME_SAVE_DIR = _PRESET_APPDATA_GAME_SAVE_DIR
 _TEXTUAL_MARKUP_SEGMENT_PATTERN = re.compile(r"\[([a-zA-Z0-9_]+)\](.*?)\[/\]", re.DOTALL)
 _REWARD_HISTORY_LIMIT = 500
-_AUTO_LATEST_BETA_META_CHECKPOINT = "__AUTO_LATEST_BETA_META_CHECKPOINT__"
-_LIVE_MONITOR_RUNNER_MODULES = {
-    "src.env.dqn_policy_runner",
-    "src.env.heuristic_policy_runner",
-    "src.env.random_policy_runner",
-    "src.hybrid.runner",
-}
-_LIVE_MONITOR_TUI_MODULE = "src.memory.state_monitor_tui"
+_AUTO_LATEST_BETA_META_CHECKPOINT = _PRESET_AUTO_LATEST_BETA_META_CHECKPOINT
 _MONITOR_KEY_LABELS: tuple[str, ...] = (
     "1",
     "2",
@@ -87,23 +93,6 @@ _MONITOR_KEY_LABELS: tuple[str, ...] = (
     "RIGHT",
     "SPACE",
 )
-_MONITOR_ACTION_TO_KEY_LABEL = {
-    "move_up": "UP",
-    "move_left": "LEFT",
-    "move_down": "DOWN",
-    "move_right": "RIGHT",
-    "space": "SPACE",
-    "prog_slot_1": "1",
-    "prog_slot_2": "2",
-    "prog_slot_3": "3",
-    "prog_slot_4": "4",
-    "prog_slot_5": "5",
-    "prog_slot_6": "6",
-    "prog_slot_7": "7",
-    "prog_slot_8": "8",
-    "prog_slot_9": "9",
-    "prog_slot_10": "0",
-}
 _PALETTE = {
     "bg": "#0b0f14",
     "surface": "#121922",
@@ -276,401 +265,28 @@ def _widget_width_for_action(action: argparse.Action) -> int:
 
 
 def _initial_browse_dir(*, dest: str, current_value: str) -> Path:
-    if current_value:
-        current_path = Path(current_value)
-        if current_path.suffix:
-            return current_path.parent
-        return current_path
-    if dest in {"checkpoint", "checkpoint_a", "checkpoint_b", "json_out"}:
-        return _CHECKPOINT_DIR
-    if dest in {"checkpoint_root", "resume_checkpoint", "warmstart_checkpoint"}:
-        return _HYBRID_CHECKPOINT_DIR
-    if (
-        dest == "restore_save_file"
-        and _APPDATA_GAME_SAVE_DIR is not None
-        and _APPDATA_GAME_SAVE_DIR.exists()
-    ):
-        return _APPDATA_GAME_SAVE_DIR
-    return _REPO_ROOT
-
-
-_SMOKE_TEST_REWARD_DESTS: tuple[str, ...] = (
-    "reward_survival",
-    "reward_step_penalty",
-    "reward_health_delta",
-    "reward_currency_delta",
-    "reward_energy_delta",
-    "reward_score_delta",
-    "reward_siphon_collected",
-    "reward_enemy_damaged",
-    "reward_enemy_cleared",
-    "reward_phase_progress",
-    "reward_backtrack_penalty",
-    "reward_map_clear_bonus",
-    "reward_premature_exit_penalty",
-    "reward_invalid_action_penalty",
-    "reward_fail_penalty",
-    "reward_safe_tile_bonus",
-    "reward_danger_tile_penalty",
-    "reward_resource_proximity",
-    "reward_prog_collected_base",
-    "reward_points_collected",
-    "reward_damage_taken_penalty",
-)
-
-
-def _build_smoke_test_reward_profile(**active_rewards: float) -> dict[str, object]:
-    profile: dict[str, object] = {"episodes": 5}
-    for reward_dest in _SMOKE_TEST_REWARD_DESTS:
-        profile[reward_dest] = 0.0
-    profile.update({dest: float(value) for dest, value in active_rewards.items()})
-    return profile
-
-
-def _run_dqn_preset_overrides() -> dict[str, dict[str, object]]:
-    default_weights = RewardWeights()
-    return {
-        "defaults": {},
-        "reward survival": {
-            "reward_survival": 0.25,
-            "reward_step_penalty": 0.005,
-            "reward_fail_penalty": 3.0,
-            "reward_danger_tile_penalty": 0.15,
-            "reward_safe_tile_bonus": 0.05,
-        },
-        "reward exploration": {
-            "reward_survival": 0.05,
-            "reward_step_penalty": 0.003,
-            "reward_currency_delta": 0.03,
-            "reward_score_delta": 0.003,
-            "reward_resource_proximity": 0.08,
-            "reward_points_collected": 0.004,
-            "reward_phase_progress": 0.2,
-        },
-        "phase progression (no enemies)": {
-            "mode": "train",
-            "no_enemies": True,
-            "episodes": 250,
-            "reward_enemy_damaged": 0.0,
-            "reward_enemy_cleared": 0.0,
-            "reward_phase_progress": 0.8,
-            "reward_backtrack_penalty": 0.8,
-            "reward_sector_advance": 1.5,
-            "reward_resource_proximity": 0.02,
-        },
-        "smoke test - siphon objective": _build_smoke_test_reward_profile(
-            reward_siphon_collected=default_weights.siphon_collected,
-        ),
-        "smoke test - enemy objective": _build_smoke_test_reward_profile(
-            reward_enemy_cleared=default_weights.enemy_cleared,
-        ),
-        "smoke test - exit objective": _build_smoke_test_reward_profile(
-            reward_map_clear_bonus=default_weights.map_clear_bonus,
-        ),
-    }
+    return _initial_browse_dir_impl(dest=dest, current_value=current_value)
 
 
 def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, object]]:
-    if command_name == "movement-test":
-        return {
-            "defaults": {},
-            "gate a smoke": {
-                "episodes": 3,
-                "max_steps": 180,
-                "no_enemies": True,
-                "threat_trigger_distance": 2,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-            "long route validation": {
-                "episodes": 10,
-                "max_steps": 320,
-                "no_enemies": True,
-                "threat_trigger_distance": 2,
-                "prog_actions": False,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-        }
-    if command_name == "train-meta-no-enemies":
-        return {
-            "defaults": {},
-            "gate b baseline": {
-                "episodes": 120,
-                "max_steps": 350,
-                "no_enemies": True,
-                "meta_epsilon_start": 0.6,
-                "meta_epsilon_end": 0.05,
-                "meta_epsilon_decay_steps": 5000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-            "quick tune": {
-                "episodes": 60,
-                "max_steps": 280,
-                "no_enemies": True,
-                "meta_learning_rate": 0.0005,
-                "meta_epsilon_decay_steps": 3000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-            "beta efficient warmstart": {
-                "episodes": 120,
-                "max_steps": 320,
-                "no_enemies": True,
-                "meta_learning_rate": 0.0005,
-                "meta_epsilon_decay_steps": 3000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "run_tag": "hybrid-meta-beta-efficient",
-            },
-            "gamma logic rerun": {
-                "episodes": 120,
-                "max_steps": 350,
-                "no_enemies": True,
-                "meta_gamma": 0.99,
-                "meta_learning_rate": 0.001,
-                "meta_epsilon_start": 0.6,
-                "meta_epsilon_end": 0.05,
-                "meta_epsilon_decay_steps": 5000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "run_tag": "hybrid-meta-gamma-fixedlogic",
-            },
-            "efficient anti-churn": {
-                "episodes": 120,
-                "max_steps": 320,
-                "no_enemies": True,
-                "meta_learning_rate": 0.0005,
-                "meta_epsilon_decay_steps": 3000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "run_tag": "hybrid-meta-efficient-fixedlogic",
-            },
-            "meta ack sweep balanced": {
-                "episodes": 30,
-                "max_steps": 320,
-                "no_enemies": True,
-                "meta_learning_rate": 0.0005,
-                "meta_epsilon_decay_steps": 3000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "post_action_delay": 0.03,
-                "action_ack_timeout": 0.50,
-                "action_ack_poll_interval": 0.02,
-                "action_ack_backoff_max_level": 0,
-                "run_tag": "hybrid-meta-ack-balanced",
-            },
-            "meta ack sweep conservative": {
-                "episodes": 30,
-                "max_steps": 320,
-                "no_enemies": True,
-                "meta_learning_rate": 0.0005,
-                "meta_epsilon_decay_steps": 3000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "post_action_delay": 0.05,
-                "action_ack_timeout": 0.70,
-                "action_ack_poll_interval": 0.02,
-                "action_ack_backoff_max_level": 0,
-                "run_tag": "hybrid-meta-ack-conservative",
-            },
-            "meta ack sweep fast poll": {
-                "episodes": 30,
-                "max_steps": 320,
-                "no_enemies": True,
-                "meta_learning_rate": 0.0005,
-                "meta_epsilon_decay_steps": 3000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "post_action_delay": 0.02,
-                "action_ack_timeout": 0.50,
-                "action_ack_poll_interval": 0.01,
-                "action_ack_backoff_max_level": 0,
-                "run_tag": "hybrid-meta-ack-fastpoll",
-            },
-            "beta efficient conservative ack": {
-                "episodes": 120,
-                "max_steps": 320,
-                "no_enemies": True,
-                "meta_learning_rate": 0.0005,
-                "meta_epsilon_decay_steps": 3000,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "post_action_delay": 0.05,
-                "action_ack_timeout": 0.70,
-                "action_ack_poll_interval": 0.02,
-                "action_ack_backoff_max_level": 0,
-                "run_tag": "hybrid-meta-beta-efficient-conservative-ack",
-            },
-        }
-    if command_name == "train-full-hierarchical":
-        return {
-            "defaults": {},
-            "gate c baseline": {
-                "episodes": 200,
-                "max_steps": 450,
-                "no_enemies": False,
-                "meta_freeze_episodes": 25,
-                "joint_finetune": True,
-                "threat_trigger_distance": 2,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-            "threat warmup heavy": {
-                "episodes": 240,
-                "max_steps": 450,
-                "no_enemies": False,
-                "meta_freeze_episodes": 60,
-                "joint_finetune": True,
-                "threat_learning_rate": 0.0007,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-            "beta full fixed meta": {
-                "episodes": 320,
-                "max_steps": 450,
-                "no_enemies": False,
-                "warmstart_checkpoint": _AUTO_LATEST_BETA_META_CHECKPOINT,
-                "meta_freeze_episodes": 0,
-                "joint_finetune": False,
-                "threat_learning_rate": 0.0007,
-                "threat_epsilon_start": 0.80,
-                "threat_epsilon_end": 0.05,
-                "threat_epsilon_decay_steps": 15000,
-                "threat_trigger_distance": 2,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "run_tag": "hybrid-full-beta-fixedmeta",
-            },
-            "beta full long warmup": {
-                "episodes": 320,
-                "max_steps": 450,
-                "no_enemies": False,
-                "warmstart_checkpoint": _AUTO_LATEST_BETA_META_CHECKPOINT,
-                "meta_freeze_episodes": 80,
-                "joint_finetune": True,
-                "threat_learning_rate": 0.0007,
-                "threat_epsilon_start": 0.80,
-                "threat_epsilon_end": 0.05,
-                "threat_epsilon_decay_steps": 15000,
-                "threat_trigger_distance": 2,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-                "run_tag": "hybrid-full-beta-longwarmup",
-            },
-        }
-    if command_name == "eval-hybrid":
-        return {
-            "defaults": {},
-            "eval quick": {
-                "episodes": 10,
-                "max_steps": 300,
-                "no_enemies": False,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-            "eval stress": {
-                "episodes": 25,
-                "max_steps": 500,
-                "no_enemies": False,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-            "beta verification": {
-                "episodes": 30,
-                "max_steps": 450,
-                "no_enemies": False,
-                "phase_lock_min_steps": 6,
-                "target_stall_release_steps": 4,
-            },
-        }
-    return {"defaults": {}}
-
-
-def _parse_saved_at_utc(value: object, *, fallback_path: Path) -> datetime:
-    if isinstance(value, str):
-        normalized = value.strip()
-        if normalized:
-            try:
-                parsed = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
-                if parsed.tzinfo is None:
-                    return parsed.replace(tzinfo=timezone.utc)
-                return parsed
-            except ValueError:
-                pass
-    return datetime.fromtimestamp(fallback_path.stat().st_mtime, tz=timezone.utc)
-
-
-def _is_completed_training_state(training_state: dict[str, object]) -> bool:
-    requested_raw = training_state.get("episodes_requested")
-    completed_raw = training_state.get("episodes_completed")
-    results_raw = training_state.get("results")
-    try:
-        requested = int(requested_raw) if requested_raw is not None else 0
-    except (TypeError, ValueError):
-        requested = 0
-    try:
-        completed = int(completed_raw) if completed_raw is not None else 0
-    except (TypeError, ValueError):
-        completed = 0
-    if requested <= 0 and isinstance(results_raw, list):
-        requested = len(results_raw)
-    if completed <= 0 and isinstance(results_raw, list):
-        completed = len(results_raw)
-    return requested > 0 and completed >= requested
+    return _run_hybrid_preset_overrides_impl(command_name=command_name)
 
 
 def _latest_completed_meta_checkpoint(*, checkpoint_root: Path | None = None) -> Path:
-    resolved_root = checkpoint_root or _HYBRID_CHECKPOINT_DIR
-    if not resolved_root.exists():
-        raise ValueError(
-            f"No completed train-meta-no-enemies hybrid checkpoints found under {resolved_root}."
-        )
-    candidates: list[tuple[datetime, Path, bool]] = []
-    for child in resolved_root.iterdir():
-        if not child.is_dir():
-            continue
-        config_path = child / "hybrid_config.json"
-        training_state_path = child / "training_state.json"
-        if not config_path.exists() or not training_state_path.exists():
-            continue
-        try:
-            config = json.loads(config_path.read_text(encoding="utf-8"))
-            training_state = json.loads(training_state_path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
-            continue
-        if not isinstance(config, dict) or not isinstance(training_state, dict):
-            continue
-        if str(config.get("command") or "").strip() != "train-meta-no-enemies":
-            continue
-        if not _is_completed_training_state(training_state):
-            continue
-        saved_at = _parse_saved_at_utc(training_state.get("saved_at_utc"), fallback_path=child)
-        candidates.append((saved_at, child, "beta" in child.name.lower()))
-
-    if not candidates:
-        raise ValueError(
-            f"No completed train-meta-no-enemies hybrid checkpoints found under {resolved_root}."
-        )
-
-    beta_candidates = [item for item in candidates if item[2]]
-    selected_pool = beta_candidates or candidates
-    _saved_at, selected_path, _is_beta = max(selected_pool, key=lambda item: (item[0], item[1].name))
-    return selected_path
+    return _latest_completed_meta_checkpoint_impl(
+        checkpoint_root=checkpoint_root or _HYBRID_CHECKPOINT_DIR
+    )
 
 
 def _resolve_preset_overrides(*, overrides: dict[str, object]) -> dict[str, object]:
-    resolved: dict[str, object] = {}
-    latest_meta_checkpoint: str | None = None
-    for dest, value in overrides.items():
-        if value == _AUTO_LATEST_BETA_META_CHECKPOINT:
-            if latest_meta_checkpoint is None:
-                latest_meta_checkpoint = str(_latest_completed_meta_checkpoint())
-            resolved[dest] = latest_meta_checkpoint
-            continue
-        resolved[dest] = value
-    return resolved
+    return _resolve_preset_overrides_impl(
+        overrides=overrides,
+        latest_checkpoint_resolver=_latest_completed_meta_checkpoint,
+    )
+
+
+def _is_live_monitor_runner_module(module_name: str | None, module_args: tuple[str, ...]) -> bool:
+    return _is_live_monitor_runner_module_impl(module_name, module_args)
 
 
 def _validate_text_input(action: argparse.Action, *, value: str, field_name: str) -> None:
@@ -691,621 +307,6 @@ def _format_command(command: list[str]) -> str:
     if not command:
         return ""
     return subprocess.list2cmdline(command)
-
-
-def _parse_status_values(line: str) -> dict[str, str]:
-    return {key: value for key, value in _STATUS_KV_PATTERN.findall(line)}
-
-
-def _strip_textual_markup(text: str) -> str:
-    return _TEXTUAL_MARKUP_PATTERN.sub("", text)
-
-
-def _resolve_reward_metric_value(
-    *,
-    training_line: str,
-    reward_line: str,
-    previous_value: str = "-",
-) -> str:
-    status_values = _parse_status_values(training_line)
-    reward_value = status_values.get("reward")
-    if reward_value:
-        return reward_value
-    reward_values = _parse_status_values(reward_line)
-    reward_total = reward_values.get("total")
-    if reward_total:
-        return reward_total
-    return previous_value
-
-
-def _monitor_action_card_values(action_line: str) -> dict[str, str]:
-    action_values = _parse_status_values(action_line)
-    return {
-        "action": action_values.get("action", "-"),
-        "reason": action_values.get("reason", "-"),
-        "phase": action_values.get("phase", "-"),
-        "target": action_values.get("next_target", "-"),
-        "loss": action_values.get("loss", "-"),
-    }
-
-
-def _parse_next_available_actions(next_available_actions_line: str) -> tuple[str, ...]:
-    status_values = _parse_status_values(next_available_actions_line)
-    raw_actions = status_values.get("next_available_actions", "")
-    if not raw_actions or raw_actions == "-":
-        return ()
-    return tuple(
-        token
-        for token in (item.strip() for item in raw_actions.split(","))
-        if token and token != "-" and not token.startswith("...(")
-    )
-
-
-def _monitor_key_label_for_action(action_name: str) -> str | None:
-    return _MONITOR_ACTION_TO_KEY_LABEL.get(str(action_name).strip())
-
-
-def _status_key_label(key: str) -> str:
-    return str(key).replace("_", " ")
-
-
-def _format_reward_breakdown_tooltip(reward_line: str) -> str:
-    reward_values = _parse_status_values(reward_line)
-    if not reward_values:
-        return "Reward breakdown unavailable"
-    label_width = max(len(_status_key_label(key)) for key in reward_values)
-    lines = ["reward breakdown"]
-    for key, value in reward_values.items():
-        lines.append(f"{_status_key_label(key):<{label_width}}  {value}")
-    return "\n".join(lines)
-
-
-def _format_phase_breakdown_tooltip(action_line: str) -> str:
-    action_values = _monitor_action_card_values(action_line)
-    fields = (
-        ("Reason", action_values["reason"]),
-        ("Action", action_values["action"]),
-        ("Phase", action_values["phase"]),
-        ("Target", action_values["target"]),
-    )
-    if all(value == "-" for _, value in fields):
-        return "Phase detail unavailable"
-    label_width = max(len(label) for label, _ in fields)
-    lines = ["phase detail"]
-    for label, value in fields:
-        lines.append(f"{label:<{label_width}}  {value}")
-    return "\n".join(lines)
-
-
-def _parse_episode_progress(
-    raw_episode: str,
-    *,
-    fallback_total: int | None = None,
-) -> tuple[int | None, int | None]:
-    text = str(raw_episode).strip()
-    if not text:
-        return None, fallback_total
-
-    if "/" in text:
-        current_text, _, total_text = text.partition("/")
-        try:
-            current = int(current_text)
-            total = int(total_text)
-        except ValueError:
-            return None, fallback_total
-        return current if current >= 1 else None, total if total >= 1 else fallback_total
-
-    try:
-        episode_number = int(text)
-        return episode_number if episode_number >= 1 else None, fallback_total
-    except ValueError:
-        pass
-
-    match = re.search(r"(\d+)$", text)
-    if match is None:
-        return None, fallback_total
-    episode_number = int(match.group(1))
-    return episode_number if episode_number >= 1 else None, fallback_total
-
-
-def _parse_step_value(raw_step: str) -> int | None:
-    text = str(raw_step).strip()
-    if not text:
-        return None
-    if "/" in text:
-        text, _, _ = text.partition("/")
-    try:
-        step = int(text)
-    except ValueError:
-        return None
-    return step if step >= 1 else None
-
-
-def _parse_bool_value(raw_value: str) -> bool | None:
-    text = str(raw_value).strip().lower()
-    if text in {"true", "1", "yes"}:
-        return True
-    if text in {"false", "0", "no"}:
-        return False
-    return None
-
-
-def _format_duration_seconds(total_seconds: float | None) -> str:
-    if total_seconds is None or total_seconds < 0:
-        return "-"
-
-    rounded = int(round(total_seconds))
-    if rounded <= 0:
-        return "0s"
-    hours, remainder = divmod(rounded, 3600)
-    minutes, seconds = divmod(remainder, 60)
-    if hours > 0:
-        return f"{hours}h {minutes:02d}m"
-    if minutes > 0:
-        return f"{minutes}m {seconds:02d}s"
-    return f"{seconds}s"
-
-
-def _estimate_epsilon_eta_seconds(
-    *,
-    current_epsilon: float | None,
-    epsilon_start: float | None,
-    epsilon_end: float | None,
-    epsilon_decay_steps: int | None,
-    seconds_per_step: float | None,
-) -> float | None:
-    if (
-        current_epsilon is None
-        or epsilon_start is None
-        or epsilon_end is None
-        or epsilon_decay_steps is None
-        or epsilon_decay_steps <= 0
-        or seconds_per_step is None
-        or seconds_per_step <= 0
-    ):
-        return None
-
-    if epsilon_start <= epsilon_end:
-        return 0.0 if current_epsilon <= epsilon_end else None
-
-    clamped = max(epsilon_end, min(epsilon_start, current_epsilon))
-    remaining_fraction = (clamped - epsilon_end) / (epsilon_start - epsilon_end)
-    remaining_steps = max(0.0, float(epsilon_decay_steps) * remaining_fraction)
-    return remaining_steps * seconds_per_step
-
-
-def _format_epsilon_progress_text(
-    *,
-    current_epsilon: float | None,
-    epsilon_end: float | None,
-) -> str:
-    if current_epsilon is None:
-        if epsilon_end is None:
-            return "-"
-        clamped_end = max(0.0, min(1.0, epsilon_end))
-        return f"end {clamped_end * 100.0:.1f}%"
-
-    clamped_current = max(0.0, min(1.0, current_epsilon))
-    current_text = f"{clamped_current * 100.0:.1f}%"
-    if epsilon_end is None:
-        return current_text
-    clamped_end = max(0.0, min(1.0, epsilon_end))
-    return f"{current_text} -> {clamped_end * 100.0:.1f}%"
-
-
-@dataclass(frozen=True)
-class _RunningPythonProcess:
-    pid: int
-    parent_pid: int | None
-    executable_name: str
-    command_line: str
-
-
-@dataclass(frozen=True)
-class _LiveMonitorSessionBinding:
-    runner_pid: int
-    runner_module: str
-    status_file: Path
-    control_file: Path | None
-    executable_name: str | None
-    source_pid: int
-    source_module: str
-
-
-def _split_windows_command_line(command_line: str) -> tuple[str, ...]:
-    text = str(command_line).strip()
-    if not text:
-        return ()
-
-    if os.name != "nt":
-        return tuple(token.strip('"') for token in shlex.split(text, posix=False))
-
-    shell32 = ctypes.WinDLL("shell32", use_last_error=True)
-    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-    shell32.CommandLineToArgvW.argtypes = [ctypes.c_wchar_p, ctypes.POINTER(ctypes.c_int)]
-    shell32.CommandLineToArgvW.restype = ctypes.POINTER(ctypes.c_wchar_p)
-    kernel32.LocalFree.argtypes = [ctypes.c_void_p]
-    kernel32.LocalFree.restype = ctypes.c_void_p
-
-    argc = ctypes.c_int(0)
-    argv_pointer = shell32.CommandLineToArgvW(text, ctypes.byref(argc))
-    if not argv_pointer:
-        return ()
-
-    try:
-        return tuple(str(argv_pointer[index]) for index in range(argc.value))
-    finally:
-        kernel32.LocalFree(ctypes.cast(argv_pointer, ctypes.c_void_p))
-
-
-def _normalize_cli_option_value(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip().strip('"')
-    return normalized or None
-
-
-def _extract_cli_option_value(arguments: tuple[str, ...], option_name: str) -> str | None:
-    for index, token in enumerate(arguments):
-        if token == option_name:
-            if index + 1 >= len(arguments):
-                return None
-            return _normalize_cli_option_value(arguments[index + 1])
-        if token.startswith(f"{option_name}="):
-            return _normalize_cli_option_value(token.partition("=")[2])
-    return None
-
-
-def _parse_module_invocation(arguments: tuple[str, ...]) -> tuple[str | None, tuple[str, ...]]:
-    for index, token in enumerate(arguments):
-        if token == "-m" and index + 1 < len(arguments):
-            return str(arguments[index + 1]), tuple(arguments[index + 2 :])
-    return (None, ())
-
-
-def _first_non_option_token(arguments: tuple[str, ...]) -> str | None:
-    for token in arguments:
-        if not str(token).startswith("-"):
-            return str(token)
-    return None
-
-
-def _is_live_monitor_runner_module(module_name: str | None, module_args: tuple[str, ...]) -> bool:
-    if module_name in _LIVE_MONITOR_RUNNER_MODULES:
-        return True
-    if module_name == "src.training.evaluate":
-        return _first_non_option_token(module_args) == "compare"
-    return False
-
-
-def _normalize_executable_name(value: str | None) -> str | None:
-    if value is None:
-        return None
-    normalized = str(value).strip()
-    if not normalized:
-        return None
-    return Path(normalized).name.lower()
-
-
-def _build_live_monitor_binding_for_runner(
-    *,
-    process: _RunningPythonProcess,
-    runner_module: str,
-    runner_args: tuple[str, ...],
-    children: tuple[_RunningPythonProcess, ...],
-    parsed_arguments_by_pid: dict[int, tuple[str | None, tuple[str, ...]]],
-    monitor_bindings_by_runner_pid: dict[int, tuple[_LiveMonitorSessionBinding, ...]],
-) -> _LiveMonitorSessionBinding | None:
-    executable_name = _extract_cli_option_value(runner_args, "--exe")
-    status_file_text = _extract_cli_option_value(runner_args, "--external-status-file")
-    control_file_text = _extract_cli_option_value(runner_args, "--external-control-file")
-    source_pid = process.pid
-    source_module = runner_module
-
-    if status_file_text is None:
-        declared_monitor_bindings = monitor_bindings_by_runner_pid.get(process.pid, ())
-        if declared_monitor_bindings:
-            selected_binding = _select_live_monitor_binding(
-                declared_monitor_bindings,
-                preferred_runner_pid=process.pid,
-                preferred_executable_name=executable_name,
-            )
-            if selected_binding is not None:
-                return _LiveMonitorSessionBinding(
-                    runner_pid=process.pid,
-                    runner_module=runner_module,
-                    status_file=selected_binding.status_file,
-                    control_file=selected_binding.control_file,
-                    executable_name=(executable_name or selected_binding.executable_name),
-                    source_pid=selected_binding.source_pid,
-                    source_module=selected_binding.source_module,
-                )
-
-        child_candidates: list[tuple[int, str, str | None, str | None]] = []
-        for child in children:
-            child_module, child_args = parsed_arguments_by_pid.get(child.pid, (None, ()))
-            if child_module != _LIVE_MONITOR_TUI_MODULE:
-                continue
-            child_status_file = _extract_cli_option_value(child_args, "--external-status-file")
-            if child_status_file is None:
-                continue
-            child_candidates.append(
-                (
-                    child.pid,
-                    child_status_file,
-                    _extract_cli_option_value(child_args, "--external-control-file"),
-                    _extract_cli_option_value(child_args, "--exe"),
-                )
-            )
-        if child_candidates:
-            child_candidates.sort(reverse=True)
-            source_pid, status_file_text, child_control_file, child_executable_name = child_candidates[0]
-            source_module = _LIVE_MONITOR_TUI_MODULE
-            if control_file_text is None:
-                control_file_text = child_control_file
-            if executable_name is None:
-                executable_name = child_executable_name
-
-    if status_file_text is None:
-        return None
-
-    return _LiveMonitorSessionBinding(
-        runner_pid=process.pid,
-        runner_module=runner_module,
-        status_file=Path(status_file_text),
-        control_file=(Path(control_file_text) if control_file_text else None),
-        executable_name=executable_name,
-        source_pid=source_pid,
-        source_module=source_module,
-    )
-
-
-def _load_live_monitor_binding_from_status_file(
-    *,
-    status_file: Path | None,
-    fallback_control_file: Path | None = None,
-) -> _LiveMonitorSessionBinding | None:
-    if status_file is None or not status_file.exists():
-        return None
-    try:
-        payload = json.loads(status_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-
-    try:
-        runner_pid = int(payload.get("runner_pid", 0))
-    except (TypeError, ValueError):
-        runner_pid = 0
-    if runner_pid <= 0:
-        return None
-
-    runner_module = str(payload.get("runner_module", "") or "").strip() or "unknown"
-    executable_name = _normalize_cli_option_value(
-        str(payload.get("runner_executable_name", "") or "")
-    )
-    control_file_text = _normalize_cli_option_value(
-        str(payload.get("runner_control_file", "") or "")
-    )
-    control_file = Path(control_file_text) if control_file_text else fallback_control_file
-    return _LiveMonitorSessionBinding(
-        runner_pid=runner_pid,
-        runner_module=runner_module,
-        status_file=status_file,
-        control_file=control_file,
-        executable_name=executable_name,
-        source_pid=runner_pid,
-        source_module=runner_module,
-    )
-
-
-def _load_active_runner_session_binding(
-    *,
-    registry_file: Path = ACTIVE_RUNNER_SESSION_FILE,
-) -> _LiveMonitorSessionBinding | None:
-    if not registry_file.exists():
-        return None
-    try:
-        payload = json.loads(registry_file.read_text(encoding="utf-8"))
-    except (OSError, ValueError, json.JSONDecodeError):
-        return None
-    if not isinstance(payload, dict):
-        return None
-    status_file_text = _normalize_cli_option_value(str(payload.get("status_file", "") or ""))
-    if status_file_text is None:
-        return None
-    status_file = Path(status_file_text)
-    if not status_file.exists():
-        return None
-    try:
-        runner_pid = int(payload.get("runner_pid", 0))
-    except (TypeError, ValueError):
-        runner_pid = 0
-    if runner_pid <= 0:
-        return None
-    control_file_text = _normalize_cli_option_value(str(payload.get("control_file", "") or ""))
-    runner_module = str(payload.get("runner_module", "") or "").strip() or "unknown"
-    executable_name = _normalize_cli_option_value(
-        str(payload.get("runner_executable_name", "") or "")
-    )
-    return _LiveMonitorSessionBinding(
-        runner_pid=runner_pid,
-        runner_module=runner_module,
-        status_file=status_file,
-        control_file=(Path(control_file_text) if control_file_text else None),
-        executable_name=executable_name,
-        source_pid=runner_pid,
-        source_module="active_registry",
-    )
-
-
-def _select_live_monitor_binding(
-    bindings: tuple[_LiveMonitorSessionBinding, ...],
-    *,
-    preferred_runner_pid: int | None = None,
-    preferred_executable_name: str | None = None,
-) -> _LiveMonitorSessionBinding | None:
-    if not bindings:
-        return None
-
-    preferred_executable_key = _normalize_executable_name(preferred_executable_name)
-
-    def _sort_key(binding: _LiveMonitorSessionBinding) -> tuple[int, int, int, int, int, int]:
-        executable_match = (
-            1
-            if preferred_executable_key is not None
-            and _normalize_executable_name(binding.executable_name) == preferred_executable_key
-            else 0
-        )
-        pid_match = 1 if preferred_runner_pid is not None and binding.runner_pid == preferred_runner_pid else 0
-        direct_binding = 1 if binding.source_module == binding.runner_module else 0
-        has_control_file = 1 if binding.control_file is not None else 0
-        return (
-            pid_match,
-            executable_match,
-            direct_binding,
-            has_control_file,
-            binding.runner_pid,
-            binding.source_pid,
-        )
-
-    return max(bindings, key=_sort_key)
-
-
-def _discover_live_monitor_session_binding(
-    processes: tuple[_RunningPythonProcess, ...],
-    *,
-    preferred_runner_pid: int | None = None,
-    preferred_executable_name: str | None = None,
-) -> _LiveMonitorSessionBinding | None:
-    if not processes:
-        return None
-
-    children_by_parent_pid: dict[int, list[_RunningPythonProcess]] = {}
-    parsed_arguments_by_pid: dict[int, tuple[str | None, tuple[str, ...]]] = {}
-    monitor_bindings_by_runner_pid: dict[int, list[_LiveMonitorSessionBinding]] = {}
-    for process in processes:
-        parsed_arguments = _parse_module_invocation(_split_windows_command_line(process.command_line))
-        parsed_arguments_by_pid[process.pid] = parsed_arguments
-        module_name, module_args = parsed_arguments
-        if module_name == _LIVE_MONITOR_TUI_MODULE:
-            runner_pid_text = _extract_cli_option_value(module_args, "--runner-pid")
-            status_file_text = _extract_cli_option_value(module_args, "--external-status-file")
-            if runner_pid_text is not None and status_file_text is not None:
-                try:
-                    declared_runner_pid = int(runner_pid_text)
-                except (TypeError, ValueError):
-                    declared_runner_pid = 0
-                if declared_runner_pid > 0:
-                    monitor_bindings_by_runner_pid.setdefault(declared_runner_pid, []).append(
-                        _LiveMonitorSessionBinding(
-                            runner_pid=declared_runner_pid,
-                            runner_module="unknown",
-                            status_file=Path(status_file_text),
-                            control_file=(
-                                Path(control_file_text)
-                                if (control_file_text := _extract_cli_option_value(
-                                    module_args, "--external-control-file"
-                                ))
-                                else None
-                            ),
-                            executable_name=_extract_cli_option_value(module_args, "--exe"),
-                            source_pid=process.pid,
-                            source_module=_LIVE_MONITOR_TUI_MODULE,
-                        )
-                    )
-        if process.parent_pid is not None:
-            children_by_parent_pid.setdefault(process.parent_pid, []).append(process)
-
-    bindings: list[_LiveMonitorSessionBinding] = []
-    for process in processes:
-        runner_module, runner_args = parsed_arguments_by_pid.get(process.pid, (None, ()))
-        if not _is_live_monitor_runner_module(runner_module, runner_args):
-            continue
-        if runner_module is None:
-            continue
-        binding = _build_live_monitor_binding_for_runner(
-            process=process,
-            runner_module=runner_module,
-            runner_args=runner_args,
-            children=tuple(children_by_parent_pid.get(process.pid, ())),
-            parsed_arguments_by_pid=parsed_arguments_by_pid,
-            monitor_bindings_by_runner_pid={
-                pid: tuple(candidate_bindings)
-                for pid, candidate_bindings in monitor_bindings_by_runner_pid.items()
-            },
-        )
-        if binding is not None:
-            bindings.append(binding)
-
-    return _select_live_monitor_binding(
-        tuple(bindings),
-        preferred_runner_pid=preferred_runner_pid,
-        preferred_executable_name=preferred_executable_name,
-    )
-
-
-def _list_running_python_processes() -> tuple[_RunningPythonProcess, ...]:
-    if os.name != "nt":
-        return ()
-
-    powershell_command = (
-        "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
-        "Get-CimInstance Win32_Process | "
-        "Where-Object { $_.CommandLine -and ($_.Name -match '^(python|pythonw|py)\\.exe$') } | "
-        "Select-Object ProcessId, ParentProcessId, Name, CommandLine | "
-        "ConvertTo-Json -Compress"
-    )
-    try:
-        completed = subprocess.run(
-            ["powershell.exe", "-NoProfile", "-Command", powershell_command],
-            capture_output=True,
-            check=False,
-            encoding="utf-8",
-            errors="replace",
-            text=True,
-            timeout=3.0,
-        )
-    except (OSError, subprocess.SubprocessError):
-        return ()
-
-    if completed.returncode != 0:
-        return ()
-    stdout_text = completed.stdout.strip()
-    if not stdout_text:
-        return ()
-
-    try:
-        payload = json.loads(stdout_text)
-    except (TypeError, ValueError, json.JSONDecodeError):
-        return ()
-
-    rows = payload if isinstance(payload, list) else [payload]
-    processes: list[_RunningPythonProcess] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        try:
-            pid = int(row.get("ProcessId"))
-        except (TypeError, ValueError):
-            continue
-        try:
-            parent_pid = int(row.get("ParentProcessId")) if row.get("ParentProcessId") is not None else None
-        except (TypeError, ValueError):
-            parent_pid = None
-        command_line = str(row.get("CommandLine") or "").strip()
-        if not command_line:
-            continue
-        processes.append(
-            _RunningPythonProcess(
-                pid=pid,
-                parent_pid=parent_pid,
-                executable_name=str(row.get("Name") or ""),
-                command_line=command_line,
-            )
-        )
-    return tuple(processes)
 
 
 @dataclass
@@ -1604,14 +605,7 @@ class _ArgForm(ttk.Frame):
                 initialdir=initial_dir,
                 filetypes=[("Executable", "*.exe"), ("All files", "*.*")],
             )
-        elif dest in {"checkpoint_a", "checkpoint_b"}:
-            path = filedialog.askopenfilename(
-                parent=self,
-                title="Select checkpoint",
-                initialdir=initial_dir,
-                filetypes=[("JSON", "*.json"), ("All files", "*.*")],
-            )
-        elif dest == "checkpoint" and self._profile_id == "hybrid-eval":
+        elif dest == "checkpoint":
             path = filedialog.askdirectory(
                 parent=self,
                 title="Select hybrid checkpoint directory",
@@ -1628,13 +622,6 @@ class _ArgForm(ttk.Frame):
                 parent=self,
                 title="Select checkpoint root directory",
                 initialdir=initial_dir,
-            )
-        elif dest == "checkpoint" and self._profile_id != "run-dqn":
-            path = filedialog.askopenfilename(
-                parent=self,
-                title="Select checkpoint",
-                initialdir=initial_dir,
-                filetypes=[("JSON", "*.json"), ("All files", "*.*")],
             )
         elif dest == "restore_save_file":
             path = filedialog.askopenfilename(
@@ -1695,10 +682,10 @@ class _ArgForm(ttk.Frame):
         return [sys.executable, *self._module_args, *cli_args]
 
 
-class DqnRunnerGui(tk.Tk):
+class HybridRunnerGui(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("868 DQN Launcher")
+        self.title("868 Hybrid Launcher")
         self.geometry("1210x830")
         self.minsize(980, 680)
         self.configure(background=_PALETTE["bg"])
@@ -1785,7 +772,7 @@ class DqnRunnerGui(tk.Tk):
         title.grid(row=0, column=0, sticky="w")
         subtitle = ttk.Label(
             hero,
-            text="Train, evaluate, compare, and launch from one surface with every CLI flag exposed.",
+            text="Train and evaluate the Hybrid stack from one surface with every CLI flag exposed.",
             style="HeroSubtitle.TLabel",
         )
         subtitle.grid(row=1, column=0, sticky="w", pady=(2, 0))
@@ -2070,24 +1057,13 @@ class DqnRunnerGui(tk.Tk):
         )
 
     def _build_profiles(self) -> None:
-        run_parser = dqn_policy_runner._build_parser()
         hybrid_parser = hybrid_runner._build_parser()
-        evaluate_parser = evaluate._build_parser()
         hybrid_movement_parser = _get_subparser(hybrid_parser, command_name="movement-test")
         hybrid_train_meta_parser = _get_subparser(hybrid_parser, command_name="train-meta-no-enemies")
         hybrid_train_full_parser = _get_subparser(hybrid_parser, command_name="train-full-hierarchical")
         hybrid_eval_parser = _get_subparser(hybrid_parser, command_name="eval-hybrid")
-        eval_run_parser = _get_subparser(evaluate_parser, command_name="run")
-        eval_compare_parser = _get_subparser(evaluate_parser, command_name="compare")
 
         profiles = (
-            (
-                "run-dqn",
-                "DQN Run (train/eval)",
-                run_parser,
-                ("-m", "src.env.dqn_policy_runner"),
-                _run_dqn_preset_overrides(),
-            ),
             (
                 "hybrid-movement",
                 "Hybrid Movement Test",
@@ -2115,20 +1091,6 @@ class DqnRunnerGui(tk.Tk):
                 hybrid_eval_parser,
                 ("-m", "src.hybrid.runner", "eval-hybrid"),
                 _run_hybrid_preset_overrides(command_name="eval-hybrid"),
-            ),
-            (
-                "eval-run",
-                "Evaluate Run",
-                eval_run_parser,
-                ("-m", "src.training.evaluate", "run"),
-                None,
-            ),
-            (
-                "eval-compare",
-                "Evaluate Compare",
-                eval_compare_parser,
-                ("-m", "src.training.evaluate", "compare"),
-                None,
             ),
         )
 
@@ -2438,14 +1400,7 @@ class DqnRunnerGui(tk.Tk):
         epsilon_end: float | None = None
         epsilon_decay_steps: int | None = None
 
-        if form.profile_id == "run-dqn":
-            is_train_mode = str(form.value_for_dest("mode") or "train").strip().lower() == "train"
-            if not is_train_mode:
-                return
-            epsilon_start = self._parse_float_or_none(form.value_for_dest("epsilon_start"))
-            epsilon_end = self._parse_float_or_none(form.value_for_dest("epsilon_end"))
-            epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("epsilon_decay_steps"))
-        elif form.profile_id in {"hybrid-train-meta", "hybrid-train-full"}:
+        if form.profile_id in {"hybrid-train-meta", "hybrid-train-full"}:
             epsilon_start = self._parse_float_or_none(form.value_for_dest("meta_epsilon_start"))
             epsilon_end = self._parse_float_or_none(form.value_for_dest("meta_epsilon_end"))
             epsilon_decay_steps = self._parse_int_or_none(form.value_for_dest("meta_epsilon_decay_steps"))
@@ -2494,17 +1449,15 @@ class DqnRunnerGui(tk.Tk):
             self._clear_monitor_files()
             self._reset_monitor_estimates()
             return command
-        is_dqn_runner = command[1:3] == ["-m", "src.env.dqn_policy_runner"]
         is_hybrid_runner = command[1:3] == ["-m", "src.hybrid.runner"]
-        is_eval_compare = command[1:4] == ["-m", "src.training.evaluate", "compare"]
-        if not is_dqn_runner and not is_hybrid_runner and not is_eval_compare:
+        if not is_hybrid_runner:
             self._clear_monitor_files()
             self._reset_monitor_estimates()
             return command
 
         self._clear_monitor_files()
         status_file = self._create_status_file()
-        control_file = self._create_control_file() if (is_dqn_runner or is_hybrid_runner) else None
+        control_file = self._create_control_file()
         self._set_monitor_files(
             status_file=status_file,
             control_file=control_file,
@@ -2531,10 +1484,10 @@ class DqnRunnerGui(tk.Tk):
                 continue
             filtered.append(token)
 
-        if is_dqn_runner or is_hybrid_runner or is_eval_compare:
+        if is_hybrid_runner:
             filtered.append("--no-tui")
         filtered.extend(["--external-status-file", str(status_file)])
-        if (is_dqn_runner or is_hybrid_runner) and control_file is not None:
+        if control_file is not None:
             filtered.extend(["--external-control-file", str(control_file)])
         return filtered
 
@@ -3582,7 +2535,7 @@ class DqnRunnerGui(tk.Tk):
 
 
 def main() -> None:
-    app = DqnRunnerGui()
+    app = HybridRunnerGui()
     app.mainloop()
 
 

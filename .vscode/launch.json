@@ -8,7 +8,7 @@
             "name": "GUI",
             "type": "debugpy",
             "request": "launch",
-            "program": "${workspaceFolder}/src/gui/dqn_runner_gui.py",
+            "program": "${workspaceFolder}/src/gui/hybrid_runner_gui.py",
             "console": "integratedTerminal"
         },
         {

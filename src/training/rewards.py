@@ -695,8 +695,6 @@ def compute_reward(
     if previous_siphons is not None and current_siphons is not None:
         siphons_collected = float(max(previous_siphons - current_siphons, 0))
 
-    previous_enemies = _count_live_enemies(previous_state)
-    current_enemies = _count_live_enemies(current_state)
     enemy_damage = _enemy_damage_delta(
         previous_state=previous_state,
         current_state=current_state,
