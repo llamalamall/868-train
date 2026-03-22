@@ -16,7 +16,7 @@ from src.env.runner_common import (
     resolve_restore_save_source_path,
     restore_selected_save_file,
 )
-from src.env.runner_tui import RunnerTuiSession
+from src.env.runner_monitor import RunnerMonitorSession
 from src.hybrid.astar_controller import AStarMovementController
 from src.hybrid.checkpoint import HybridCheckpointManager
 from src.hybrid.cli import (
@@ -283,14 +283,8 @@ def main() -> None:
         if victory_monitor_enabled:
             run_directory.mkdir(parents=True, exist_ok=True)
 
-    monitor_enabled = bool(args.tui) or bool(args.external_status_file)
-    effective_window_input = bool(args.window_input) or bool(args.step_through) or bool(args.tui)
-    if effective_window_input and not bool(args.window_input):
-        mode = "step-through" if bool(args.step_through) else "tui"
-        print(
-            f"{mode} enabled: using window-targeted input so actions still go to the game "
-            "while monitor window has focus."
-        )
+    monitor_enabled = bool(args.external_status_file)
+    effective_window_input = bool(args.window_input)
     if bool(args.no_enemies):
         print("no_enemies_mode_enabled\tenemy entities will be suppressed.")
     restore_save_source = resolve_restore_save_source_path(args)
@@ -328,18 +322,17 @@ def main() -> None:
 
     env: HybridLiveEnv | None = None
     victory_monitor_session: _VictoryMonitorProcess | None = None
-    tui = RunnerTuiSession(
+    monitor_session = RunnerMonitorSession(
         executable_name=str(args.exe),
         runner_module="src.hybrid.runner",
         enabled=monitor_enabled,
-        interval_seconds=float(args.tui_interval),
-        step_through=bool(args.step_through),
-        launch_monitor=bool(args.tui),
+        step_through=False,
+        launch_monitor=False,
         external_status_file=(str(args.external_status_file) if args.external_status_file else None),
         external_control_file=(str(args.external_control_file) if args.external_control_file else None),
     )
     try:
-        tui.start()
+        monitor_session.start()
         env = _build_hybrid_env(
             args,
             effective_window_input=effective_window_input,
@@ -473,7 +466,7 @@ def main() -> None:
                     use_threat=True,
                     explore_meta=True,
                     explore_threat=True,
-                    tui=tui,
+                    monitor_session=monitor_session,
                     monitor_enabled=monitor_enabled,
                     print_reward_breakdown=bool(args.print_reward_breakdown),
                     meta_phase_override_credit_mode=str(
@@ -498,7 +491,7 @@ def main() -> None:
                     use_threat=True,
                     explore_meta=True,
                     explore_threat=True,
-                    tui=tui,
+                    monitor_session=monitor_session,
                     monitor_enabled=monitor_enabled,
                     print_reward_breakdown=bool(args.print_reward_breakdown),
                     meta_phase_override_credit_mode=str(
@@ -520,7 +513,7 @@ def main() -> None:
                 use_threat=use_threat,
                 explore_meta=explore_meta,
                 explore_threat=explore_threat,
-                tui=tui,
+                monitor_session=monitor_session,
                 monitor_enabled=monitor_enabled,
                 print_reward_breakdown=bool(args.print_reward_breakdown),
                 meta_phase_override_credit_mode=str(
@@ -535,6 +528,11 @@ def main() -> None:
 
         if command in {"train-meta-no-enemies", "train-full-hierarchical"}:
             assert run_directory is not None
+            training_state_payload = _build_training_state_payload(
+                results=finalized,
+                episodes_requested=int(args.episodes),
+                max_steps=int(args.max_steps),
+            )
             bundle = HybridCheckpointManager.save_bundle(
                 run_directory=run_directory,
                 meta_controller=coordinator.meta_controller,
@@ -557,17 +555,26 @@ def main() -> None:
                         else None
                     ),
                 ),
-                training_state=_build_training_state_payload(
-                    results=finalized,
-                    episodes_requested=int(args.episodes),
-                    max_steps=int(args.max_steps),
-                ),
+                training_state=training_state_payload,
             )
             print(f"hybrid_checkpoint_saved\t{bundle.run_directory}")
+            if command == "train-meta-no-enemies":
+                best_pointer_path, best_run_directory = HybridCheckpointManager.update_best_meta_pointer(
+                    run_directory=bundle.run_directory,
+                    training_state=training_state_payload,
+                    pointer_path=HybridCheckpointManager.default_meta_best_pointer_path(
+                        checkpoint_root=Path(str(args.checkpoint_root))
+                    ),
+                )
+                print(
+                    "hybrid_meta_best\tpointer={pointer}\ttarget={target}".format(
+                        pointer=best_pointer_path,
+                        target=best_run_directory,
+                    )
+                )
     finally:
         if victory_monitor_session is not None:
             victory_monitor_session.close()
         if env is not None:
             env.close()
-        tui.close()
-
+        monitor_session.close()

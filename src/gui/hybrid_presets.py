@@ -8,8 +8,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
+from src.hybrid.checkpoint import HybridCheckpointManager
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
-HYBRID_CHECKPOINT_DIR = REPO_ROOT / "artifacts" / "hybrid"
+HYBRID_CHECKPOINT_DIR = REPO_ROOT / HybridCheckpointManager.HYBRID_ROOT
+HYBRID_META_CHECKPOINT_DIR = REPO_ROOT / HybridCheckpointManager.META_ROOT
+HYBRID_FULL_CHECKPOINT_DIR = REPO_ROOT / HybridCheckpointManager.FULL_ROOT
+HYBRID_META_BEST_POINTER = REPO_ROOT / HybridCheckpointManager.default_meta_best_pointer_path()
 APPDATA_GAME_SAVE_DIR = (
     Path(os.environ["APPDATA"]) / "868-hack"
     if os.environ.get("APPDATA")
@@ -288,7 +293,22 @@ def _is_completed_training_state(training_state: dict[str, object]) -> bool:
 
 
 def latest_completed_meta_checkpoint(*, checkpoint_root: Path | None = None) -> Path:
-    resolved_root = checkpoint_root or HYBRID_CHECKPOINT_DIR
+    if checkpoint_root is None and HYBRID_META_BEST_POINTER.exists():
+        try:
+            resolved_pointer = HybridCheckpointManager.resolve_checkpoint_reference(
+                run_directory=HYBRID_META_BEST_POINTER,
+                label="Hybrid meta best pointer",
+            )
+            HybridCheckpointManager.validate_bundle_directory(
+                run_directory=resolved_pointer,
+                required_files=HybridCheckpointManager.WARMSTART_REQUIRED_FILES,
+                label="Hybrid meta best checkpoint",
+            )
+            return resolved_pointer
+        except (FileNotFoundError, NotADirectoryError, OSError, ValueError):
+            pass
+
+    resolved_root = checkpoint_root or HYBRID_META_CHECKPOINT_DIR
     if not resolved_root.exists():
         raise ValueError(
             f"No completed train-meta-no-enemies hybrid checkpoints found under {resolved_root}."

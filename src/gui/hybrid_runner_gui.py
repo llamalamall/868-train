@@ -22,6 +22,7 @@ from typing import Callable
 from src.gui.hybrid_presets import (
     AUTO_LATEST_BETA_META_CHECKPOINT as _PRESET_AUTO_LATEST_BETA_META_CHECKPOINT,
     HYBRID_CHECKPOINT_DIR as _PRESET_HYBRID_CHECKPOINT_DIR,
+    HYBRID_META_CHECKPOINT_DIR as _PRESET_HYBRID_META_CHECKPOINT_DIR,
     APPDATA_GAME_SAVE_DIR as _PRESET_APPDATA_GAME_SAVE_DIR,
     REPO_ROOT as _PRESET_REPO_ROOT,
     initial_browse_dir as _initial_browse_dir_impl,
@@ -30,15 +31,11 @@ from src.gui.hybrid_presets import (
     run_hybrid_preset_overrides as _run_hybrid_preset_overrides_impl,
 )
 from src.gui.monitor_binding import (
-    discover_live_monitor_session_binding as _discover_live_monitor_session_binding,
     estimate_epsilon_eta_seconds as _estimate_epsilon_eta_seconds,
     format_duration_seconds as _format_duration_seconds,
     format_epsilon_progress_text as _format_epsilon_progress_text,
     format_phase_breakdown_tooltip as _format_phase_breakdown_tooltip,
     format_reward_breakdown_tooltip as _format_reward_breakdown_tooltip,
-    is_live_monitor_runner_module as _is_live_monitor_runner_module_impl,
-    list_running_python_processes as _list_running_python_processes,
-    load_active_runner_session_binding as _load_active_runner_session_binding,
     load_live_monitor_binding_from_status_file as _load_live_monitor_binding_from_status_file,
     monitor_action_card_values as _monitor_action_card_values,
     monitor_key_label_for_action as _monitor_key_label_for_action,
@@ -72,6 +69,7 @@ _PATH_LIKE_DESTS = {
 _HIDDEN_GUI_DESTS = {"external_status_file", "external_control_file"}
 _MAX_FORM_COLUMNS = 5
 _HYBRID_CHECKPOINT_DIR = _PRESET_HYBRID_CHECKPOINT_DIR
+_HYBRID_META_CHECKPOINT_DIR = _PRESET_HYBRID_META_CHECKPOINT_DIR
 _APPDATA_GAME_SAVE_DIR = _PRESET_APPDATA_GAME_SAVE_DIR
 _TEXTUAL_MARKUP_SEGMENT_PATTERN = re.compile(r"\[([a-zA-Z0-9_]+)\](.*?)\[/\]", re.DOTALL)
 _REWARD_HISTORY_LIMIT = 500
@@ -273,9 +271,9 @@ def _run_hybrid_preset_overrides(*, command_name: str) -> dict[str, dict[str, ob
 
 
 def _latest_completed_meta_checkpoint(*, checkpoint_root: Path | None = None) -> Path:
-    return _latest_completed_meta_checkpoint_impl(
-        checkpoint_root=checkpoint_root or _HYBRID_CHECKPOINT_DIR
-    )
+    if checkpoint_root is None:
+        return _latest_completed_meta_checkpoint_impl()
+    return _latest_completed_meta_checkpoint_impl(checkpoint_root=checkpoint_root)
 
 
 def _resolve_preset_overrides(*, overrides: dict[str, object]) -> dict[str, object]:
@@ -283,10 +281,6 @@ def _resolve_preset_overrides(*, overrides: dict[str, object]) -> dict[str, obje
         overrides=overrides,
         latest_checkpoint_resolver=_latest_completed_meta_checkpoint,
     )
-
-
-def _is_live_monitor_runner_module(module_name: str | None, module_args: tuple[str, ...]) -> bool:
-    return _is_live_monitor_runner_module_impl(module_name, module_args)
 
 
 def _validate_text_input(action: argparse.Action, *, value: str, field_name: str) -> None:
@@ -1480,12 +1474,8 @@ class HybridRunnerGui(tk.Tk):
             if token == "--external-control-file":
                 skip_next = index + 1 < len(command)
                 continue
-            if token in {"--tui", "--no-tui"}:
-                continue
             filtered.append(token)
 
-        if is_hybrid_runner:
-            filtered.append("--no-tui")
         filtered.extend(["--external-status-file", str(status_file)])
         if control_file is not None:
             filtered.extend(["--external-control-file", str(control_file)])
@@ -1566,31 +1556,7 @@ class HybridRunnerGui(tk.Tk):
         self._hide_reward_tooltip(force=True)
         self._hide_phase_tooltip(force=True)
 
-    def _ensure_runner_monitor_session_bound(self, *, executable_name: str) -> None:
-        if not self._owns_external_status_file:
-            active_registry_binding = _load_active_runner_session_binding()
-            if active_registry_binding is not None:
-                self._runner_monitor_pid = active_registry_binding.runner_pid
-                self._runner_monitor_status.set(
-                    "runner_session=attached pid={pid} module={module} via=registry".format(
-                        pid=active_registry_binding.runner_pid,
-                        module=active_registry_binding.runner_module.removeprefix("src."),
-                    )
-                )
-                if (
-                    self._external_status_file == active_registry_binding.status_file
-                    and self._external_control_file == active_registry_binding.control_file
-                ):
-                    return
-                self._set_monitor_files(
-                    status_file=active_registry_binding.status_file,
-                    control_file=active_registry_binding.control_file,
-                    owns_status_file=False,
-                    owns_control_file=False,
-                )
-                self._reset_live_monitor_display(training_line="training=attaching")
-                return
-
+    def _ensure_runner_monitor_session_bound(self) -> None:
         status_file_binding = _load_live_monitor_binding_from_status_file(
             status_file=self._external_status_file,
             fallback_control_file=self._external_control_file,
@@ -1628,39 +1594,8 @@ class HybridRunnerGui(tk.Tk):
             self._runner_monitor_status.set(f"runner_session=attached pid={current_process.pid} via=gui")
             return
 
-        binding = _discover_live_monitor_session_binding(
-            _list_running_python_processes(),
-            preferred_executable_name=executable_name,
-        )
-        if binding is None:
-            if self._external_status_file is None or not self._owns_external_status_file:
-                self._runner_monitor_pid = None
-                self._runner_monitor_status.set("runner_session=not_found")
-            return
-
-        self._runner_monitor_pid = binding.runner_pid
-        self._runner_monitor_status.set(
-            "runner_session=attached pid={pid} module={module} via={via}".format(
-                pid=binding.runner_pid,
-                module=binding.runner_module.removeprefix("src."),
-                via=("runner" if binding.source_module == binding.runner_module else "tui"),
-            )
-        )
-        if (
-            self._external_status_file == binding.status_file
-            and self._external_control_file == binding.control_file
-            and not self._owns_external_status_file
-            and not self._owns_external_control_file
-        ):
-            return
-
-        self._set_monitor_files(
-            status_file=binding.status_file,
-            control_file=binding.control_file,
-            owns_status_file=False,
-            owns_control_file=False,
-        )
-        self._reset_live_monitor_display(training_line="training=attaching")
+        self._runner_monitor_pid = None
+        self._runner_monitor_status.set("runner_session=not_bound")
 
     def _poll_external_status(self) -> None:
         now = time.monotonic()
@@ -1669,9 +1604,7 @@ class HybridRunnerGui(tk.Tk):
             and now - self._last_runner_monitor_bind_attempt_monotonic >= 1.0
         ):
             self._last_runner_monitor_bind_attempt_monotonic = now
-            self._ensure_runner_monitor_session_bound(
-                executable_name=self._resolve_monitor_executable_name()
-            )
+            self._ensure_runner_monitor_session_bound()
 
         status_file = self._external_status_file
         if status_file is not None and status_file.exists():
@@ -1680,16 +1613,6 @@ class HybridRunnerGui(tk.Tk):
             except (OSError, ValueError, json.JSONDecodeError):
                 payload = None
             if isinstance(payload, dict):
-                if not self._owns_external_status_file:
-                    active_registry_binding = _load_active_runner_session_binding()
-                    if active_registry_binding is not None:
-                        self._runner_monitor_pid = active_registry_binding.runner_pid
-                        self._runner_monitor_status.set(
-                            "runner_session=attached pid={pid} module={module} via=registry".format(
-                                pid=active_registry_binding.runner_pid,
-                                module=active_registry_binding.runner_module.removeprefix("src."),
-                            )
-                        )
                 binding = _load_live_monitor_binding_from_status_file(
                     status_file=status_file,
                     fallback_control_file=self._external_control_file,
@@ -1766,7 +1689,7 @@ class HybridRunnerGui(tk.Tk):
 
     def _ensure_state_monitor_started(self) -> None:
         executable_name = self._resolve_monitor_executable_name()
-        self._ensure_runner_monitor_session_bound(executable_name=executable_name)
+        self._ensure_runner_monitor_session_bound()
         if self._state_monitor is not None:
             return
         try:

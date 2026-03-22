@@ -70,18 +70,6 @@ def _add_common_runner_args(
         help="Use window-targeted input instead of global SendInput.",
     )
     parser.add_argument(
-        "--tui",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Launch live state monitor TUI in a separate window.",
-    )
-    parser.add_argument(
-        "--tui-interval",
-        type=float,
-        default=0.5,
-        help="Polling interval for live TUI (seconds).",
-    )
-    parser.add_argument(
         "--external-status-file",
         default=None,
         help="Optional JSON file path to receive status updates for GUI monitor mode.",
@@ -89,13 +77,7 @@ def _add_common_runner_args(
     parser.add_argument(
         "--external-control-file",
         default=None,
-        help="Optional JSON file path for pause/step/resume controls.",
-    )
-    parser.add_argument(
-        "--step-through",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Pause before each action and wait for monitor step token.",
+        help="Optional JSON file path for GUI pause/step/resume controls.",
     )
     parser.add_argument(
         "--step-timeout",
@@ -441,6 +423,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default_max_steps=350,
         default_no_enemies=True,
     )
+    train_meta.set_defaults(
+        checkpoint_root=str(HybridCheckpointManager.default_meta_checkpoint_root())
+    )
     _add_meta_model_args(train_meta)
     train_meta.add_argument(
         "--resume-checkpoint",
@@ -457,6 +442,9 @@ def _build_parser() -> argparse.ArgumentParser:
         default_episodes=200,
         default_max_steps=450,
         default_no_enemies=False,
+    )
+    train_full.set_defaults(
+        checkpoint_root=str(HybridCheckpointManager.default_full_checkpoint_root())
     )
     _add_meta_model_args(train_full)
     _add_threat_model_args(train_full)
@@ -530,8 +518,6 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
         parser.error("--target-stall-release-steps must be >= 0.")
     if int(getattr(args, "meta_reward_stagnation_grace_steps", 0)) < 0:
         parser.error("--meta-reward-stagnation-grace-steps must be >= 0.")
-    if bool(args.step_through) and not bool(args.tui):
-        parser.error("--step-through requires --tui.")
     restore_source = resolve_restore_save_source_path(args)
     if restore_source is not None:
         if not restore_source.exists():
@@ -572,6 +558,8 @@ def _validate_args(parser: argparse.ArgumentParser, args: argparse.Namespace) ->
                 label=option_name,
             )
         except (FileNotFoundError, NotADirectoryError, ValueError) as error:
+            
+            
             parser.error(str(error))
 
 
@@ -697,4 +685,3 @@ def _build_hybrid_env(
         no_enemies_mode=bool(args.no_enemies),
         pre_reset_hook=pre_reset_hook,
     )
-

@@ -11,7 +11,6 @@ from src.gui.hybrid_runner_gui import (
     _AUTO_LATEST_BETA_META_CHECKPOINT,
     _HYBRID_CHECKPOINT_DIR,
     _initial_browse_dir,
-    _is_live_monitor_runner_module,
     _latest_completed_meta_checkpoint,
     _monitor_action_card_values,
     _run_hybrid_preset_overrides,
@@ -71,21 +70,23 @@ def test_run_hybrid_presets_include_expected_profiles() -> None:
     assert "beta verification" in evaluate
 
 
-def test_latest_completed_meta_checkpoint_prefers_newest_completed_run(tmp_path: Path, monkeypatch) -> None:
+def test_latest_completed_meta_checkpoint_prefers_newest_completed_run(tmp_path: Path) -> None:
+    meta_root = tmp_path / "meta"
+    meta_root.mkdir()
     older = _write_hybrid_run(
-        tmp_path,
+        meta_root,
         name="20260314-03-hybrid-beta",
         command="train-meta-no-enemies",
         saved_at_utc="2026-03-14T03:00:00Z",
     )
     newer = _write_hybrid_run(
-        tmp_path,
+        meta_root,
         name="20260314-07-hybrid-beta",
         command="train-meta-no-enemies",
         saved_at_utc="2026-03-14T07:00:00Z",
     )
     _write_hybrid_run(
-        tmp_path,
+        meta_root,
         name="20260314-08-hybrid-incomplete",
         command="train-meta-no-enemies",
         saved_at_utc="2026-03-14T08:00:00Z",
@@ -93,17 +94,13 @@ def test_latest_completed_meta_checkpoint_prefers_newest_completed_run(tmp_path:
         episodes_completed=10,
     )
 
-    monkeypatch.setattr("src.gui.hybrid_runner_gui._HYBRID_CHECKPOINT_DIR", tmp_path)
-
-    assert _latest_completed_meta_checkpoint() == newer
+    assert _latest_completed_meta_checkpoint(checkpoint_root=meta_root) == newer
     assert older != newer
 
 
-def test_latest_completed_meta_checkpoint_raises_when_none_found(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setattr("src.gui.hybrid_runner_gui._HYBRID_CHECKPOINT_DIR", tmp_path)
-
+def test_latest_completed_meta_checkpoint_raises_when_none_found(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="No completed train-meta-no-enemies hybrid checkpoints found"):
-        _latest_completed_meta_checkpoint()
+        _latest_completed_meta_checkpoint(checkpoint_root=tmp_path / "meta")
 
 
 def test_hybrid_full_presets_use_auto_latest_beta_meta_checkpoint() -> None:
@@ -123,8 +120,3 @@ def test_monitor_action_card_values_cover_hybrid_payload() -> None:
         "target": "(3,4)",
         "loss": "-",
     }
-
-
-def test_is_live_monitor_runner_module_accepts_hybrid_runner() -> None:
-    assert _is_live_monitor_runner_module("src.hybrid.runner", ("movement-test",)) is True
-    assert _is_live_monitor_runner_module("src.memory.state_monitor_tui", ()) is False

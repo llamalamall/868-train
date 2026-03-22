@@ -21,9 +21,11 @@ from src.env.random_policy_runner import (
     _build_reward_fn,
     format_reward_breakdown_line,
 )
-from src.env.runner_tui import RunnerTuiSession
+from src.env.runner_monitor import RunnerMonitorSession
 from src.training.rollouts import run_agent_policy
 from src.training.rewards import RewardWeights
+
+_build_action_config = build_action_config
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -85,24 +87,6 @@ def _build_parser() -> argparse.ArgumentParser:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Use window-targeted PostMessage input instead of global SendInput.",
-    )
-    parser.add_argument(
-        "--tui",
-        action=argparse.BooleanOptionalAction,
-        default=True,
-        help="Launch live state monitor TUI in a separate console window.",
-    )
-    parser.add_argument(
-        "--tui-interval",
-        type=float,
-        default=0.5,
-        help="Polling interval for the live TUI (seconds).",
-    )
-    parser.add_argument(
-        "--step-through",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Pause before each action and wait for Enter in the TUI to advance.",
     )
     parser.add_argument(
         "--step-timeout",
@@ -333,15 +317,7 @@ def main() -> None:
     parser = _build_parser()
     args = parser.parse_args()
     _validate_args(parser, args)
-    if bool(args.step_through) and not bool(args.tui):
-        parser.error("--step-through requires --tui.")
-    effective_window_input = bool(args.window_input) or bool(args.step_through) or bool(args.tui)
-    if effective_window_input and not bool(args.window_input):
-        mode = "step-through" if bool(args.step_through) else "tui"
-        print(
-            f"{mode} enabled: using window-targeted input so actions still go to the game "
-            "while the TUI window has focus."
-        )
+    effective_window_input = bool(args.window_input)
     if args.verbose_actions:
         logging.basicConfig(level=logging.INFO, format="%(message)s")
 
@@ -387,12 +363,12 @@ def main() -> None:
             time.sleep(restore_save_delay_seconds)
 
     env: GameEnv | None = None
-    tui = RunnerTuiSession(
+    monitor_session = RunnerMonitorSession(
         executable_name=str(args.exe),
         runner_module="src.env.heuristic_policy_runner",
-        enabled=bool(args.tui),
-        interval_seconds=float(args.tui_interval),
-        step_through=bool(args.step_through),
+        enabled=False,
+        step_through=False,
+        launch_monitor=False,
     )
     try:
         env = GameEnv.from_live_process(
@@ -422,11 +398,11 @@ def main() -> None:
             ),
             reward_fn=reward_fn,
         )
-        tui.start()
+        monitor_session.start()
 
         def _on_step(event: dict[str, Any]) -> None:
-            tui.consume_manual_step_flag()
-            tui.update(
+            monitor_session.consume_manual_step_flag()
+            monitor_session.update(
                 training_line=(
                     "episode={episode} step={step} reward={reward:.3f} total={total:.3f} "
                     "done={done} terminal={terminal}".format(
@@ -446,7 +422,7 @@ def main() -> None:
             )
 
         def _on_before_step(event: dict[str, Any]) -> None:
-            tui.wait_for_step_gate(
+            monitor_session.wait_for_step_gate(
                 training_line=(
                     "episode={episode} step={step} total={total:.3f} waiting=step".format(
                         episode=event.get("episode_id"),
@@ -476,13 +452,13 @@ def main() -> None:
             episodes=args.episodes,
             max_steps_per_episode=args.max_steps,
             seed=args.seed,
-            before_step_callback=_on_before_step if bool(args.tui) else None,
-            step_callback=_on_step if bool(args.tui) else None,
+            before_step_callback=None,
+            step_callback=None,
         )
     finally:
         if env is not None:
             env.close()
-        tui.close()
+        monitor_session.close()
 
     print("episode_id\tsteps\tdone\ttotal_reward\tterminal_reason")
     for result in results:

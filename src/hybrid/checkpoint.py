@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,10 @@ class HybridCheckpointManager:
     """Save/load helper for the multi-file hybrid checkpoint format."""
 
     VERSION = 1
+    HYBRID_ROOT = Path("artifacts/hybrid")
+    META_ROOT = HYBRID_ROOT / "meta"
+    FULL_ROOT = HYBRID_ROOT / "full"
+    META_BEST_POINTER_FILE = "hybrid-meta-best"
     META_FILE = "meta_controller.pt"
     THREAT_FILE = "threat_drqn.pt"
     HYBRID_CONFIG_FILE = "hybrid_config.json"
@@ -41,6 +46,46 @@ class HybridCheckpointManager:
         HYBRID_CONFIG_FILE,
         TRAINING_STATE_FILE,
     )
+
+    @classmethod
+    def default_meta_checkpoint_root(cls) -> Path:
+        return cls.META_ROOT
+
+    @classmethod
+    def default_full_checkpoint_root(cls) -> Path:
+        return cls.FULL_ROOT
+
+    @classmethod
+    def default_meta_best_pointer_path(
+        cls,
+        *,
+        checkpoint_root: str | Path | None = None,
+    ) -> Path:
+        root = Path(checkpoint_root) if checkpoint_root is not None else cls.default_meta_checkpoint_root()
+        return root.parent / cls.META_BEST_POINTER_FILE
+
+    @classmethod
+    def resolve_checkpoint_reference(
+        cls,
+        *,
+        run_directory: str | Path,
+        label: str = "Hybrid checkpoint directory",
+    ) -> Path:
+        source_path = Path(run_directory)
+        if not source_path.exists() or source_path.is_dir():
+            return source_path
+        if not source_path.is_file():
+            return source_path
+        try:
+            reference_text = source_path.read_text(encoding="utf-8").strip()
+        except OSError as error:
+            raise OSError(f"Failed reading {label} pointer file: {source_path}") from error
+        if not reference_text:
+            raise ValueError(f"{label} pointer file is empty: {source_path}")
+        resolved_target = Path(reference_text)
+        if not resolved_target.is_absolute():
+            resolved_target = (source_path.parent / resolved_target).resolve()
+        return resolved_target
 
     @classmethod
     def resolve_required_paths(
@@ -64,7 +109,7 @@ class HybridCheckpointManager:
         required_files: tuple[str, ...] | None = None,
         label: str = "Hybrid checkpoint directory",
     ) -> Path:
-        source_dir = Path(run_directory)
+        source_dir = cls.resolve_checkpoint_reference(run_directory=run_directory, label=label)
         if not source_dir.exists():
             raise FileNotFoundError(f"{label} not found: {source_dir}")
         if not source_dir.is_dir():
@@ -124,6 +169,30 @@ class HybridCheckpointManager:
         )
 
     @classmethod
+    def update_best_meta_pointer(
+        cls,
+        *,
+        run_directory: str | Path,
+        training_state: dict[str, Any],
+        pointer_path: str | Path | None = None,
+    ) -> tuple[Path, Path]:
+        candidate_directory = Path(run_directory)
+        resolved_pointer_path = (
+            Path(pointer_path)
+            if pointer_path is not None
+            else cls.default_meta_best_pointer_path(checkpoint_root=candidate_directory.parent)
+        )
+        current_best_directory = cls._select_best_meta_directory(
+            candidate_directory=candidate_directory,
+            candidate_training_state=training_state,
+            pointer_path=resolved_pointer_path,
+        )
+        resolved_pointer_path.parent.mkdir(parents=True, exist_ok=True)
+        relative_target = os.path.relpath(current_best_directory, start=resolved_pointer_path.parent)
+        resolved_pointer_path.write_text(relative_target + "\n", encoding="utf-8")
+        return resolved_pointer_path, current_best_directory
+
+    @classmethod
     def load_bundle(
         cls,
         *,
@@ -170,3 +239,88 @@ class HybridCheckpointManager:
         if not isinstance(training_state, dict):
             raise ValueError("training_state.json must contain an object.")
         return (meta_controller, hybrid_config, training_state)
+
+    @classmethod
+    def _select_best_meta_directory(
+        cls,
+        *,
+        candidate_directory: Path,
+        candidate_training_state: dict[str, Any],
+        pointer_path: Path,
+    ) -> Path:
+        candidate_key = cls._meta_training_rank(
+            training_state=candidate_training_state,
+            run_directory=candidate_directory,
+        )
+        existing_directory, existing_training_state = cls._load_best_meta_candidate(pointer_path=pointer_path)
+        if existing_directory is None or existing_training_state is None:
+            return candidate_directory
+        existing_key = cls._meta_training_rank(
+            training_state=existing_training_state,
+            run_directory=existing_directory,
+        )
+        if candidate_key >= existing_key:
+            return candidate_directory
+        return existing_directory
+
+    @classmethod
+    def _load_best_meta_candidate(
+        cls,
+        *,
+        pointer_path: Path,
+    ) -> tuple[Path | None, dict[str, Any] | None]:
+        if not pointer_path.exists():
+            return (None, None)
+        try:
+            existing_directory = cls.resolve_checkpoint_reference(
+                run_directory=pointer_path,
+                label="Hybrid meta best pointer",
+            )
+            resolved_paths = cls.resolve_required_paths(run_directory=existing_directory)
+            training_state = json.loads(
+                resolved_paths[cls.TRAINING_STATE_FILE].read_text(encoding="utf-8")
+            )
+        except (OSError, ValueError, json.JSONDecodeError, FileNotFoundError, NotADirectoryError):
+            return (None, None)
+        if not isinstance(training_state, dict):
+            return (None, None)
+        return (existing_directory, training_state)
+
+    @classmethod
+    def _meta_training_rank(
+        cls,
+        *,
+        training_state: dict[str, Any],
+        run_directory: Path,
+    ) -> tuple[float, float, float, float, int]:
+        summary = training_state.get("summary")
+        if not isinstance(summary, dict):
+            summary = {}
+        non_death_terminal_rate = cls._coerce_float(summary.get("non_death_terminal_rate"))
+        avg_total_reward = cls._coerce_float(summary.get("avg_total_reward"))
+        done_rate = cls._coerce_float(summary.get("done_rate"))
+        unexpected_start_screen_rate = cls._coerce_float(summary.get("unexpected_start_screen_rate"))
+        return (
+            non_death_terminal_rate,
+            avg_total_reward,
+            done_rate,
+            -unexpected_start_screen_rate,
+            cls._run_directory_sort_key(run_directory),
+        )
+
+    @staticmethod
+    def _coerce_float(value: object) -> float:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+    @staticmethod
+    def _run_directory_sort_key(run_directory: Path) -> int:
+        digits = "".join(character for character in run_directory.name if character.isdigit())
+        if not digits:
+            return 0
+        try:
+            return int(digits)
+        except ValueError:
+            return 0

@@ -1,20 +1,13 @@
-"""Helpers for launching the live state-monitor TUI from policy runners."""
+"""Shared status/control-file session for GUI-runner monitoring."""
 
 from __future__ import annotations
 
 import json
 import os
 from pathlib import Path
-import subprocess
-import sys
 import tempfile
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from uuid import uuid4
-
-
-ACTIVE_RUNNER_SESSION_FILE = Path(tempfile.gettempdir()) / "868-active-runner-session.json"
 
 
 @dataclass(frozen=True)
@@ -26,8 +19,8 @@ class RunnerControlState:
 
 
 @dataclass
-class RunnerTuiSession:
-    """Manage one external monitor-TUI process and a shared status payload file."""
+class RunnerMonitorSession:
+    """Manage one shared runner-monitor status/control session."""
 
     executable_name: str
     runner_module: str | None = None
@@ -42,16 +35,14 @@ class RunnerTuiSession:
     _control_file_path: Path | None = field(default=None, init=False, repr=False)
     _owns_status_file: bool = field(default=False, init=False, repr=False)
     _owns_control_file: bool = field(default=False, init=False, repr=False)
-    _process: subprocess.Popen[bytes] | None = field(default=None, init=False, repr=False)
     _last_advance_counter: int = field(default=0, init=False, repr=False)
     _last_step_was_manual: bool = field(default=False, init=False, repr=False)
     _last_reward_line: str = field(default="", init=False, repr=False)
     _last_next_available_actions_line: str = field(default="", init=False, repr=False)
     _runner_pid: int = field(default=0, init=False, repr=False)
-    _session_id: str = field(default="", init=False, repr=False)
 
     def start(self) -> None:
-        if not self.enabled or self._process is not None:
+        if not self.enabled:
             return
 
         if self.external_status_file:
@@ -88,32 +79,10 @@ class RunnerTuiSession:
         self._last_reward_line = ""
         self._last_next_available_actions_line = ""
         self._runner_pid = os.getpid()
-        self._session_id = uuid4().hex
         self.update(
             training_line="training=initializing",
             action_line="action=idle reason=initializing",
         )
-
-        if self.launch_monitor:
-            command = [
-                sys.executable,
-                "-m",
-                "src.memory.state_monitor_tui",
-                "--exe",
-                self.executable_name,
-                "--runner-pid",
-                str(self._runner_pid),
-                "--interval",
-                str(self.interval_seconds),
-                "--fields",
-                self.fields_filter,
-                "--external-status-file",
-                str(self._status_file_path),
-                "--external-control-file",
-                str(self._control_file_path),
-            ]
-            creationflags = int(getattr(subprocess, "CREATE_NEW_CONSOLE", 0))
-            self._process = subprocess.Popen(command, creationflags=creationflags)
 
     def update(
         self,
@@ -152,7 +121,6 @@ class RunnerTuiSession:
                 ),
             },
         )
-        self._write_active_session_registry()
 
     def wait_for_step_gate(
         self,
@@ -191,8 +159,6 @@ class RunnerTuiSession:
                 self._last_advance_counter = control_state.advance_counter
                 self._last_step_was_manual = True
                 return
-            if self._process is not None and self._process.poll() is not None:
-                raise RuntimeError("TUI closed while waiting for step advance.")
             time.sleep(0.05)
 
     def wait_for_step_advance(
@@ -265,16 +231,6 @@ class RunnerTuiSession:
             staging_path.unlink(missing_ok=True)
 
     def close(self) -> None:
-        self._clear_active_session_registry()
-        if self._process is not None and self._process.poll() is None:
-            self._process.terminate()
-            try:
-                self._process.wait(timeout=2.0)
-            except subprocess.TimeoutExpired:
-                self._process.kill()
-                self._process.wait(timeout=2.0)
-        self._process = None
-
         if self._status_file_path is not None and self._owns_status_file:
             try:
                 self._status_file_path.unlink(missing_ok=True)
@@ -289,35 +245,3 @@ class RunnerTuiSession:
                 self._control_file_path = None
         else:
             self._control_file_path = None
-
-    def _write_active_session_registry(self) -> None:
-        if self._status_file_path is None:
-            return
-        timestamp = datetime.now(timezone.utc).isoformat()
-        self._write_json_payload(
-            path=ACTIVE_RUNNER_SESSION_FILE,
-            payload={
-                "session_id": self._session_id,
-                "updated_at_utc": timestamp,
-                "runner_pid": self._runner_pid,
-                "runner_module": str(self.runner_module or ""),
-                "runner_executable_name": str(self.executable_name),
-                "status_file": str(self._status_file_path),
-                "control_file": (
-                    str(self._control_file_path) if self._control_file_path is not None else ""
-                ),
-            },
-        )
-
-    def _clear_active_session_registry(self) -> None:
-        if not ACTIVE_RUNNER_SESSION_FILE.exists():
-            return
-        try:
-            payload = json.loads(ACTIVE_RUNNER_SESSION_FILE.read_text(encoding="utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError):
-            return
-        if not isinstance(payload, dict):
-            return
-        if str(payload.get("session_id", "")).strip() != self._session_id:
-            return
-        ACTIVE_RUNNER_SESSION_FILE.unlink(missing_ok=True)

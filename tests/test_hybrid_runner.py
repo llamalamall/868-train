@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from src.hybrid.checkpoint import HybridCheckpointManager
 from src.hybrid.rewards import HybridMetaRewardWeights, HybridRewardSuite, HybridThreatRewardWeights
 from src.hybrid.runner import (
     HybridEpisodeSummary,
@@ -267,10 +268,8 @@ def test_hybrid_parser_movement_defaults() -> None:
     assert args.episodes == 5
     assert args.max_steps == 250
     assert args.no_enemies is True
-    assert args.tui is True
     assert args.window_input is False
     assert args.focus_window is True
-    assert args.step_through is False
     assert args.game_tick_ms == 1
     assert args.post_action_delay == pytest.approx(0.01)
     assert args.disable_idle_frame_delay is True
@@ -331,6 +330,7 @@ def test_hybrid_parser_train_meta_defaults() -> None:
     assert args.phase_lock_min_steps == 6
     assert args.target_stall_release_steps == 4
     assert args.victory_monitor is True
+    assert args.checkpoint_root == str(HybridCheckpointManager.default_meta_checkpoint_root())
     assert args.restore_save_file is None
     assert args.restore_save_delay == pytest.approx(0.35)
 
@@ -356,6 +356,7 @@ def test_hybrid_parser_train_full_meta_reward_defaults() -> None:
     assert args.meta_reward_stagnation_grace_steps == 3
     assert args.meta_phase_override_credit_mode == "skip_overridden"
     assert args.victory_monitor is True
+    assert args.checkpoint_root == str(HybridCheckpointManager.default_full_checkpoint_root())
     assert args.restore_save_file is None
     assert args.restore_save_delay == pytest.approx(0.35)
 
@@ -905,7 +906,7 @@ def test_run_rollouts_does_not_add_threat_reward_when_threat_controller_is_disab
         use_threat=False,
         explore_meta=False,
         explore_threat=False,
-        tui=_null_tui,
+        monitor_session=_null_tui,
         monitor_enabled=False,
         print_reward_breakdown=False,
     )
@@ -937,7 +938,7 @@ def test_run_rollouts_skips_meta_updates_for_overridden_requested_phase(
         use_threat=False,
         explore_meta=False,
         explore_threat=False,
-        tui=_null_tui,
+        monitor_session=_null_tui,
         monitor_enabled=False,
         print_reward_breakdown=False,
         meta_phase_override_credit_mode="skip_overridden",

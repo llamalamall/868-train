@@ -96,9 +96,7 @@ def test_random_runner_parser_prog_actions_defaults_to_enabled() -> None:
     assert args.prog_actions is True
     assert args.launch_exe is True
     assert args.window_input is True
-    assert args.step_through is False
     assert args.require_non_terminal_reset is True
-    assert args.tui is True
     assert args.game_tick_ms == 16
     assert args.post_action_delay == 0.2
     assert args.wait_for_action_processing is True
@@ -116,9 +114,7 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
             "--no-prog-actions",
             "--no-launch-exe",
             "--no-window-input",
-            "--step-through",
             "--no-require-non-terminal-reset",
-            "--no-tui",
             "--game-tick-ms",
             "8",
             "--post-action-delay",
@@ -136,9 +132,7 @@ def test_random_runner_parser_accepts_prog_actions_toggle() -> None:
     assert args.prog_actions is False
     assert args.launch_exe is False
     assert args.window_input is False
-    assert args.step_through is True
     assert args.require_non_terminal_reset is False
-    assert args.tui is False
     assert args.game_tick_ms == 8
     assert args.post_action_delay == 0.3
     assert args.wait_for_action_processing is False

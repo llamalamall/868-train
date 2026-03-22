@@ -20,9 +20,7 @@ def test_heuristic_runner_parser_defaults() -> None:
     assert args.prog_actions is True
     assert args.launch_exe is True
     assert args.window_input is True
-    assert args.step_through is False
     assert args.require_non_terminal_reset is True
-    assert args.tui is True
     assert args.post_action_delay == 0.2
     assert args.wait_for_action_processing is True
     assert args.action_ack_timeout == 0.35
@@ -46,9 +44,7 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
             "--no-prog-actions",
             "--no-launch-exe",
             "--no-window-input",
-            "--step-through",
             "--no-require-non-terminal-reset",
-            "--no-tui",
             "--post-action-delay",
             "0.45",
             "--no-wait-for-action-processing",
@@ -76,9 +72,7 @@ def test_heuristic_runner_parser_accepts_config_overrides() -> None:
     assert args.prog_actions is False
     assert args.launch_exe is False
     assert args.window_input is False
-    assert args.step_through is True
     assert args.require_non_terminal_reset is False
-    assert args.tui is False
     assert args.post_action_delay == 0.45
     assert args.wait_for_action_processing is False
     assert args.action_ack_timeout == 1.4

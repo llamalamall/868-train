@@ -25,7 +25,6 @@ Bootstrap and monitor tools:
 python -m src.cli bootstrap
 python -m src.cli fingerprint -- --print-sha256 "C:\path\to\868-HACK.exe"
 python -m src.cli offset-smoke -- --iterations 20 --interval 0.5
-python -m src.cli state-monitor -- --interval 0.5
 python -m src.cli victory-monitor -- --pid <pid>
 ```
 
@@ -41,8 +40,8 @@ Hybrid workflows:
 ```powershell
 python -m src.cli run-hybrid movement-test --episodes 5 --max-steps 250
 python -m src.cli run-hybrid train-meta-no-enemies --episodes 120 --max-steps 350
-python -m src.cli run-hybrid train-full-hierarchical --warmstart-checkpoint artifacts/hybrid/<gate-b-run> --episodes 200 --max-steps 450
-python -m src.cli run-hybrid eval-hybrid --checkpoint artifacts/hybrid/<gate-c-run> --episodes 20
+python -m src.cli run-hybrid train-full-hierarchical --warmstart-checkpoint artifacts/hybrid/hybrid-meta-best --episodes 200 --max-steps 450
+python -m src.cli run-hybrid eval-hybrid --checkpoint artifacts/hybrid/full/<gate-c-run> --episodes 20
 ```
 
 Hybrid GUI:
@@ -53,7 +52,13 @@ python -m src.cli hybrid-gui
 
 ## Hybrid Checkpoints
 
-Hybrid runs save bundles under `artifacts/hybrid/<run-id>/` with:
+Hybrid training runs now split by default:
+
+- meta runs: `artifacts/hybrid/meta/<run-id>/`
+- full runs: `artifacts/hybrid/full/<run-id>/`
+- best meta pointer: `artifacts/hybrid/hybrid-meta-best`
+
+Each bundle contains:
 
 - `meta_controller.pt`
 - `threat_drqn.pt`
@@ -70,7 +75,6 @@ Available commands:
 - `bootstrap`
 - `fingerprint`
 - `offset-smoke`
-- `state-monitor`
 - `victory-monitor`
 - `run-random`
 - `run-heuristic`

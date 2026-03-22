@@ -9,7 +9,7 @@ from statistics import mean
 import time
 from typing import Any
 
-from src.env.runner_tui import RunnerTuiSession
+from src.env.runner_monitor import RunnerMonitorSession
 from src.hybrid.coordinator import HybridCoordinator
 from src.hybrid.env import HybridLiveEnv
 from src.hybrid.rewards import (
@@ -473,7 +473,7 @@ def _run_rollouts(
     use_threat: bool,
     explore_meta: bool,
     explore_threat: bool,
-    tui: RunnerTuiSession,
+    monitor_session: RunnerMonitorSession,
     monitor_enabled: bool,
     print_reward_breakdown: bool,
     meta_phase_override_credit_mode: str = "skip_overridden",
@@ -578,7 +578,7 @@ def _run_rollouts(
                 else None
             )
             if monitor_enabled:
-                tui.wait_for_step_gate(
+                monitor_session.wait_for_step_gate(
                     training_line=_format_monitor_training_line(
                         episode_id=episode_id,
                         step=steps + 1,
@@ -806,8 +806,8 @@ def _run_rollouts(
 
             next_available_actions = env.available_actions(next_state)
             if monitor_enabled:
-                tui.consume_manual_step_flag()
-                tui.update(
+                monitor_session.consume_manual_step_flag()
+                monitor_session.update(
                     training_line=_format_monitor_training_line(
                         episode_id=episode_id,
                         step=steps + 1,
@@ -900,4 +900,3 @@ def _run_rollouts(
             )
         )
     return tuple(results)
-

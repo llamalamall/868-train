@@ -94,3 +94,98 @@ def test_load_warmstart_meta_accepts_meta_only_bundle(
     assert meta_controller is loaded_controller
     assert hybrid_config["command"] == "train-meta-no-enemies"
     assert training_state["episodes_completed"] == 1
+
+
+def test_update_best_meta_pointer_prefers_higher_ranked_meta_run(tmp_path: Path) -> None:
+    pointer_path = tmp_path / "hybrid-meta-best"
+    weaker_run = tmp_path / "meta" / "20260321-01-weaker"
+    stronger_run = tmp_path / "meta" / "20260321-02-stronger"
+    weaker_run.mkdir(parents=True)
+    stronger_run.mkdir(parents=True)
+    (weaker_run / "training_state.json").write_text(
+        json.dumps(
+            {
+                "summary": {
+                    "non_death_terminal_rate": 0.10,
+                    "avg_total_reward": 5.0,
+                    "done_rate": 0.10,
+                    "unexpected_start_screen_rate": 0.20,
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    resolved_pointer, resolved_target = HybridCheckpointManager.update_best_meta_pointer(
+        run_directory=weaker_run,
+        training_state={
+            "summary": {
+                "non_death_terminal_rate": 0.10,
+                "avg_total_reward": 5.0,
+                "done_rate": 0.10,
+                "unexpected_start_screen_rate": 0.20,
+            }
+        },
+        pointer_path=pointer_path,
+    )
+
+    assert resolved_pointer == pointer_path
+    assert resolved_target == weaker_run
+
+    stronger_state = {
+        "summary": {
+            "non_death_terminal_rate": 0.80,
+            "avg_total_reward": 12.0,
+            "done_rate": 0.90,
+            "unexpected_start_screen_rate": 0.00,
+        }
+    }
+    (stronger_run / "training_state.json").write_text(
+        json.dumps(stronger_state),
+        encoding="utf-8",
+    )
+
+    resolved_pointer, resolved_target = HybridCheckpointManager.update_best_meta_pointer(
+        run_directory=stronger_run,
+        training_state=stronger_state,
+        pointer_path=pointer_path,
+    )
+
+    assert resolved_pointer == pointer_path
+    assert resolved_target == stronger_run
+    assert HybridCheckpointManager.resolve_checkpoint_reference(run_directory=pointer_path) == stronger_run.resolve()
+
+
+def test_load_warmstart_meta_accepts_pointer_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    run_directory = tmp_path / "meta" / "best-run"
+    run_directory.mkdir(parents=True)
+    (run_directory / "meta_controller.pt").write_text("meta", encoding="utf-8")
+    (run_directory / "hybrid_config.json").write_text(
+        json.dumps({"version": 1, "command": "train-meta-no-enemies"}),
+        encoding="utf-8",
+    )
+    (run_directory / "training_state.json").write_text(
+        json.dumps({"version": 1, "episodes_requested": 1, "episodes_completed": 1}),
+        encoding="utf-8",
+    )
+    pointer_path = tmp_path / "hybrid-meta-best"
+    pointer_path.write_text(
+        str(run_directory.relative_to(pointer_path.parent)),
+        encoding="utf-8",
+    )
+    loaded_controller = object()
+    monkeypatch.setattr(
+        "src.hybrid.checkpoint.MetaControllerDQN.load",
+        lambda path: loaded_controller,
+    )
+
+    meta_controller, hybrid_config, training_state = HybridCheckpointManager.load_warmstart_meta(
+        run_directory=pointer_path
+    )
+
+    assert meta_controller is loaded_controller
+    assert hybrid_config["command"] == "train-meta-no-enemies"
+    assert training_state["episodes_completed"] == 1
